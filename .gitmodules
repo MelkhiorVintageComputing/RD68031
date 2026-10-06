@@ -1,0 +1,18 @@
+[submodule "Inputs/doc/MC68030_Doc_More_Readable"]
+	path = Inputs/doc/MC68030_Doc_More_Readable
+	url = https://github.com/MelkhiorVintageComputing/MC68030_Doc_More_Readable
+[submodule "Inputs/ref/AP68030"]
+	path = Inputs/ref/AP68030
+	url = https://github.com/apolkosnik/AP68030
+[submodule "Inputs/ref/winuae"]
+	path = Inputs/ref/winuae
+	url = https://github.com/tonioni/WinUAE
+	shallow = true
+[submodule "Inputs/ref/hatari"]
+	path = Inputs/ref/hatari
+	url = https://github.com/hatari/hatari
+	shallow = true
+[submodule "Inputs/ref/mame"]
+	path = Inputs/ref/mame
+	url = https://github.com/mamedev/mame
+	shallow = true

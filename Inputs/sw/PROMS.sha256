@@ -1,0 +1,8 @@
+# The Sun-3/80 boot PROM images Inputs/ref/PROMs/ must hold (not committed: Sun firmware,
+# supplied by the user). Check with: sha256sum -c Inputs/sw/PROMS.sha256
+e5afc4ade5089a195ac23ee519d5a17e6e91efa893fa15e35119a2038e863bed  Inputs/ref/PROMs/sun3_80_525_1041_05_sus.bin
+b1cea63957af9622601d2cc81b658fb0a44f8691ab0b576291f1b231c4aa4ca0  Inputs/ref/PROMs/sun3_80_525_1041_07.bin
+7f508cfae8972977c118f0739938942c782c690ccbd64dfc4cf5b42f9bd40743  Inputs/ref/PROMs/sun3_80_v2.9.2.bin
+b0cefc26c1e70f4f1d9b421d5f13c0346359da1f02fbdb1aefb18a2c79976aa2  Inputs/ref/PROMs/sun3_80_v3.0.2.bin
+b1cea63957af9622601d2cc81b658fb0a44f8691ab0b576291f1b231c4aa4ca0  Inputs/ref/PROMs/sun3_80_v3.0.3.bin
+e5afc4ade5089a195ac23ee519d5a17e6e91efa893fa15e35119a2038e863bed  Inputs/ref/PROMs/sun3_80_v3.0.bin
