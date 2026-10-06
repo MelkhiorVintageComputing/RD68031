@@ -2,14 +2,15 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 -- exception processing: M8.
+// RD68031 -- exception processing.
 //
 // Every frame shape this milestone builds, built and then unwound: the
 // four-word format $0, the six-word format $2, the throwaway format $1 that an
 // interrupt leaves on the interrupt stack when the master stack was active, and
-// the format error that an RTE raises when it does not recognise what it finds.
+// the format error that an RTE raises for every format code the MC68030 does
+// not have (UM 8.1.8, 8.4).
 //
-// The frames are checked as MEMORY, word by word against UM table 6-5, and not
+// The frames are checked as MEMORY, word by word against UM Table 8-6, and not
 // through the core's own registers. A frame that the core builds and reads back
 // consistently but writes in the wrong order would pass any check made the
 // other way, and a demand-paging handler is the thing that would find out.
@@ -50,7 +51,7 @@ module core_exc_tb;
   end
 
   // ------------------------------------------------------------------------
-  // The thing on the other end of an interrupt acknowledge -- UM 5.4.1 and
+  // The thing on the other end of an interrupt acknowledge -- UM 7.4.1 and
   // 6.1.9. Three answers are possible and all three are tested: a vector
   // number on the bus, AVEC for the autovector, and nothing at all, which the
   // bus error turns into the spurious interrupt.
@@ -86,7 +87,7 @@ module core_exc_tb;
     if (iack_now) begin
       case (iack_mode)
         // An eight-bit port, so the vector number arrives on D31-D24 --
-        // UM table 5-7, the only lane an eight-bit port ever drives.
+        // UM20 table 5-7, the only lane an eight-bit port ever drives.
         IACK_VECTOR: begin
           dsack_ext = 2'b10;
           oe_ext    = 1'b1;
@@ -98,7 +99,7 @@ module core_exc_tb;
     end
   end
 
-  // The level the core asked about, latched when it asks. UM figure 5-31 puts
+  // The level the core asked about, latched when it asks. UM20 figure 5-31 puts
   // it on A3-A1.
   // Triggered on the acknowledge ITSELF and not on the falling edge of AS that
   // makes it true: `iack_now` is a continuous assignment, so reading it inside
@@ -128,6 +129,15 @@ module core_exc_tb;
   int unsigned starts;
   int unsigned k;
   string       what;
+  // UM 8.4: the MC68030 has formats $0, $1, $2, $9, $A and $B. These are the
+  // other ten.
+  logic [3:0]  bad_fmt [0:9];
+  int          fi;
+  initial begin
+    bad_fmt[0] = 4'h3; bad_fmt[1] = 4'h4; bad_fmt[2] = 4'h5; bad_fmt[3] = 4'h6;
+    bad_fmt[4] = 4'h7; bad_fmt[5] = 4'h8; bad_fmt[6] = 4'hC; bad_fmt[7] = 4'hD;
+    bad_fmt[8] = 4'hE; bad_fmt[9] = 4'hF;
+  end
   initial starts = 0;
   always @(negedge as_n_o) if (rst_n) starts = starts + 1;
 
@@ -155,7 +165,7 @@ module core_exc_tb;
     poke_l(32'h0000_0004, CODE);
   endtask
 
-  // The three words every four-word frame has, UM table 6-5.
+  // The three words every four-word frame has, UM Table 8-6.
   task automatic check_f0(input logic [31:0] at, input logic [15:0] sr,
                           input logic [31:0] pc, input logic [3:0] fmt,
                           input logic [11:0] off, input string what);
@@ -168,7 +178,7 @@ module core_exc_tb;
     $display("core_exc_tb: the frames of M8, built and unwound");
 
     // ======================================================================
-    // Format $0 -- an illegal instruction, UM 6.1.5, vector 4.
+    // Format $0 -- an illegal instruction, UM 8.1.5, vector 4.
     //
     // Table 6-5 stacks the address of the instruction that caused it, so the
     // handler must step the stacked program counter itself or RTE returns to
@@ -199,7 +209,7 @@ module core_exc_tb;
     check(dut.u_seq.isp_q === ISP0, "illegal: RTE put the stack back");
 
     // ======================================================================
-    // Format $2 -- TRAPV, UM 6.1.8, vector 7. Six words: the next instruction
+    // Format $2 -- TRAPV, UM 8.1.4, vector 7. Six words: the next instruction
     // at +$02 and the one that trapped at +$08.
     // ======================================================================
     base_setup();
@@ -236,7 +246,7 @@ module core_exc_tb;
     check(dut.u_seq.dreg[0] === 32'h0000_0003, "TRAP #3: and returned");
 
     // ======================================================================
-    // Privilege violation -- UM 6.1.6, vector 8, format $0 and the faulting
+    // Privilege violation -- UM 8.1.6, vector 8, format $0 and the faulting
     // instruction. Getting to user mode at all is the other half of the test:
     // it is the only way the user stack pointer is ever the active one.
     // ======================================================================
@@ -255,41 +265,103 @@ module core_exc_tb;
     run_until(HAND + 2, 2000, reached);
     check(reached, "privilege: the handler runs");
     check(dut.u_seq.dreg[0] === 32'h0000_0004, "privilege: and only the handler");
-    // The frame is on the INTERRUPT stack, not the user one -- UM 6.1 step
+    // The frame is on the INTERRUPT stack, not the user one -- UM 8.1 step
     // three builds it on the active SUPERVISOR stack, whichever stack the
     // instruction that faulted was using.
     check_f0(ISP0 - 8, 16'h0000, CODE + 4, 4'h0, 12'h020, "privilege");
     check(dut.u_seq.usp_q === USP0, "privilege: the user stack is untouched");
 
     // ======================================================================
-    // Format error -- UM 6.1.12, vector 14. RTE reads a format word it does
-    // not recognise, and must leave the frame where it found it.
+    // Format error -- UM 8.1.8, vector 14, for every format code the MC68030
+    // does not have. UM 8.4: "the MC68030 provides six different stack
+    // frames" -- $0, $1, $2, $9, $A, $B -- and UM 8.1.8: "if any of the checks
+    // previously described determine that the format of the stacked data is
+    // improper, the instruction generates a format error exception. This
+    // exception saves a short format stack frame" -- Table 8-6's four-word
+    // one, with the RTE's own address -- "below the frame that it was
+    // attempting to use. In this way, the faulty stack frame remains intact"
+    // (UM 8.1.13).
     // ======================================================================
-    base_setup();
-    poke_l(32'h0000_0038, HAND);           // vector 14
-    poke_w(CODE + 0, 16'h4E73);            // RTE, on a frame we build by hand
-    poke_w(HAND + 0, 16'h7005);            // MOVEQ #5,D0
-    poke_w(HAND + 2, 16'h60FE);            // BRA *
-    // The stack pointer comes from $0 at reset, so a deposit made here would be
-    // overwritten by the reset exception a few clocks later. Point the vector
-    // at the hand-built frame instead.
-    poke_l(32'h0000_0000, ISP0 - 8);
-    reset_dut();
-    // A frame with format $7, which this part does not define.
-    poke_w(ISP0 - 8, 16'h2700);
-    poke_l(ISP0 - 6, CODE);
-    poke_w(ISP0 - 2, 16'h7000);            // format $7, vector offset 0
-    run_until(HAND + 2, 2000, reached);
-    check(reached, "format error: the handler runs");
-    check(dut.u_seq.dreg[0] === 32'h0000_0005, "format error: vector 14");
-    // UM 6.1.12: "the processor creates a format error exception stack frame on
-    // top of the stack frame it could not use", so the bad one survives below.
-    check(peek_w(ISP0 - 2) === 16'h7000,
-          "format error: the frame it could not use is still there");
-    check_f0(ISP0 - 16, 16'h2700, CODE, 4'h0, 12'h038, "format error");
+    for (fi = 0; fi < 10; fi++) begin
+      base_setup();
+      poke_l(32'h0000_0038, HAND);         // vector 14
+      poke_w(CODE + 0, 16'h4E73);          // RTE, on a frame we build by hand
+      poke_w(HAND + 0, 16'h7005);          // MOVEQ #5,D0
+      poke_w(HAND + 2, 16'h60FE);          // BRA *
+      // The stack pointer comes from $0 at reset, so a deposit made here would
+      // be overwritten by the reset exception a few clocks later. Point the
+      // vector at the hand-built frame instead.
+      poke_l(32'h0000_0000, ISP0 - 8);
+      reset_dut();
+      dut.u_seq.dreg[0] = 32'h0;
+      poke_w(ISP0 - 8, 16'h2700);
+      poke_l(ISP0 - 6, CODE + 32'h40);
+      poke_w(ISP0 - 2, {bad_fmt[fi], 12'h000});
+      what = $sformatf("format $%h", bad_fmt[fi]);
+      run_until(HAND + 2, 2000, reached);
+      check(reached, {what, ": RTE takes a format error -- UM 8.1.8"});
+      check(dut.u_seq.dreg[0] === 32'h0000_0005, {what, ": vector 14"});
+      check(peek_w(ISP0 - 2) === {bad_fmt[fi], 12'h000},
+            {what, ": the frame it could not use is still there -- UM 8.1.13"});
+      check(peek_l(ISP0 - 6) === CODE + 32'h40, {what, ": ... all of it"});
+      check_f0(ISP0 - 16, 16'h2700, CODE, 4'h0, 12'h038, what);
+      check(dut.u_seq.isp_q === ISP0 - 16, {what, ": a four-word frame -- UM Table 8-6"});
+    end
 
     // ======================================================================
-    // Trace -- UM 6.1.7, vector 9, format $2. T1 traces every instruction, and
+    // The other instruction exceptions, word by word -- UM Table 8-6.
+    //
+    //   format $0, the instruction itself    A-line (vector 10), F-line (11)
+    //   format $2, the next instruction,     zero divide (5), TRAPcc (7)
+    //   and the instruction at +$08
+    // ======================================================================
+    base_setup();
+    poke_l(32'h0000_0028, HAND);           // vector 10
+    poke_w(HAND, 16'h60FE);
+    poke_w(CODE + 0, 16'hA123);            // an A-line instruction
+    reset_dut();
+    run_until(HAND, 2000, reached);
+    check(reached, "A-line: the handler runs -- UM 8.1.5");
+    check_f0(ISP0 - 8, 16'h2700, CODE, 4'h0, 12'h028, "A-line");
+
+    base_setup();
+    poke_l(32'h0000_002C, HAND);           // vector 11
+    poke_w(HAND, 16'h60FE);
+    // CpID 4, type 110: never a coprocessor instruction (UM 10.5.2.2), so it
+    // is an F-line exception with no interface register access at all.
+    poke_w(CODE + 0, 16'hF980);
+    reset_dut();
+    run_until(HAND, 2000, reached);
+    check(reached, "F-line: the handler runs -- UM 8.1.5");
+    check_f0(ISP0 - 8, 16'h2700, CODE, 4'h0, 12'h02C, "F-line");
+
+    base_setup();
+    poke_l(32'h0000_0014, HAND);           // vector 5
+    poke_w(HAND, 16'h60FE);
+    poke_w(CODE + 0, 16'h80FC);            // DIVU.W #0,D0
+    poke_w(CODE + 2, 16'h0000);
+    poke_w(CODE + 4, 16'h60FE);
+    reset_dut();
+    run_until(HAND, 2000, reached);
+    check(reached, "zero divide: the handler runs -- UM 8.1.4");
+    check(peek_w(ISP0 - 12) >> 8 === 16'h0027, "zero divide: +$00 the status register's system byte");
+    check(peek_l(ISP0 - 10) === CODE + 4, "zero divide: +$02 the next instruction -- UM Table 8-6");
+    check(peek_w(ISP0 - 6) === 16'h2014, "zero divide: +$06 format $2, vector offset $014");
+    check(peek_l(ISP0 - 4) === CODE, "zero divide: +$08 the DIVU -- UM Table 8-6");
+
+    base_setup();
+    poke_l(32'h0000_001C, HAND);           // vector 7
+    poke_w(HAND, 16'h60FE);
+    poke_w(CODE + 0, 16'h50FC);            // TRAPT -- TRAPcc, always
+    poke_w(CODE + 2, 16'h60FE);
+    reset_dut();
+    run_until(HAND, 2000, reached);
+    check(reached, "TRAPcc: the handler runs -- UM 8.1.4");
+    check_f0(ISP0 - 12, 16'h2700, CODE + 2, 4'h2, 12'h01C, "TRAPcc");
+    check(peek_l(ISP0 - 4) === CODE, "TRAPcc: +$08 the TRAPT -- UM Table 8-6");
+
+    // ======================================================================
+    // Trace -- UM 8.1.7, vector 9, format $2. T1 traces every instruction, and
     // the frame carries the next instruction at +$02 and the traced one at
     // +$08.
     // ======================================================================
@@ -304,7 +376,7 @@ module core_exc_tb;
     reset_dut();
     run_until(HAND + 2, 2000, reached);
     check(reached, "trace: the handler runs");
-    // UM table 6-2 reads the trace bits at the START of an instruction, so the
+    // UM Table 8-3 reads the trace bits at the START of an instruction, so the
     // MOVE that turns tracing on is NOT itself traced -- the MOVEQ after it is
     // the first traced instruction, and D0 proves it ran before the trap.
     check_f0(ISP0 - 12, 16'h8700, CODE + 6, 4'h2, 12'h024, "trace");
@@ -316,13 +388,13 @@ module core_exc_tb;
 
 
     // ======================================================================
-    // An interrupt with a vector number -- UM 6.1.9 and 5.4.1. The acknowledge
+    // An interrupt with a vector number -- UM 8.1.9 and 5.4.1. The acknowledge
     // cycle runs in CPU space type $F with the level on A3-A1, and what comes
     // back on the bus is the vector number.
     // ======================================================================
     base_setup();
     poke_l(32'h0000_0100, HAND);           // vector 64
-    // The mask has to come down first: reset leaves it at 7, and UM 6.1.9
+    // The mask has to come down first: reset leaves it at 7, and UM 8.1.9
     // takes an interrupt only when the level is ABOVE the mask.
     poke_w(CODE + 0, 16'h46FC);            // MOVE #$2000,SR -- mask 0
     poke_w(CODE + 2, 16'h2000);
@@ -336,18 +408,18 @@ module core_exc_tb;
     check(reached, "interrupt: the handler runs");
     check(iack_level === 3'd5, "interrupt: the acknowledge asked about level 5");
     check_f0(ISP0 - 8, 16'h2000, CODE + 4, 4'h0, 12'h100, "interrupt");
-    // UM 6.1: "for the reset and interrupt exceptions, the processor also
+    // UM 8.1: "for the reset and interrupt exceptions, the processor also
     // updates the interrupt priority mask".
     check(dut.u_seq.sr_q[10:8] === 3'd5, "interrupt: the mask went up to 5");
     check(dut.u_seq.dreg[1] === 32'h0000_0021, "interrupt: and only the handler");
 
     // ======================================================================
     // The same, answered with AVEC: the autovector for the level, 24 + level
-    // -- UM table 6-1.
+    // -- UM Table 8-1.
     // ======================================================================
     base_setup();
     poke_l(32'h0000_0074, HAND);           // vector 29 = 24 + 5
-    // The mask has to come down first: reset leaves it at 7, and UM 6.1.9
+    // The mask has to come down first: reset leaves it at 7, and UM 8.1.9
     // takes an interrupt only when the level is ABOVE the mask.
     poke_w(CODE + 0, 16'h46FC);            // MOVE #$2000,SR -- mask 0
     poke_w(CODE + 2, 16'h2000);
@@ -363,13 +435,13 @@ module core_exc_tb;
     check(dut.u_seq.dreg[1] === 32'h0000_0022, "autovector: vector 24 + 5");
 
     // ======================================================================
-    // ... and with nothing at all. UM 6.1.9: "if an external device does not
+    // ... and with nothing at all. UM 8.1.9: "if an external device does not
     // respond ... the bus error signal should be asserted to terminate the
     // cycle ... the spurious interrupt vector number (24)".
     // ======================================================================
     base_setup();
     poke_l(32'h0000_0060, HAND);           // vector 24
-    // The mask has to come down first: reset leaves it at 7, and UM 6.1.9
+    // The mask has to come down first: reset leaves it at 7, and UM 8.1.9
     // takes an interrupt only when the level is ABOVE the mask.
     poke_w(CODE + 0, 16'h46FC);            // MOVE #$2000,SR -- mask 0
     poke_w(CODE + 2, 16'h2000);
@@ -385,7 +457,7 @@ module core_exc_tb;
     check(dut.u_seq.dreg[1] === 32'h0000_0023, "spurious: vector 24");
 
     // ======================================================================
-    // The M bit and the throwaway frame -- UM 6.1.9.
+    // The M bit and the throwaway frame -- UM 8.1.9.
     //
     //   "If the M-bit in the SR is set, the processor clears the M-bit and
     //    creates a throwaway exception stack frame on top of the interrupt
@@ -505,7 +577,7 @@ module core_exc_tb;
 
 
     // ======================================================================
-    // Trace on change of flow -- UM table 6-2, T1T0 = 01: "trace on change of
+    // Trace on change of flow -- UM Table 8-3, T1T0 = 01: "trace on change of
     // flow". The instruction that is not a change of flow is NOT traced, which
     // is the half of the mode a T1 test cannot see.
     // ======================================================================
@@ -533,7 +605,7 @@ module core_exc_tb;
 
     // ======================================================================
     // An interrupt taken at the boundary of the instruction that LOWERED the
-    // mask -- UM 6.1.9. The request stands from reset and is masked; the MOVE
+    // mask -- UM 8.1.9. The request stands from reset and is masked; the MOVE
     // admits it, and the instruction after the MOVE must not run first.
     // ======================================================================
     base_setup();
@@ -548,7 +620,7 @@ module core_exc_tb;
     iack_vec  = 8'd64;
     ipl_n_i   = ~3'd3;                     // standing before reset is released
     reset_dut();
-    // Reset leaves the mask at 7 -- UM 6.1.1 -- so a level 3 is not pending and
+    // Reset leaves the mask at 7 -- UM 8.1.1 -- so a level 3 is not pending and
     // the pin must say so.
     run_cycles(10);
     check(ipend_n_o === 1'b1, "mask: IPEND is negated while the mask covers it");
@@ -651,14 +723,23 @@ module core_exc_tb;
       run_until(HAND, 600, reached);
       what = $sformatf("CHK.%s with D0=%08h", lng ? "L" : "W", d0v);
       check(reached === trap, {what, trap ? ": traps" : ": does not trap"});
-      if (trap)
+      if (trap) begin
         check(dut.u_seq.sr_q[3] === nset, {what, nset ? ": sets N" : ": clears N"});
+        // UM Table 8-6: format $2, the next instruction, and the CHK at +$08.
+        // The condition codes other than N are undefined -- PRM 4.
+        check(peek_w(ISP0 - 12) >> 8 === 16'h0027, {what, ": +$00 the system byte"});
+        check(((peek_w(ISP0 - 12) >> 3) & 16'h1) === {15'd0, nset}, {what, ": +$00 N as CHK left it"});
+        check(peek_l(ISP0 - 10) === CODE + (lng ? 12 : 10),
+              {what, ": +$02 the next instruction -- UM Table 8-6"});
+        check(peek_w(ISP0 - 6) === 16'h2018, {what, ": +$06 format $2, vector offset $018"});
+        check(peek_l(ISP0 - 4) === CODE + 6, {what, ": +$08 the CHK -- UM Table 8-6"});
+      end
       else
         check(dut.u_seq.dreg[7] === 32'h1, {what, ": carries on"});
     end
 
     // ======================================================================
-    // Level seven -- UM 6.1.9. "A level 7 interrupt is nonmaskable", and what
+    // Level seven -- UM 8.1.9. "A level 7 interrupt is nonmaskable", and what
     // makes a second one happen where a second level 6 would not is the
     // TRANSITION to seven, not the level itself.
     // ======================================================================
@@ -717,13 +798,6 @@ module core_exc_tb;
     end
 
     // ======================================================================
-    // Done
-    // ======================================================================
-    if (pipe_fails != 0)
-      $display("  FAIL: the pipe invariant broke %0d times", pipe_fails);
-    $display("core_exc_tb: %0d checks, %0d failed, %0d pipe checks",
-             checks, fails, pipe_checks);
-    // ======================================================================
     // A posted write whose bus error lands between an interrupt's dispatch
     // and its acknowledge -- doc/checkpoint.md rule 9. The level being taken
     // is in the frame (+$08 bits 12:10), so after the bus error handler's RTE
@@ -765,6 +839,11 @@ module core_exc_tb;
 
     check(ipend_moves > 0, "IPEND moved at all during the run");
     check(ipend_bad == 0, "IPEND moved only on rising edges (specification 6)");
+
+    if (pipe_fails != 0)
+      $display("  FAIL: the pipe invariant broke %0d times", pipe_fails);
+    $display("core_exc_tb: %0d checks, %0d failed, %0d pipe checks",
+             checks, fails, pipe_checks);
 
     if (fails == 0 && pipe_fails == 0) $display("PASS: core_exc_tb");
     else                               $display("FAIL: core_exc_tb");

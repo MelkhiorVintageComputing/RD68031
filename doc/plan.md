@@ -181,7 +181,7 @@ A C++ machine that mirrors the Linux and QEMU m68k `virt` board, so that a stock
 | M1 | BIU: the asynchronous S0–S5 path forked from `rd68021_biu.sv`, plus synchronous STERM cycles, burst (CBREQ/CBACK), CIIN/CIOUT, DBEN, STATUS/REFILL | `bus_*_tb`, `bus_sync_tb`, `bus_burst_tb` |
 | M2 | Bus exceptions (BERR/HALT retry and rerun, late BERR on synchronous cycles) and arbitration; CPU space and reset re-checked | `bus_error_tb`, `bus_arb_tb`, `bus_cpuspace_tb`, `bus_reset_tb` |
 | M3 | AC feasibility against `MC68030EC` specs at 20/25/33.33/40/50 MHz, every grade the data sheet has — it has no 16.67 MHz (`doc/manual-contradictions.md`, 8) (`tools/timing/specs.py` retargeted) | `make timing` |
-| M4 | Checkpoint freeze: 030 frames ($0 $1 $2 $9 $A $B), the 030 SSW (FC/FB/RC/RB/DF/RM/RW/SIZE/FC2-0, no CALLM state); `frames.py` updated | `doc/checkpoint.md`, `doc/ssw.md` |
+| M4 | Checkpoint freeze: 030 frames ($0 $1 $2 $9 $A $B), the 030 SSW (FC/FB/RC/RB/DF/RM/RW/SIZE/FC2-0, no CALLM state); `frames.py` updated, with the MMU fault encoding and room reserved for M8–M11; RTE's format errors (version, both ends) and an architectural `$A` restore | `doc/checkpoint.md`, `doc/ssw.md`, `make ucode-check`; `core_fault_tb`, `core_exc_tb`, `core_paging_tb`, `core_cow_tb` and `core_cpif_tb` check every frame word by word |
 | M5 | Walking skeleton: seq, ifu and microcode on the new BIU; CALLM/RTM removed (illegal) | it runs |
 | M6–M7 | EA engine and integer core against UAE030; then cputest | `make ea vectors-all cputest cosim` |
 | M8–M9 | Exceptions, the three stacks, faults and restart with the 030 SSW, `core_paging_tb` | `core_exc/fault_tb` |

@@ -9,7 +9,13 @@
 // MMU and the judge. User-data writes (FC = 1) to the pages at $4000-$5FFF are
 // refused with a bus error until the kernel writes a page's address to its page
 // table port, and a refused write does not reach memory -- `wr_protect` in the
-// harness. Every shape of write the program makes has to land exactly once,
+// harness. So is any cycle of a read-modify-write: UM 8.2.3, "the MMU of the
+// MC68030 treats any bus cycle with RMC asserted as a write operation for
+// protection checking, regardless of the state of R/W".
+//
+// The kernel logs each frame -- the fault address, the special status word,
+// the stacked status register, the format word and the version word -- and
+// every one is checked against UM Table 8-6, figure 8-9 and 8.1.13. Every shape of write the program makes has to land exactly once,
 // with every other effect of its instruction exactly once, after the kernel's
 // handler has been through the processor's internal state.
 
@@ -37,17 +43,18 @@ module core_cow_tb;
   logic [15:0] got_w;
   logic [31:0] got_l;
 
-  // The MMU: a user-data write to a protected page is refused.
+  // The MMU: a user-data write to a protected page is refused, and so is a
+  // read with RMC asserted -- UM 8.2.3.
   function automatic bit refused(input logic [31:0] a, input logic [2:0] fc,
-                                 input logic rw);
-    refused = !rw && (fc == 3'd1) && (a >= 32'h4000) && (a < 32'h6000)
+                                 input logic rw, input logic rmc);
+    refused = (!rw || rmc) && (fc == 3'd1) && (a >= 32'h4000) && (a < 32'h6000)
               && prot[5'((a - 32'h4000) >> 8)];
   endfunction
 
   // ... and a supervisor-data read of the kernel's page table, until the kernel
   // maps it: the first handler faults inside itself.
   always @(*) berr_force = rst_n && as_oe && !as_n_o
-                           && (refused(a_o, fc_o, rw_o)
+                           && (refused(a_o, fc_o, rw_o, rmc_oe && !rmc_n_o)
                                || (kprot && rw_o && fc_o == 3'd5
                                    && (a_o & 32'hFFFF_FF00) == PTABLE));
   always @(posedge berr_force) berrs = berrs + 1;
@@ -60,7 +67,7 @@ module core_cow_tb;
       unprotects = unprotects + 1;
     end
 
-  // UM table 2-1: the supervisor stack is the supervisor's. No user-space cycle
+  // UM Table 4-1: the supervisor stack is the supervisor's. No user-space cycle
   // may touch it, frame building included.
   always @(negedge as_n_o)
     if (rst_n && as_oe && (fc_o == 3'd1 || fc_o == 3'd2)
@@ -73,10 +80,13 @@ module core_cow_tb;
   endfunction
 
   // The kernel's log, in the order the faults came: the fault address, and the
-  // SSW's size field -- UM 6.2.1, 00 long, 01 byte, 10 word, 11 three bytes.
+  // SSW's size field -- UM figure 8-9 and Table 7-2, 00 long, 01 byte, 10
+  // word, 11 three bytes.
   logic [31:0] want_addr [0:NFAULT-1];
   logic  [1:0] want_size [0:NFAULT-1];
-  logic [15:0] want_ssw  [0:NFAULT-1];   // DF, RW and FC -- the bits in $0147
+  // DF, RM, RW, the internal bits and FC2-FC0 -- the bits in $0FCF. The pipe's
+  // half is about how far ahead the prefetch had got.
+  logic [15:0] want_ssw  [0:NFAULT-1];
   logic  [7:0] want_srhi [0:NFAULT-1];   // the stacked SR's system byte
   string       want_what [0:NFAULT-1];
   task automatic want_fault(input int i, input logic [31:0] a, input logic [1:0] sz,
@@ -111,7 +121,8 @@ module core_cow_tb;
     want_fault( 5, 32'h0000_4410, 2'b00, "ADDQ.L #3,(A0)");
     want_fault( 6, 32'h0000_4510, 2'b01, "BSET #5,(A0)");
     want_fault( 7, 32'h0000_4610, 2'b10, "BFINS D2,(A0){4:8}");
-    want_fault( 8, 32'h0000_4710, 2'b00, "CAS.L D3,D4,(A0)");
+    want_fault( 8, 32'h0000_4710, 2'b00, "CAS.L D3,D4,(A0) -- its read");
+    want_ssw[8]  = 16'h01C1;               // DF, RM, RW = read, user data
     want_fault( 9, 32'h0000_4800, 2'b10, "MOVE.L D1,$47FE -- the second word");
     want_fault(10, 32'h0000_4900, 2'b11, "MOVE.L D1,$48FF -- the last three bytes");
     want_fault(11, 32'h0000_4AFE, 2'b00, "MOVE.L D1,$4AFE -- first fault");
@@ -153,15 +164,23 @@ module core_cow_tb;
                                      berrs, NFAULT));
     for (n = 0; n < NFAULT; n = n + 1) begin
       logic [31:0] a;
-      logic [15:0] ssw, sr;
-      a   = peek_l(KLOG + 8 * n);
-      ssw = peek_w(KLOG + 8 * n + 4);
-      sr  = peek_w(KLOG + 8 * n + 6);
+      logic [15:0] ssw, sr, fmt, ver;
+      a   = peek_l(KLOG + 12 * n);
+      ssw = peek_w(KLOG + 12 * n + 4);
+      sr  = peek_w(KLOG + 12 * n + 6);
+      fmt = peek_w(KLOG + 12 * n + 8);
+      ver = peek_w(KLOG + 12 * n + 10);
+      check(fmt === 16'hB008,
+            $sformatf("fault %0d, %s: +$06 %04h, want format $B, vector 2 -- UM Table 8-6",
+                      n, want_what[n], fmt));
+      check(ver >> 12 === rd68031_frame_pkg::FRAME_VERSION,
+            $sformatf("fault %0d, %s: +$36 the version nibble -- UM 8.1.13", n, want_what[n]));
       check(a === want_addr[n],
             $sformatf("fault %0d, %s: at %08h, want %08h", n, want_what[n], a, want_addr[n]));
-      // DF set, a write, user data space: UM 6.2.1 and doc/ssw.md.
-      check((ssw & 16'h0147) === want_ssw[n],
-            $sformatf("fault %0d, %s: SSW %04h, want DF/RW/FC %04h",
+      // DF set, RM, RW, the internal bits clear, the space: UM figure 8-9 and
+      // doc/ssw.md.
+      check((ssw & 16'h0FCF) === want_ssw[n],
+            $sformatf("fault %0d, %s: SSW %04h, want DF/RM/RW/internal/FC %04h",
                       n, want_what[n], ssw, want_ssw[n]));
       check(ssw[5:4] === want_size[n],
             $sformatf("fault %0d, %s: SSW size %0d, want %0d", n, want_what[n],

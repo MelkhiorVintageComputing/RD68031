@@ -105,14 +105,20 @@ COND = enc(
     'XW10',      # bit 10 of the extension word: the long forms' 64-bit selector
     'XW11',      # bit 11 of it: CHK2 rather than CMP2 -- PRM 4
     'XW15',      # bit 15: the register it names is an address register
-    # RTE reads a frame's format word into xw and branches on it. UM 6.1.12
-    # names three it understands and says the rest are a format error.
+    # RTE reads a frame's format word into xw and branches on it. UM 8.4
+    # names the six the MC68030 has, and UM 8.1.8 makes the rest a format
+    # error.
     'FMT0',      # the format word in xw says a four-word frame
     'FMT1',      # ... a throwaway four-word frame
     'FMT2',      # ... a six-word frame
     'FMTA',      # ... a short bus fault frame
     'FMTB',      # ... and a long one
-    'FMT9',      # ... a coprocessor midinstruction frame -- UM 7.4.19
+    'FMT9',      # ... a coprocessor midinstruction frame -- UM 10.4.19
+    # UM 8.1.8: "for long bus cycle fault format frames, the RTE instruction
+    # also compares the internal version number of the processor to that
+    # contained in the frame at memory location SP+54 (SP+$36)". The word is in
+    # xw, and this holds when its top nibble is not rd68031_frame_pkg's.
+    'VERBAD',
     # UM 6.2.2: the three bits of the special status word a handler is allowed
     # to have changed, plus the two that say what the faulted access was, which
     # RTE needs to know which buffer to rerun it from.
@@ -254,6 +260,13 @@ FC = enc(
     # went to the user's page, faulted, and halted the processor with a double
     # bus fault. Found by SunOS 4.1.1's first user process (doc/bugs-found.md).
     'SDATA',
+    # Program space at the privilege level of the status register a SHORT bus
+    # fault frame carries, which RTE holds in xw while it takes the frame apart:
+    # UM 8.2.1, "the address space for the bus cycle is the program space for
+    # the privilege level indicated in the copy of the status register on the
+    # stack". RTE reads stage D's word from memory with it -- the short frame
+    # does not carry one.
+    'FRAMEPROG',
 )
 
 # --------------------------------------------------------------------------
@@ -363,6 +376,10 @@ ASRC = enc(
     'FWLEN',     # ... and its length field alone
     'PC_C_RAW',  # the scanPC as a frame field: the address of stage C, read
                  # without using the word there -- UM 7.4.1
+    'UBOUND',    # the micro-address of rte_boundary, an instruction boundary:
+                 # where RTE resumes out of a short bus fault frame, which
+                 # carries no micro-address of its own -- doc/checkpoint.md
+                 # rule 1
 )
 
 # A convention, not a field: ASRC.DREG and ASRC.AREG read the register that bits
@@ -417,7 +434,9 @@ BSRC = enc(
     # stack".
     'CPSTEP',
     'CPLEN',     # the length alone
-    'TWENTY',    # the length of a midinstruction frame -- UM figure 7-43
+    'TWENTY',    # the length of a midinstruction frame -- UM figure 10-43
+    'VEROFF',    # $36, where the long frame's version word is -- UM 8.1.13,
+                 # from rd68031_frame_pkg
 )
 
 ALU = enc(
@@ -545,6 +564,13 @@ DST = enc(
     # the coprocessor instruction's own -- stay where they are.
     'SCANPC',
     'CPINT',     # the midinstruction frame's internal word, put back by RTE
+    # The special status word of a SHORT bus fault frame, taken apart: the
+    # same bits SSW takes, and in place of the internal word +$08 the long
+    # frame has, what an instruction boundary implies -- stage D holds the
+    # word at the program counter, nothing is cancelled, and a data fault still
+    # to rerun is a write the finished instruction posted. doc/checkpoint.md
+    # rule 1.
+    'SSWA',
     # The address register the effective-address field names, written as a
     # VALUE: sign extended from the operand size -- UM 7.4.9.
     'AREG_R',

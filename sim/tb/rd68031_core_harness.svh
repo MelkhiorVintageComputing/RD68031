@@ -279,9 +279,9 @@ endfunction
 // ---------------------------------------------------------------------------
 // Instruction boundaries, and the pipe invariant
 //
-// UM 6.2: "when the short bus fault stack frame applies, the address of the pipe
-// stage B word is the value in the PC plus four, and the address of the stage C
-// word is the value in the PC plus two". That holds at an instruction boundary,
+// UM 8.2: "when the short format frame applies, the address of the pipe stage
+// B word is the value in the program counter plus four, and the address of the
+// stage C word is the value in the program counter plus two". That holds at an instruction boundary,
 // where the pipe is sequential, and it is exactly what the short fault frame
 // relies on -- so it is checked at every boundary rather than assumed.
 //

@@ -2,13 +2,19 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 -- bus faults and the frames that describe them: M9.
+// RD68031 -- bus faults and the frames that describe them.
 //
 // The milestone the checkpoint discipline was frozen for. A faulted data access
 // builds a format $B frame; the frame is checked as MEMORY, word by word, at
-// the offsets UM table 6-5 and doc/checkpoint.md give -- because a frame this
+// the offsets UM Table 8-6 and doc/checkpoint.md give -- because a frame this
 // core writes and reads back consistently, but writes in the wrong place, is
-// exactly the bug a demand-paging handler finds and nothing else does.
+// exactly the bug a demand-paging handler finds and nothing else does. The
+// special status word is checked bit by bit against UM figure 8-9.
+//
+// Since M4 it also checks what RTE refuses -- a long frame with another
+// version, a frame it cannot read to the end (UM 8.1.8, 8.1.13) -- and RTE
+// out of short frames built by hand, which this design never builds itself
+// (doc/checkpoint.md rule 1).
 //
 // `berr_base` / `berr_mask` in the harness are the unmapped page: an access
 // there terminates with BERR, which is what a page that is not resident looks
@@ -28,15 +34,125 @@ module core_fault_tb;
   localparam logic [31:0] GONE = 32'h0000_8000;
 
   bit          reached;
-  logic [31:0] base;
+  logic [31:0] base, base2;
   int unsigned i;
+  logic  [2:0] fc600;
+
+  // The space of the bus cycles to $600, for the short frames' stage D read;
+  // and of the last prefetch of $604 and of GONE, for the refill after RTE.
+  // UM 8.2.1: "the address space for the bus cycle is the program space for
+  // the privilege level indicated in the copy of the status register on the
+  // stack".
+  logic  [2:0] fc604, fcgone;
+  always @(negedge as_n_o)
+    if (rst_n && as_oe) begin
+      if (a_o == 32'h0000_0600) fc600 = fc_o;
+      if (a_o == 32'h0000_0604 && rw_o) fc604 = fc_o;
+      if (a_o == GONE && rw_o) fcgone = fc_o;
+    end
+
+  // UM Table 8-6: the words every long frame has, and UM 8.1.13's version.
+  task automatic check_long(input logic [31:0] at, input logic [15:0] sr,
+                            input logic [31:0] pc, input logic [11:0] off,
+                            input string what);
+    check(dut.u_seq.isp_q === at,
+          {what, ": the stack pointer is the base of a 46-word frame -- UM Table 8-6"});
+    check(peek_w(at) === sr, {what, ": +$00 the status register -- UM Table 8-6"});
+    check(peek_l(at + 32'h02) === pc,
+          {what, ": +$02 the program counter -- UM Table 8-6"});
+    check(peek_w(at + 32'h06) === {4'hB, off},
+          {what, ": +$06 format $B and the vector offset -- UM Table 8-6"});
+    check(peek_w(at + 32'h36) >> 12 === rd68031_frame_pkg::FRAME_VERSION,
+          {what, ": +$36 the version nibble -- UM 8.1.13"});
+  endtask
+
+  // UM figure 8-9, field by field. `pipe` says whether the high half is
+  // compared: for a data fault it is a matter of how far ahead the prefetch
+  // had got, and the prefetch tests pin it down instead.
+  task automatic check_ssw(input logic [31:0] at, input bit pipe,
+                           input logic [3:0] hi, input bit df, input bit rm,
+                           input bit rw, input logic [1:0] size,
+                           input logic [2:0] fcode, input string what);
+    logic [15:0] w;
+    w = peek_w(at + 32'h0A);
+    if (pipe)
+      check(w[15:12] === hi,
+            $sformatf("%s: +$0A FC FB RC RB are %04b, want %04b -- UM figure 8-9",
+                      what, w[15:12], hi));
+    check(w[8] === df,     {what, ": +$0A DF -- UM 8.2.1"});
+    check(w[7] === rm,     {what, ": +$0A RM -- UM figure 8-9"});
+    check(w[6] === rw,     {what, ": +$0A RW, 1 = read -- UM figure 8-9"});
+    check(w[5:4] === size, {what, ": +$0A SIZE -- UM figure 8-9, Table 7-2"});
+    check(w[2:0] === fcode, {what, ": +$0A FC2-FC0 -- UM figure 8-9"});
+    check((w & rd68031_frame_pkg::SSW_INTERNAL) === 16'h0000,
+          {what, ": +$0A the internal bits 11-9 and 3 are zero -- doc/ssw.md"});
+  endtask
+
+  // UM 8.2: "the long word at SP+$24 contains the address of the stage B word;
+  // the address of the stage C word is the address of the stage B word minus
+  // two". Where its rerun bit is clear, a stage's image is the word there.
+  int unsigned images;
+  initial images = 0;
+  task automatic check_stages(input logic [31:0] at, input string what);
+    logic [15:0] w;
+    logic [31:0] b;
+    w = peek_w(at + 32'h0A);
+    b = peek_l(at + 32'h24);
+    if (!w[13]) begin
+      images++;
+      check(peek_w(at + 32'h0C) === peek_w(b - 32'd2),
+            {what, ": +$0C stage C is the word at +$24 less two -- UM 8.2"});
+    end
+    if (!w[12]) begin
+      images++;
+      check(peek_w(at + 32'h0E) === peek_w(b),
+            {what, ": +$0E stage B is the word at +$24 -- UM 8.2"});
+    end
+  endtask
+
+  // A short bus fault frame, format $A, built by hand -- UM Table 8-6. Its
+  // internal words are filled with things that would be ruinous if RTE read
+  // them: +$14 is a micro-address nothing should resume at, +$16 an ILLEGAL,
+  // +$08 has every bit of this design's long-frame word set.
+  localparam logic [31:0] XPC = 32'h0000_0600;
+  task automatic short_frame(input logic [15:0] sr, input logic [15:0] ssw,
+                             input logic [15:0] c, input logic [15:0] b,
+                             input logic [31:0] dfa, input logic [31:0] dob);
+    logic [31:0] f;
+    f = ISP0 - 32'd32;
+    poke_w(f + 32'h00, sr);
+    poke_l(f + 32'h02, XPC);
+    poke_w(f + 32'h06, 16'hA008);
+    poke_w(f + 32'h08, 16'hFFFF);
+    poke_w(f + 32'h0A, ssw);
+    poke_w(f + 32'h0C, c);
+    poke_w(f + 32'h0E, b);
+    poke_l(f + 32'h10, dfa);
+    poke_w(f + 32'h14, 16'hFFFF);
+    poke_w(f + 32'h16, 16'h4AFC);
+    poke_l(f + 32'h18, dob);
+    poke_l(f + 32'h1C, 32'hFFFF_FFFF);
+  endtask
+
+  task automatic short_setup();
+    base_setup();
+    poke_l(32'h0000_0000, ISP0 - 32'd32);  // the reset SP is the frame
+    poke_w(CODE + 0, 16'h4E73);            // RTE
+    poke_w(XPC + 0, 16'h7001);             // MOVEQ #1,D0
+    poke_w(XPC + 2, 16'h7202);             // MOVEQ #2,D1
+    poke_w(XPC + 4, 16'h7403);             // MOVEQ #3,D2
+    poke_w(XPC + 6, 16'h60FE);             // BRA *
+    poke_l(32'h0000_3000, 32'h0);
+    fc600 = 3'd0;
+    fc604 = 3'd0;
+  endtask
 
   // Every cycle to the supervisor stack must be in supervisor space. The
   // memory models ignore the function code, so nothing else would notice a
   // frame written through user data -- which is what the bus-fault frames did
   // for a fault taken in user mode, until SunOS on a Sun-3 found it: that MMU
   // keeps the spaces apart, and the frame write faulted into a double bus
-  // fault. UM table 2-1: FC 1 and 2 are the user's.
+  // fault. UM Table 4-1: FC 1 and 2 are the user's.
   int unsigned user_on_sstack;
   initial user_on_sstack = 0;
   always @(negedge as_n_o)
@@ -61,7 +177,7 @@ module core_fault_tb;
     $display("core_fault_tb: bus faults, and the long frame");
 
     // ======================================================================
-    // A write to a page that is not there. UM 6.1.2: "if the aborted bus cycle
+    // A write to a page that is not there. UM 8.1.2: "if the aborted bus cycle
     // is a data access, the processor immediately begins exception
     // processing", and the frame is the long one because the exception is
     // taken during the execution of an instruction.
@@ -84,10 +200,10 @@ module core_fault_tb;
     check(dut.u_seq.isp_q === base,
           "write fault: the stack pointer is the base of a 46-word frame");
 
-    // UM table 6-5 and doc/checkpoint.md, field by field.
+    // UM Table 8-6 and doc/checkpoint.md, field by field.
     check(peek_w(base + 32'h00) === 16'h2700,
           "write fault: +$00 the status register as it was");
-    // The write is posted -- UM 8.1.3, doc/checkpoint.md rule 9: the
+    // The write is posted -- UM 11.2.5.2, doc/checkpoint.md rule 9: the
     // instruction ends when the bus unit takes it, and its bus error is taken
     // at the instruction that is running when it arrives, which here is the
     // next one. +$08 says the faulted access was posted.
@@ -110,14 +226,17 @@ module core_fault_tb;
           "write fault: +$10 the data cycle fault address");
     check(peek_l(base + 32'h18) === 32'h1234_5678,
           "write fault: +$18 the data output buffer");
-    check(peek_w(base + 32'h36) >> 12 === 4'h1,
-          "write fault: +$36 the frame version");
+    check(peek_w(base + 32'h36) >> 12 === rd68031_frame_pkg::FRAME_VERSION,
+          "write fault: +$36 the frame version -- UM 8.1.13");
+    // A data write of four bytes in supervisor data space.
+    check_ssw(base, 1'b0, 4'h0, 1'b1, 1'b0, 1'b0, 2'b00, 3'd5, "write fault");
+    check_stages(base, "write fault");
     check(peek_l(base + 32'h46) === CODE + 8,
           "write fault: +$46 the instruction before that one: the write");
 
     // ======================================================================
     // The same write, but the bus error comes late: DSACK first, and BERR only
-    // at the second sample, entering S5 -- UM Table 5-8 case 4. The write is a
+    // at the second sample, entering S5 -- UM Table 7-8 case 4. The write is a
     // microword that may retire early, on the edge that ends S5, and it must
     // not: the instruction after it must not have run, and the frame must be
     // the same as for an ordinary bus error.
@@ -169,11 +288,14 @@ module core_fault_tb;
           "read fault: +$0A the special status word says read");
     check(peek_l(base + 32'h10) === GONE,
           "read fault: +$10 the data cycle fault address");
+    check_long(base, 16'h2700, CODE + 6, 12'h008, "read fault");
+    check_ssw(base, 1'b0, 4'h0, 1'b1, 1'b0, 1'b1, 2'b00, 3'd5, "read fault");
+    check_stages(base, "read fault");
 
 
     // ======================================================================
     // The whole point of the milestone: a handler that maps the page and lets
-    // RTE finish the access. UM 6.2.3 -- "another method of completing a
+    // RTE finish the access. UM 8.2.3 -- "another method of completing a
     // faulted bus cycle is to allow the processor to rerun the bus cycles
     // during execution of the RTE instruction that terminates the exception
     // handler".
@@ -210,7 +332,7 @@ module core_fault_tb;
 
     // ======================================================================
     // The same fault, repaired by the handler instead: it writes the word
-    // itself and clears DF, so RTE runs no bus cycle of its own -- UM 6.2.2.
+    // itself and clears DF, so RTE runs no bus cycle of its own -- UM 8.2.2.
     // ======================================================================
     base_setup();
     poke_w(CODE + 0, 16'h207C);
@@ -218,7 +340,7 @@ module core_fault_tb;
     poke_w(CODE + 6, 16'h2080);            // MOVE.L D0,(A0) -- faults
     poke_w(CODE + 8, 16'h7255);
     poke_w(CODE + 10, 16'h60FE);
-    // ANDI.W #$FEFF,($0A,A7) clears DF and nothing else. UM 6.2.2: "the only
+    // ANDI.W #$FEFF,($0A,A7) clears DF and nothing else. UM 8.2.2: "the only
     // bits in the SSW that may be modified are DF, RB, and RC".
     poke_w(HAND + 0, 16'h026F);            // ANDI.W #imm,(d16,A7)
     poke_w(HAND + 2, 16'hFEFF);
@@ -246,13 +368,13 @@ module core_fault_tb;
 
 
     // ======================================================================
-    // A prefetch that faults -- UM 6.1.2, "if the aborted bus cycle is an
+    // A prefetch that faults -- UM 8.1.2, "if the aborted bus cycle is an
     // instruction prefetch, the processor may delay taking the exception until
     // it attempts to use the prefetched information".
     //
     // The program runs into a page that is not there. The words already in the
     // pipe execute; the exception is taken when the first word that is not
-    // there is wanted. UM table 6-5 would give that the short frame; this
+    // there is wanted. UM Table 8-6 would give that the short frame; this
     // design gives every fault the long one, because the microword that takes
     // it is re-executed and may need any working register -- doc/divergences.md.
     // ======================================================================
@@ -298,6 +420,10 @@ module core_fault_tb;
     // the whole low half is clear because this was not a data cycle.
     check(peek_w(base + 32'h0A) === 16'hF000,
           "prefetch fault: +$0A the fault and rerun bits, and no data fault");
+    check_long(base, 16'h2700, GONE - 2, 12'h008, "prefetch fault");
+    // UM 8.2.1: "a rerun bit is always set when the corresponding fault bit is
+    // set", and the low half "applies to data cycles only".
+    check_ssw(base, 1'b1, 4'hF, 1'b0, 1'b0, 1'b0, 2'b00, 3'd0, "prefetch fault");
 
 
     // ======================================================================
@@ -335,7 +461,7 @@ module core_fault_tb;
     //
     // There is no stage D, so there is no instruction being decoded, and stage
     // C is the word AT the program counter. The short frame cannot say that --
-    // UM 6.2 puts its stage C at the PC plus two, and a handler pages in by
+    // UM 8.2 puts its stage C at the PC plus two, and a handler pages in by
     // that arithmetic -- so the frame is the long one, whose +$24 does. And the
     // frame's stage D is the JMP's, left over: RTE must not run it again.
     // ======================================================================
@@ -524,11 +650,14 @@ module core_fault_tb;
     check(peek_w(base + 32'h0A) === 16'hF000,
           "resumed into RTS: SSW FC, FB, RC and RB, and nothing else");
     check(peek_l(base + 32'h02) === GONE, "resumed into RTS: +$02 is the jump's target");
+    fcgone  = 3'd0;
     berr_en = 1'b0;
     run_until(32'h0000_0482, 3000, reached);
     check(reached, "resumed into RTS: RTE resumes, and the RTS returns where its stack says");
     check(dut.u_seq.dreg[6] === 32'h0000_0007, "resumed into RTS: the code there ran");
     check(dut.u_seq.usp_q === 32'h0000_1804, "resumed into RTS: the user stack stepped once");
+    check(fcgone === 3'd2,
+          "resumed into RTS: the rerun prefetch in user program space -- UM 8.2.1");
     check(dut.u_seq.isp_q === ISP0, "resumed into RTS: the frame came off");
 
     // ======================================================================
@@ -577,9 +706,9 @@ module core_fault_tb;
     check(dut.u_seq.areg[1] === GONE + 4, "fast -(An) write fault: A1 stepped once");
 
     // ======================================================================
-    // An address error -- UM 6.1.3, "an address error exception occurs when
+    // An address error -- UM 8.1.3, "an address error exception occurs when
     // the processor attempts to prefetch an instruction from an odd address
-    // ... a bus cycle is not executed". Vector 3, and UM 6.2.1: the fault bits
+    // ... a bus cycle is not executed". Vector 3, and UM 8.2.1: the fault bits
     // are NOT set, "and the rerun bits alone show the cause of the exception".
     // ======================================================================
     base_setup();
@@ -601,14 +730,16 @@ module core_fault_tb;
           "address error: +$06 format $B, vector offset $00C");
     check(peek_l(base + 32'h02) === 32'h0000_0801,
           "address error: +$02 the odd address it could not fetch from");
-    // UM 6.2.1: the fault bits are clear and the rerun bits alone show it.
+    // UM 8.2.1: the fault bits are clear and the rerun bits alone show it.
     check(peek_w(base + 32'h0A) === 16'h3000,
           "address error: +$0A the rerun bits alone");
+    check_long(base, 16'h2700, 32'h0000_0801, 12'h00C, "address error");
+    check_ssw(base, 1'b1, 4'h3, 1'b0, 1'b0, 1'b0, 2'b00, 3'd0, "address error");
 
 
 
     // ======================================================================
-    // The read half of UM 6.2.2: "data read faults only generate the long bus
+    // The read half of UM 8.2.2: "data read faults only generate the long bus
     // fault frame, and the handler must transfer properly sized data from the
     // location indicated by the fault address ... to the image of the data
     // input buffer at location SP + $2C".
@@ -674,7 +805,7 @@ module core_fault_tb;
 
     // ======================================================================
     // A misaligned long word split across a page boundary by an 8-bit port.
-    // UM table 5-6 makes that four bus cycles; two of them succeed and the
+    // UM Table 7-6 makes that four bus cycles; two of them succeed and the
     // third does not, so what the frame has to carry is the RESIDUAL -- the
     // address of the next byte still to go and how many are left. This is the
     // case doc/ssw.md says the bus unit has architectural state for.
@@ -698,11 +829,13 @@ module core_fault_tb;
     check((peek_w(base + 32'h0A) & 16'h0FFF) === 12'h125,
           "residual: +$0A says two bytes of a write are left");
     // The two bytes that did go are in memory; the operand is still whole in
-    // the data output buffer, right justified -- UM 6.2.2.
+    // the data output buffer, right justified -- UM 8.2.2.
     check(peek_l(base + 32'h18) === 32'hAABB_CCDD,
           "residual: +$18 the data output buffer holds the whole operand");
     check(peek_w(32'h2000_7FFE) === 16'hAABB,
           "residual: the two bytes that did go are where they belong");
+    // UM figure 8-9's SIZE is the size of the cycle still to run: a word.
+    check_ssw(base, 1'b0, 4'h0, 1'b1, 1'b0, 1'b0, 2'b10, 3'd5, "residual");
 
     // ... and RTE finishes only what is left.
     berr_en = 1'b0;
@@ -730,14 +863,14 @@ module core_fault_tb;
           "residual rerun: and the two that were left went, once");
 
     // ======================================================================
-    // A prefetch fault repaired IN THE FRAME. UM 6.2.2: "for each faulted
+    // A prefetch fault repaired IN THE FRAME. UM 8.2.2: "for each faulted
     // stage, the software handler should copy the instruction word ... to the
     // image of the appropriate stage in the stack frame. In addition, the
     // handler must clear the RB or RC bit associated with the stage that it
     // has corrected."
     //
     // The handler writes an instruction that is NOT the one in memory, so that
-    // what runs says which of the two RTE believed. UM 6.2.1: "if the RC bit
+    // what runs says which of the two RTE believed. UM 8.2.1: "if the RC bit
     // is clear, the words on the stack for stage C of the pipe are accepted as
     // valid".
     // ======================================================================
@@ -767,7 +900,7 @@ module core_fault_tb;
     check(dut.u_seq.isp_q === ISP0, "repaired pipe: the frame came off");
 
     // ======================================================================
-    // A double bus fault. UM 6.1.2: a bus error during the exception
+    // A double bus fault. UM 8.1.2: a bus error during the exception
     // processing for a bus error "and the processor enters the halted state.
     // In this case, the processor does not attempt to alter the current state
     // of memory."
@@ -821,6 +954,8 @@ module core_fault_tb;
           "user-mode write fault: +$02 is the instruction the posted write's fault interrupted");
     check(user_on_sstack == 0,
           "user-mode write fault: no user-space cycle touched the supervisor stack");
+    // UM figure 8-9: FC2-FC0 is the space of the data cycle -- user data.
+    check_ssw(base, 1'b0, 4'h0, 1'b1, 1'b0, 1'b0, 2'b00, 3'd1, "user-mode write fault");
 
     base_setup();
     user_on_sstack = 0;
@@ -842,11 +977,8 @@ module core_fault_tb;
     check(user_on_sstack == 0,
           "user-mode prefetch fault: no user-space cycle touched the supervisor stack");
 
-    if (pipe_fails != 0)
-      $display("  FAIL: the pipe invariant broke %0d times", pipe_fails);
-    $display("core_fault_tb: %0d checks, %0d failed", checks, fails);
     // ======================================================================
-    // Posted writes -- UM 8.1.3, doc/checkpoint.md rule 9. The write's
+    // Posted writes -- UM 11.2.5.2, doc/checkpoint.md rule 9. The write's
     // instruction ends when the bus unit takes it, the next ones go on, and
     // its bus error is taken at whatever microword is running when it comes.
     // RTE reruns the write by itself and resumes that microword.
@@ -881,7 +1013,7 @@ module core_fault_tb;
     check(dut.u_seq.dreg[5] === 32'h0000_0007, "posted: and the one after it ran");
     check(dut.u_seq.isp_q === ISP0, "posted: the frame came off the stack");
 
-    // A second write and a read queue behind the posted one -- UM 8.1.3. The
+    // A second write and a read queue behind the posted one -- UM 11.2.5.2. The
     // first faults while they wait: neither may run, and after RTE both do,
     // in order, after the rerun.
     base_setup();
@@ -934,6 +1066,181 @@ module core_fault_tb;
     check(dut.u_seq.dreg[6] === 32'h0000_0011, "posted, repaired: the program went on");
     check(dut.u_seq.isp_q === ISP0, "posted, repaired: the frame came off the stack");
 
+    // ======================================================================
+    // RTE refuses a long frame that carries another version number. UM 8.1.8:
+    // "for long bus cycle fault format frames, the RTE instruction also
+    // compares the internal version number of the processor to that contained
+    // in the frame at memory location SP+54 (SP+$36)", and if the format is
+    // improper "the instruction generates a format error exception. This
+    // exception saves a short format stack frame" -- the four-word one, Table
+    // 8-6 -- with "the logical address of the instruction that detected the
+    // format error". UM 8.1.13: below the frame it refused, which "remains
+    // intact".
+    //
+    // The format error's handler puts the nibble back, steps over its own
+    // frame and returns again: the long frame is then taken as it should be.
+    // ======================================================================
+    base_setup();
+    poke_l(32'h0000_0038, 32'h0000_0580);  // vector 14, format error
+    poke_l(GONE, 32'h1357_9BDF);
+    poke_w(CODE + 0, 16'h207C);            // MOVEA.L #GONE,A0
+    poke_l(CODE + 2, GONE);
+    poke_w(CODE + 6, 16'h2410);            // MOVE.L (A0),D2 -- faults
+    poke_w(CODE + 8, 16'h60FE);
+    poke_w(HAND + 0, 16'h0A6F);            // EORI.W #$1000,($36,A7)
+    poke_w(HAND + 2, 16'h1000);            //   ... another version
+    poke_w(HAND + 4, 16'h0036);
+    poke_w(HAND + 6, 16'h4E73);            // RTE -- refused
+    poke_w(32'h0000_0580, 16'h0A6F);       // EORI.W #$1000,($3E,A7)
+    poke_w(32'h0000_0582, 16'h1000);       //   ... ours again
+    poke_w(32'h0000_0584, 16'h003E);
+    poke_w(32'h0000_0586, 16'h508F);       // ADDQ.L #8,A7 -- drop its own frame
+    poke_w(32'h0000_0588, 16'h4E73);       // RTE -- taken
+    reset_dut();
+    run_until(32'h0000_0580, 4000, reached);
+    check(reached, "version: RTE on another version's frame takes a format error -- UM 8.1.8");
+    base = ISP0 - 32'h5C;
+    check(dut.u_seq.isp_q === base - 32'd8,
+          "version: a four-word frame below the long one -- UM 8.1.8, Table 8-6");
+    check(peek_w(base - 32'd8) === 16'h2700, "version: format error +$00 the status register");
+    check(peek_l(base - 32'd6) === HAND + 6,
+          "version: format error +$02 the RTE that detected it -- UM 8.1.8");
+    check(peek_w(base - 32'd2) === 16'h0038,
+          "version: format error +$06 format $0, vector offset $038 -- UM Table 8-6");
+    check(peek_w(base + 32'h06) === 16'hB008,
+          "version: the refused frame is intact -- UM 8.1.13");
+    check(peek_w(base + 32'h36) >> 12 === (rd68031_frame_pkg::FRAME_VERSION ^ 4'h1),
+          "version: ... with the version the handler gave it");
+    check(peek_l(base + 32'h02) === CODE + 6,
+          "version: ... and the faulted instruction's address");
+    berr_en = 1'b0;
+    run_until(CODE + 8, 4000, reached);
+    check(reached, "version: with its own version back, the frame is taken");
+    check(dut.u_seq.dreg[2] === 32'h1357_9BDF, "version: and the read it held was rerun");
+    check(dut.u_seq.isp_q === ISP0, "version: both frames came off");
+
+    // ======================================================================
+    // RTE meets a long frame whose far end is not there. UM 8.1.13: "the RTE
+    // instruction also reads from both ends of the stack frame to make sure it
+    // is accessible. If the frame is invalid or inaccessible, the processor
+    // takes a format error or a bus error exception, respectively."
+    //
+    // The stack straddles a page boundary at $A000; once the frame is on it
+    // the page above goes, so +$5A cannot be read. The bus error has to come
+    // BEFORE anything is restored: its frame then describes the RTE, and when
+    // the page comes back RTE goes on from where it was.
+    // ======================================================================
+    base_setup();
+    poke_l(32'h0000_0000, 32'h0000_A010);  // a stack across $A000
+    poke_l(GONE, 32'h2468_ACE0);
+    poke_w(CODE + 0, 16'h207C);            // MOVEA.L #GONE,A0
+    poke_l(CODE + 2, GONE);
+    poke_w(CODE + 6, 16'h2410);            // MOVE.L (A0),D2 -- faults
+    poke_w(CODE + 8, 16'h60FE);
+    poke_w(HAND + 0, 16'h4E73);            // RTE -- its far end faults
+    poke_w(HAND + 32'h40, 16'h7C22);       // MOVEQ #$22,D6 -- the second handler
+    poke_w(HAND + 32'h42, 16'h4E73);       // RTE
+    reset_dut();
+    dut.u_seq.dreg[6] = 32'h0;
+    run_until(HAND + 0, 4000, reached);
+    check(reached, "far end: the first bus error is taken");
+    base = 32'h0000_A010 - 32'h5C;
+    poke_l(32'h0000_0008, HAND + 32'h40);  // the next bus error goes elsewhere
+    berr_base = 32'h0000_A000;             // and the frame's top page goes
+    run_until(HAND + 32'h42, 4000, reached);
+    check(reached, "far end: RTE takes a bus error on the frame -- UM 8.1.13");
+    base2 = base - 32'h5C;
+    check_long(base2, 16'h2700, HAND, 12'h008, "far end");
+    check(peek_l(base2 + 32'h10) === base + 32'h5A,
+          "far end: +$10 the last word of the frame it could not read -- UM 8.1.13");
+    check_ssw(base2, 1'b0, 4'h0, 1'b1, 1'b0, 1'b1, 2'b10, 3'd5, "far end");
+    check(peek_w(base + 32'h06) === 16'hB008, "far end: the first frame is intact");
+    check(dut.u_seq.dreg[6] === 32'h0000_0022, "far end: the second handler ran");
+    check(dut.u_seq.dreg[2] !== 32'h2468_ACE0,
+          "far end: nothing of the first frame had been acted on");
+    berr_en = 1'b0;
+    run_until(CODE + 8, 4000, reached);
+    check(reached, "far end: with the page back, both RTEs complete");
+    check(dut.u_seq.dreg[2] === 32'h2468_ACE0, "far end: the faulted read was rerun");
+    check(dut.u_seq.isp_q === 32'h0000_A010, "far end: both frames came off");
+
+    // ======================================================================
+    // RTE out of a SHORT frame -- UM Table 8-6, "execution unit at instruction
+    // boundary", and doc/checkpoint.md rule 1. This design never builds one,
+    // so these are built by hand, with internal words that would wreck the
+    // restore if RTE read them.
+    //
+    // The pipe is UM 8.2's: stage C is the word at the program counter plus
+    // two and stage B at plus four, so the operation word at the program
+    // counter is stage D, which RTE reads from memory.
+    // ======================================================================
+    // Nothing to rerun, and the images are memory's own.
+    short_setup();
+    reset_dut();
+    short_frame(16'h2700, 16'h0000, 16'h7202, 16'h7403, 32'h0, 32'h0);
+    run_until(XPC + 6, 3000, reached);
+    check(reached, "short frame: RTE resumes at +$02 -- UM Table 8-6");
+    check(dut.u_seq.dreg[0] === 32'd1 && dut.u_seq.dreg[1] === 32'd2
+          && dut.u_seq.dreg[2] === 32'd3,
+          "short frame: the instruction at +$02 and the two after it ran");
+    check(dut.u_seq.isp_q === ISP0, "short frame: sixteen words came off -- UM Table 8-6");
+    check(fc600 === 3'd6,
+          "short frame: stage D read in supervisor program space -- UM 8.2.1");
+
+    // RC and RB set: the images are rubbish and must be refetched. UM 8.2.3:
+    // "if the rerun bit is set for a stage of the pipe ... the associated
+    // prefetch cycle may or may not be run".
+    short_setup();
+    reset_dut();
+    short_frame(16'h2700, 16'h3000, 16'h4AFC, 16'h4AFC, 32'h0, 32'h0);
+    run_until(XPC + 6, 3000, reached);
+    check(reached, "short frame, RC and RB: RTE resumes");
+    check(dut.u_seq.dreg[1] === 32'd2 && dut.u_seq.dreg[2] === 32'd3,
+          "short frame, RC and RB: the stages were refetched, not taken from the frame");
+
+    // RC and RB clear with images that are NOT memory's. UM 8.2.1: "if a rerun
+    // bit is cleared, the words on the stack for the corresponding stages of
+    // the pipe are accepted as valid".
+    short_setup();
+    reset_dut();
+    short_frame(16'h2700, 16'h0000, 16'h727F, 16'h747E, 32'h0, 32'h0);
+    run_until(XPC + 6, 3000, reached);
+    check(reached, "short frame, repaired: RTE resumes");
+    check(dut.u_seq.dreg[1] === 32'h7F, "short frame, repaired: stage C's image ran -- UM 8.2.1");
+    check(dut.u_seq.dreg[2] === 32'h7E, "short frame, repaired: stage B's image ran -- UM 8.2.1");
+
+    // DF on a byte write. UM 8.2.1: "if the DF bit is set when the processor
+    // reads the stack frame, it reruns the faulted data access" -- the write
+    // at +$10 of the byte right justified at +$18, in the space FC2-FC0 names.
+    short_setup();
+    reset_dut();
+    short_frame(16'h2700, 16'h0115, 16'h7202, 16'h7403, 32'h0000_3001, 32'h0000_00AB);
+    run_until(XPC + 6, 3000, reached);
+    check(reached, "short frame, DF: RTE resumes");
+    check(peek_w(32'h0000_3000) === 16'h00AB,
+          "short frame, DF: the byte at +$10, from +$18, and only it -- UM 8.2.1, 8.2.2");
+    check(peek_w(32'h0000_3002) === 16'h0000, "short frame, DF: nothing beyond it");
+    check(dut.u_seq.dreg[2] === 32'd3, "short frame, DF: and the program ran on");
+
+    // A user-mode frame: stage D comes from USER program space. UM 8.2.1: "the
+    // address space for the bus cycle is the program space for the privilege
+    // level indicated in the copy of the status register on the stack".
+    short_setup();
+    reset_dut();
+    dut.u_seq.usp_q = 32'h0000_3800;
+    short_frame(16'h0000, 16'h0000, 16'h7202, 16'h7403, 32'h0, 32'h0);
+    run_until(XPC + 6, 3000, reached);
+    check(reached, "short frame, user: RTE resumes in user mode");
+    check(dut.u_seq.sr_q[13] === 1'b0, "short frame, user: S is clear");
+    check(fc600 === 3'd2, "short frame, user: stage D read in user program space -- UM 8.2.1");
+    check(fc604 === 3'd2, "short frame, user: the refill in user program space -- UM 8.2.1");
+    check(dut.u_seq.dreg[2] === 32'd3, "short frame, user: the program ran");
+
+    check(images > 0, "the stage images were compared at least once");
+    if (pipe_fails != 0)
+      $display("  FAIL: the pipe invariant broke %0d times", pipe_fails);
+    $display("core_fault_tb: %0d checks, %0d failed, %0d stage images compared",
+             checks, fails, images);
     if (fails == 0) $display("PASS: core_fault_tb");
     else            $display("FAIL: core_fault_tb");
     $finish;

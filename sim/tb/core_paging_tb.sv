@@ -8,7 +8,7 @@
 // This is the Sun-3 requirement made checkable, and the reason the checkpoint
 // set was frozen before any instruction microcode was written. A misaligned
 // operand on a narrow port is split by the bus unit into up to four cycles --
-// UM table 5-6 -- and a page page_at in the middle of it means the FIRST of
+// UM Table 7-6 -- and a page page_at in the middle of it means the FIRST of
 // those cycles succeeds and a later one does not. What the frame then has to
 // carry is the RESIDUAL: the address of the next byte still to transfer and
 // how many are left. RTE hands that back to the bus unit and the operand
@@ -22,9 +22,17 @@
 //     direction      read and write
 //
 // is run with the operand straddling a page that is not there. The handler is
-// real MC68020 code: it reads the data fault address out of the frame at +$10,
-// hands it to the pager, and returns with DF still set so that the processor
-// reruns the access itself -- UM 6.2.3.
+// real code: it reads the data fault address out of the frame at +$10, hands
+// it to the pager, and returns with DF still set so that the processor reruns
+// the access itself -- UM 8.2.3.
+//
+// The frame each case leaves is checked too, at the moment the handler hands
+// the address over: format $B and vector 2 (UM Table 8-6), the special status
+// word's data half bit by bit (UM figure 8-9) -- DF, RW, SIZE as the size of
+// the RESIDUAL, FC2-FC0, the internal bits zero -- +$10 the residual's first
+// byte, +$18 the operand for a write, and the version nibble (UM 8.1.13). On
+// the MC68030 this is also what an MMU refusal looks like (UM 9.5.2): the same
+// frame, for the logical address.
 
 `timescale 1ns / 1ps
 
@@ -54,14 +62,31 @@ module core_paging_tb;
   int unsigned faults;
   int unsigned cases_run;
 
+  // The frame, as the handler saw it when it called the pager.
+  logic [15:0] f_sr, f_fmt, f_ssw, f_ver;
+  logic [31:0] f_pc, f_dfa, f_dob;
+
   // The pager. A write to its control word maps whatever page the value names,
   // which here means letting the access through.
   always @(negedge as_n_o) begin
     if (rst_n && !rw_o && (a_o[31:0] & ~32'd3) == PAGER) begin
       berr_en = 1'b0;
       faults  = faults + 1;
+      f_sr  = peek_w(dut.u_seq.isp_q);
+      f_pc  = peek_l(dut.u_seq.isp_q + 32'h02);
+      f_fmt = peek_w(dut.u_seq.isp_q + 32'h06);
+      f_ssw = peek_w(dut.u_seq.isp_q + 32'h0A);
+      f_dfa = peek_l(dut.u_seq.isp_q + 32'h10);
+      f_dob = peek_l(dut.u_seq.isp_q + 32'h18);
+      f_ver = peek_w(dut.u_seq.isp_q + 32'h36);
     end
   end
+
+  // What is left of the operand when the page runs out: from the boundary
+  // to its end if it straddles, the whole of it if it does not.
+  logic [31:0] r_addr;
+  int unsigned r_bytes;
+  logic  [1:0] r_size;
 
   task automatic setup();
     int unsigned v;
@@ -141,6 +166,16 @@ module core_paging_tb;
       berr_en   = 1'b1;
       berr_base = page_at;
       berr_mask = PAGE_MASK;
+      f_fmt     = 16'h0;
+      if (ialign + opsize > 4) begin
+        r_addr  = page_at;
+        r_bytes = addr + opsize - page_at;
+      end else begin
+        r_addr  = addr;
+        r_bytes = opsize;
+      end
+      // UM Table 7-2: SIZ1/SIZ0 00 is four bytes, 01 one, 10 two, 11 three.
+      r_size = (r_bytes == 4) ? 2'b00 : r_bytes[1:0];
 
       run_until(CODE + 16, 6000, reached);
       cases_run = cases_run + 1;
@@ -152,6 +187,39 @@ module core_paging_tb;
       check(dut.u_seq.isp_q === ISP0,
             $sformatf("%s size %0d at %08h: the stack is unwound",
                       what, opsize, addr));
+      // The frame.
+      check(f_fmt === 16'hB008,
+            $sformatf("%s size %0d at %08h: +$06 format $B, vector 2 -- UM Table 8-6",
+                      what, opsize, addr));
+      check(f_sr === 16'h2700,
+            $sformatf("%s size %0d at %08h: +$00 the status register", what, opsize, addr));
+      check(f_ver >> 12 === rd68031_frame_pkg::FRAME_VERSION,
+            $sformatf("%s size %0d at %08h: +$36 the version nibble -- UM 8.1.13",
+                      what, opsize, addr));
+      check(f_dfa === r_addr,
+            $sformatf("%s size %0d at %08h: +$10 is %08h, the residual's first byte %08h -- UM 8.2.2",
+                      what, opsize, addr, f_dfa, r_addr));
+      check(f_ssw[8] === 1'b1,
+            $sformatf("%s size %0d at %08h: SSW DF -- UM figure 8-9", what, opsize, addr));
+      check(f_ssw[7] === 1'b0,
+            $sformatf("%s size %0d at %08h: SSW RM clear", what, opsize, addr));
+      check(f_ssw[6] === idir[0],
+            $sformatf("%s size %0d at %08h: SSW RW -- UM figure 8-9", what, opsize, addr));
+      check(f_ssw[5:4] === r_size,
+            $sformatf("%s size %0d at %08h: SSW SIZE %b, the %0d bytes left, want %b -- UM figure 8-9, Table 7-2",
+                      what, opsize, addr, f_ssw[5:4], r_bytes, r_size));
+      check(f_ssw[2:0] === 3'd5,
+            $sformatf("%s size %0d at %08h: SSW FC2-FC0 supervisor data", what, opsize, addr));
+      check((f_ssw & rd68031_frame_pkg::SSW_INTERNAL) === 16'h0,
+            $sformatf("%s size %0d at %08h: SSW internal bits zero -- doc/ssw.md",
+                      what, opsize, addr));
+      if (idir == 1)
+        check(f_pc === CODE + 12,
+              $sformatf("%s size %0d at %08h: +$02 the read's own instruction", what, opsize, addr));
+      else
+        check(f_dob === want,
+              $sformatf("%s size %0d at %08h: +$18 the operand, right justified -- UM 8.2.2",
+                        what, opsize, addr));
       if (idir == 0) begin
         case (opsize)
           1: begin

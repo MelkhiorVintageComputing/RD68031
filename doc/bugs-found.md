@@ -272,3 +272,125 @@ sequencer acts on `irq_pending`, not on the pin, so nothing else moves.
 **Stops it coming back:** `core_exc_tb` checks every change of IPEND over the
 whole run falls on a rising edge, and that it changes at all. Run against the old
 combinational pin, it fails: IPEND moved on a falling edge nine times.
+
+---
+
+## M4 · RTE never compared the version number
+
+**What:** UM 8.1.8: "for long bus cycle fault format frames, the RTE instruction
+also compares the internal version number of the processor to that contained in
+the frame at memory location SP+54 (SP+$36)", and takes a format error if they
+differ. RTE read `+$36` back into the trace-mode, flow and `pc_kept` bits it
+carries and went on: a long frame with any version at all was restored. The
+frame builder wrote the nibble; nothing read it. `doc/checkpoint.md` had said,
+since RD68021's M4, that "RD68021 therefore carries its own version number and
+refuses any other with a format error" — the document was right about the
+contract and wrong about the design, and RD68021 has the same defect.
+
+**Found by:** re-deriving the checkpoint freeze from UM 8.1.8 and 8.1.13 at M4,
+and grepping the RTL and the microcode for the place that compared the nibble.
+There was none, and no test had ever handed RTE a frame with another one.
+
+**Fixed by:** `rte_check_long` in `tools/ucode/program.py`: before the walk, RTE
+reads `+$36` into the extension-word latch and the condition `VERBAD` sends a
+mismatch to the format error, which stacks the RTE's own address below the
+untouched frame. The version is now this design's own, `$3`, rather than
+RD68021's `$1`.
+
+**Stops it coming back:** `core_fault_tb`'s "version" case: a handler changes
+the nibble, RTE must take a format error with the RTE's address in a four-word
+frame below the intact long one, and the format error's handler puts the nibble
+back and RTEs again to finish the faulted read.
+
+---
+
+## M4 · RTE restored before it knew the frame was all there
+
+**What:** UM 8.1.13: "The RTE instruction also reads from both ends of the stack
+frame to make sure it is accessible. If the frame is invalid or inaccessible,
+the processor takes a format error or a bus error exception, respectively." RTE
+read the format word and then walked the frame from `+$02` upward, writing each
+field into its register as it went, so a long frame whose top was on a missing
+page faulted part-way through — with the program counter, the pipe and the
+special status word already put back, and the new frame describing a machine
+that was neither the handler's nor the faulted program's.
+
+**Found by:** reading UM 8.1.13 for the freeze's rule on what RTE checks.
+
+**Fixed by:** `_far_end` in `tools/ucode/program.py`, for both bus fault
+formats: before anything is restored, RTE reads the frame's last word. A bus
+error there is an ordinary data fault on a microword that has committed nothing
+(`doc/checkpoint.md` rule 2), and RTE goes on from it when its handler returns.
+
+**Stops it coming back:** `core_fault_tb`'s "far end" case: the stack straddles a
+page that goes away once the frame is on it; RTE must fault on `+$5A` with the
+first frame intact and the RTE's own address in the new one, and finish both
+when the page comes back.
+
+---
+
+## M4 · RTE read a short frame's internal words
+
+**What:** RTE out of a format `$A` frame read `+$08`, `+$14` and `+$16` — the
+long frame's packed word, micro-address and stage D — as if this design had
+written the frame. It never writes a short frame (`doc/divergences.md`), so one
+RTE meets came from software or from another processor, and has no version
+field to say whose its internal words are. The micro-address RTE resumed at was
+whatever `+$14` held. `doc/checkpoint.md` rule 1 forbade private state in the
+short frame and the check enforced it for the builder only.
+
+**Found by:** reading the freeze's rule 1 against `rte_fault`, at M4.
+
+**Fixed by:** `rte_fault_short`, a walk of its own that reads the architectural
+fields alone and supplies what an instruction boundary implies: stage D is read
+from memory at the program counter, in the stacked status register's program
+space (`fc = FRAMEPROG`); `DF` on a write becomes a posted write of its own,
+sized by `SIZE` (`dst = SSWA`); and it resumes at `rte_boundary`, a microword
+that only decodes (`asrc = UBOUND`). `check_short_reads` in
+`tools/ucode/assemble.py` fails the build if it ever reads an internal word.
+
+**Stops it coming back:** `core_fault_tb`'s short-frame cases, built by hand with
+internal words that would wreck the restore if read: images accepted, rerun bits
+honoured, a byte write rerun at its size and address, and a user-mode frame whose
+stage D is read in user program space.
+
+---
+
+## M4 · RTE's rerun prefetch ran in the handler's program space
+
+**What:** UM 8.2.1: when RTE reruns a prefetch, "the address space for the bus
+cycle is the program space for the privilege level indicated in the copy of the
+status register on the stack". RTE writes the pipe's fill point before the
+status register — it must write the status register last, because that moves
+A7 — and the pipe started refilling the moment the fill point was written,
+in the space the status register still named: supervisor program, for a fault
+taken in user mode. A memory system that keeps the spaces apart would have
+refused the fetch, or answered it from the wrong map.
+
+**Found by:** a check added at M4 to `core_fault_tb`'s "resumed into RTS" case,
+recording the function code of the rerun prefetch of the faulted page: 6, where
+the stacked status register said user. A probe of the same run showed the
+fetch issued with the status register still `$2008`.
+
+**Fixed by:** `ckpt_hold`, from the sequencer to the fetch unit: set when RTE
+writes the fill point, cleared when its RESUME — which follows the status
+register — commits, or by a fault. The pipe asks for nothing while it is set.
+
+**Stops it coming back:** `core_fault_tb` checks the space of the rerun prefetch
+after a long frame and of the refill after a short one, both returning to user
+mode.
+
+---
+
+## M4 · Two testbenches counted their checks before their last cases
+
+**What:** `core_fault_tb` and `core_exc_tb` printed "N checks, M failed" before
+their posted-write cases, which had been appended after the line; the count was
+not the total, though PASS and FAIL were still decided on all of them.
+
+**Found by:** adding cases at the end of both at M4.
+
+**Fixed by:** the summary line moved to the end of each.
+
+**Stops it coming back:** nothing but reading the log; the counts in
+`doc/checkpoint.md` are taken from it.

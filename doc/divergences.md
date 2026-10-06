@@ -101,9 +101,19 @@ during RTE's frame reads, which take an ordinary bus error exception. The
 halted state itself, STATUS asserted continuously, is as the MC68030 has it
 (7.5.4). The RTE case belongs with the M8–M9 rework of exception processing.
 
+Since M4 the difference is smaller. UM 8.1.13 has RTE read "both ends of the
+stack frame to make sure it is accessible" before it loads anything, and take a
+bus error — not a halt — if it is not; this design now does that for the
+`$A` and `$B` frames (`doc/checkpoint.md` rule 10), so a frame that is not all
+there faults before anything is restored, with a frame of its own that
+describes the RTE and from which it continues. What remains is a bus error
+*after* that check, half-way through the load, which the part halts on and
+this design takes as a bus error with the machine half restored.
+
 **How it is checked:** `core_fault_tb` checks the double bus fault that is
-implemented; `bus_arb_tb` checks STATUS and arbitration in it. Nothing checks
-the RTE case, because it is not implemented.
+implemented; `bus_arb_tb` checks STATUS and arbitration in it; `core_fault_tb`
+checks the far-end read, on a frame whose last word is on a missing page.
+Nothing checks a bus error later in the load, because it is not a halt yet.
 
 ---
 
@@ -160,3 +170,58 @@ measures the release against MC68030EC specifications 7, 8 and 13 at every
 cycle end it happens on, at all five grades — specification 7 there, where the
 data sheet draws it only on relinquish — and says in its log which setting it
 ran (`doc/ac-timing.md`, "`ADDR_HIZ_BETWEEN_CYCLES`").
+
+---
+
+## Every bus and address error builds the long frame
+
+**UM 8.1.2:** "When the bus error exception is taken at an instruction boundary,
+less information is required to recover from the error, and the processor
+builds the short bus fault stack frame ... When the exception is taken during
+the execution of an instruction, the processor must save its entire state for
+recovery and uses the long bus fault stack frame". UM 8.1.3 says the same of an
+address error, and Table 8-6 assigns format `$A` to "Address Error or Bus Error
+— Execution Unit at Instruction Boundary".
+
+**What this design does:** format `$B` for every bus error and every address
+error, and never `$A`. A data fault is always taken mid-instruction here: the
+microcode stalls on its operand, or posts a write and takes the write's fault
+at whatever microword is running. A prefetch fault is taken by the microword
+that needs the word, usually the instruction's last, which RTE re-executes and
+which may read any working register — carried only by the long frame. RD68021
+built a short frame for a while, for the case that looked like a boundary, and
+SunOS found the working registers it lost (RD68021's `doc/bugs-found.md`).
+
+**Why it is allowed:** UM 8.4, "The system software should not depend on a
+particular exception generating a particular stack frame. For compatibility
+with future devices, the software should be able to handle any type of stack
+frame for any type of exception." The cost is stack — 92 bytes a fault where
+the part would sometimes use 32 — and the time to write and read them. RTE
+still accepts a format `$A` frame, restoring it from its architectural fields
+alone (`doc/checkpoint.md`, rule 1).
+
+**How it is checked:** `core_fault_tb`, `core_paging_tb` and `core_cow_tb`
+compare every fault frame's format word with `$B`; `core_fault_tb` runs RTE out
+of hand-built `$A` frames.
+
+---
+
+## RTE does not treat RM set and DF clear as a completed read-modify-write
+
+**UM 8.2.2:** "the RTE instruction expects the entire operation to have been
+completed if the RM bit is set and the DF bit is cleared. This is true even if
+the fault occurred on the first read cycle."
+
+**What this design does:** RTE resumes the faulted microword whatever `RM`
+says, as it does for any other access with `DF` clear: the operand that
+microword asked for is satisfied out of the frame with no bus cycle, and the
+instruction goes on from there — so a CAS or TAS whose handler emulated it
+entire would run its remaining cycles again. The microcode has no entry point
+that means "the read-modify-write is done, retire it", which is what
+`doc/checkpoint.md` rule 5 asks for. Inherited from RD68021; it belongs with
+the M8–M9 rework of exceptions and restart. With `DF` left set — what a
+pager does, and what `core_cow_tb`'s CAS does — the whole operation is
+rerun, as UM 8.2.3 says.
+
+**How it is checked:** it is not, yet. Found by reading the microcode against UM
+8.2.2 at M4: no microword tests `RM`, and RESUME is unconditional.

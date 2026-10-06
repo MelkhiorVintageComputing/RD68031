@@ -176,6 +176,7 @@ module rd68031_top #(
   logic  [2:0] ckpt_sel;
   logic [31:0] ckpt_data;
   logic        ckpt_load;
+  logic        ckpt_hold;
   logic [31:0] ckpt_pc_fetch;
 
   // ==========================================================================
@@ -296,6 +297,7 @@ module rd68031_top #(
       .ckpt_sel       (ckpt_sel),
       .ckpt_data      (ckpt_data),
       .ckpt_load      (ckpt_load),
+      .ckpt_hold      (ckpt_hold),
       .ckpt_pc_fetch  (ckpt_pc_fetch),
 
       .cacr           (cacr),
@@ -342,6 +344,7 @@ module rd68031_top #(
       .ckpt_sel       (ckpt_sel),
       .ckpt_data      (ckpt_data),
       .ckpt_load      (ckpt_load),
+      .ckpt_hold      (ckpt_hold),
       .ckpt_pc_fetch  (ckpt_pc_fetch),
 
       .cacr           (cacr),

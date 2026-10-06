@@ -30,7 +30,7 @@ module core_cpif_tb;
   localparam logic [31:0] HAND = 32'h0000_0600;
   localparam logic [31:0] DATA = 32'h0000_2000;
 
-  // The interface registers -- UM figure 7-5.
+  // The interface registers -- UM figure 10-5.
   localparam logic [4:0] R_RESP = 5'h00, R_CTRL = 5'h02, R_SAVE = 5'h04,
                          R_REST = 5'h06, R_OPW = 5'h08, R_CMD = 5'h0A,
                          R_COND = 5'h0E, R_OPND = 5'h10, R_RSEL = 5'h14,
@@ -89,6 +89,28 @@ module core_cpif_tb;
     li = li + 1;
   endtask
 
+  // UM figure 10-43, the coprocessor midinstruction frame, word by word. The
+  // internal register at +$0C is this design's; the effective address at
+  // +$10 is "undefined" unless the instruction has evaluated one, so it is
+  // compared only when `ea_ok` says it has.
+  task automatic check_f9(input logic [31:0] at, input logic [15:0] sr,
+                          input logic [31:0] scanpc, input logic [11:0] off,
+                          input logic [31:0] ipc, input logic [15:0] opw,
+                          input bit ea_ok, input logic [31:0] ea,
+                          input string what);
+    check(dut.u_seq.isp_q === at, {what, ": a ten-word frame -- UM Table 8-6"});
+    check(peek_w(at + 32'h00) === sr, {what, ": +$00 the status register -- UM figure 10-43"});
+    check(peek_l(at + 32'h02) === scanpc, {what, ": +$02 the scanPC -- UM figure 10-43"});
+    check(peek_w(at + 32'h06) === {4'h9, off},
+          {what, ": +$06 format $9 and the vector offset -- UM figure 10-43"});
+    check(peek_l(at + 32'h08) === ipc,
+          {what, ": +$08 the operation word's address -- UM figure 10-43"});
+    check(peek_w(at + 32'h0E) === opw, {what, ": +$0E the operation word -- UM figure 10-43"});
+    if (ea_ok)
+      check(peek_l(at + 32'h10) === ea,
+            {what, ": +$10 the evaluated effective address -- UM figure 10-43"});
+  endtask
+
   task automatic expect_end(input string what);
     check(cp.log_n == li, $sformatf("%s: %0d CIR accesses, expected %0d",
                                     what, cp.log_n, li));
@@ -98,7 +120,7 @@ module core_cpif_tb;
     $display("core_cpif_tb: the coprocessor interface");
 
     // ======================================================================
-    // cpGEN, released at once -- UM 7.2.1.2. The command word goes to the
+    // cpGEN, released at once -- UM 10.2.1.2. The command word goes to the
     // command CIR, the response CIR says "processing finished", and the next
     // instruction runs.
     // ======================================================================
@@ -116,8 +138,8 @@ module core_cpif_tb;
     expect_end("cpGEN");
 
     // ======================================================================
-    // Transfer single main processor register -- UM 7.4.13, both ways, and
-    // come-again chaining them -- UM 7.4.2.
+    // Transfer single main processor register -- UM 10.4.13, both ways, and
+    // come-again chaining them -- UM 10.4.2.
     // ======================================================================
     base_setup();
     poke_w(CODE + 0, 16'hF200);
@@ -141,7 +163,7 @@ module core_cpif_tb;
     expect_end("single register");
 
     // ======================================================================
-    // Evaluate effective address and transfer data -- UM 7.4.9. Twelve bytes
+    // Evaluate effective address and transfer data -- UM 10.4.9. Twelve bytes
     // from (A0) to the coprocessor in three long words, then ten bytes from it
     // to -(A1): two long words and a word, the register stepped by ten first.
     // ======================================================================
@@ -176,7 +198,7 @@ module core_cpif_tb;
     expect_cir(1'b1, R_RESP, 2, 32'hB70A, "from the coprocessor");
     expect_cir(1'b1, R_OPND, 4, 32'hA1A2_A3A4, "from the coprocessor: first");
     expect_cir(1'b1, R_OPND, 4, 32'hB1B2_B3B4, "from the coprocessor: second");
-    // UM 7.3.8: the remainder "is aligned to the most significant byte".
+    // UM 10.3.8: the remainder "is aligned to the most significant byte".
     expect_cir(1'b1, R_OPND, 2, 32'h0000_C1C2, "from the coprocessor: the tail");
     expect_cir(1'b1, R_RESP, 2, 32'h0802, "from the coprocessor");
     expect_end("eval <ea> and transfer");
@@ -187,7 +209,7 @@ module core_cpif_tb;
           "-(A1): the ten bytes, ascending from the new address");
 
     // ======================================================================
-    // Take preinstruction exception -- UM 7.4.18: the exception acknowledge,
+    // Take preinstruction exception -- UM 10.4.18: the exception acknowledge,
     // then a four-word frame whose program counter is the operation word, so
     // that RTE starts the instruction again.
     // ======================================================================
@@ -211,7 +233,7 @@ module core_cpif_tb;
     expect_end("preinstruction");
 
     // ======================================================================
-    // A protocol violation -- UM 7.5.2.1. An undefined primitive gets the
+    // A protocol violation -- UM 10.5.2.1. An undefined primitive gets the
     // midinstruction frame and vector 13; RTE out of it reads the response CIR
     // again and the dialogue goes on.
     // ======================================================================
@@ -234,6 +256,8 @@ module core_cpif_tb;
     check(peek_l(base + 2) === CODE + 4, "protocol violation: +$02 the scanPC");
     check(peek_l(base + 8) === CODE, "protocol violation: +$08 the operation word's address");
     check(peek_w(base + 14) === 16'hF200, "protocol violation: +$0E the operation word");
+    check_f9(base, 16'h2700, CODE + 4, 12'h034, CODE, 16'hF200, 1'b0, 32'h0,
+             "protocol violation");
     run_until(CODE + 6, 3000, reached);
     check(reached, "protocol violation: RTE goes back to the dialogue, which ends");
     check(dut.u_seq.dreg[1] === 32'h0000_0007, "protocol violation: and the next instruction runs");
@@ -244,7 +268,7 @@ module core_cpif_tb;
     expect_end("protocol violation");
 
     // ======================================================================
-    // No coprocessor -- UM 7.5.2.8: a bus error on the access that starts the
+    // No coprocessor -- UM 10.5.2.8: a bus error on the access that starts the
     // instruction is an F-line exception, not a bus error.
     // ======================================================================
     base_setup();
@@ -267,7 +291,7 @@ module core_cpif_tb;
 
 
     // ======================================================================
-    // cpBcc -- UM 7.2.2.1. The whole operation word to the condition CIR;
+    // cpBcc -- UM 10.2.2.1. The whole operation word to the condition CIR;
     // the verdict in a null primitive; the displacement is from the scanPC,
     // which is on the displacement word.
     // ======================================================================
@@ -303,7 +327,7 @@ module core_cpif_tb;
     check(reached, "cpBcc.L: taken, from the first displacement word");
 
     // ======================================================================
-    // cpScc -- UM 7.2.2.2: the condition word to the condition CIR, and the
+    // cpScc -- UM 10.2.2.2: the condition word to the condition CIR, and the
     // byte at the effective address set or cleared after the dialogue. An
     // effective address with extension words follows the coprocessor's own.
     // ======================================================================
@@ -331,7 +355,7 @@ module core_cpif_tb;
     expect_end("cpScc");
 
     // ======================================================================
-    // cpDBcc -- UM 7.2.2.3. False and the counter not exhausted: branch.
+    // cpDBcc -- UM 10.2.2.3. False and the counter not exhausted: branch.
     // ======================================================================
     base_setup();
     poke_w(CODE + 0,  16'h7402);           // MOVEQ #2,D2
@@ -361,7 +385,7 @@ module core_cpif_tb;
     check(dut.u_seq.dreg[2] === 32'h0000_FFFF, "cpDBcc: the low word only");
 
     // ======================================================================
-    // cpTRAPcc -- UM 7.5.2.4: true is vector 7 with the six-word frame, the
+    // cpTRAPcc -- UM 10.5.2.4: true is vector 7 with the six-word frame, the
     // next instruction's address after the operand words.
     // ======================================================================
     base_setup();
@@ -392,8 +416,8 @@ module core_cpif_tb;
 
 
     // ======================================================================
-    // cpSAVE -- UM 7.2.3.3. Not ready first, which restarts the instruction
-    // (UM 7.2.3.2.2); then a valid eight-byte state to -(A0): the whole frame
+    // cpSAVE -- UM 10.2.3.3. Not ready first, which restarts the instruction
+    // (UM 10.2.3.2.2); then a valid eight-byte state to -(A0): the whole frame
     // below A0, the format word at the bottom, the state from the top down.
     // ======================================================================
     base_setup();
@@ -448,7 +472,7 @@ module core_cpif_tb;
     check(reached && peek_l(DATA + 32) === 32'h0000_0000, "cpSAVE: empty");
 
     // An invalid format word: abort, then a format error with the four-word
-    // frame -- UM 7.5.1.5.
+    // frame -- UM 10.5.1.5.
     base_setup();
     poke_l(32'h0000_0038, HAND);           // vector 14
     poke_w(CODE + 0, 16'hF311);
@@ -482,7 +506,7 @@ module core_cpif_tb;
     expect_cir(1'b0, R_CTRL, 2, 32'h0001, "cpRESTORE bad length: abort");
     expect_end("cpRESTORE bad length");
 
-    // Both are privileged, checked before any CIR is touched -- UM 7.2.3.3.2.
+    // Both are privileged, checked before any CIR is touched -- UM 10.2.3.3.2.
     base_setup();
     poke_l(32'h0000_0020, HAND);           // vector 8
     poke_w(CODE + 0, 16'h46FC);            // MOVE #$0000,SR: user mode
@@ -496,7 +520,7 @@ module core_cpif_tb;
     expect_end("cpSAVE in user mode: no CIR access");
 
     // ======================================================================
-    // Busy -- UM 7.4.3: the instruction is started again from the beginning,
+    // Busy -- UM 10.4.3: the instruction is started again from the beginning,
     // command word and all.
     // ======================================================================
     base_setup();
@@ -515,7 +539,7 @@ module core_cpif_tb;
     expect_end("busy");
 
     // ======================================================================
-    // Supervisor check in user mode -- UM 7.4.5: abort, then a privilege
+    // Supervisor check in user mode -- UM 10.4.5: abort, then a privilege
     // violation whose frame points at the instruction.
     // ======================================================================
     base_setup();
@@ -537,7 +561,7 @@ module core_cpif_tb;
     expect_end("supervisor check");
 
     // ======================================================================
-    // The stream, the operation word, and the program counter -- UM 7.4.6,
+    // The stream, the operation word, and the program counter -- UM 10.4.6,
     // 7.4.7 and 7.4.2. Six bytes of extension words: a long word and a word.
     // ======================================================================
     base_setup();
@@ -563,8 +587,8 @@ module core_cpif_tb;
     expect_end("stream");
 
     // ======================================================================
-    // Evaluate and transfer effective address -- UM 7.4.8 -- then write to it
-    // -- UM 7.4.10 -- and a non-control-alterable address refused.
+    // Evaluate and transfer effective address -- UM 10.4.8 -- then write to it
+    // -- UM 10.4.10 -- and a non-control-alterable address refused.
     // ======================================================================
     base_setup();
     poke_w(CODE + 0,  16'hF228);           // cpGEN (d16,A0)
@@ -605,8 +629,8 @@ module core_cpif_tb;
     expect_end("evaluate <ea> of D0");
 
     // ======================================================================
-    // Take address and transfer data -- UM 7.4.11 -- and the top of the stack
-    // -- UM 7.4.12, a byte stepping A7 by two.
+    // Take address and transfer data -- UM 10.4.11 -- and the top of the stack
+    // -- UM 10.4.12, a byte stepping A7 by two.
     // ======================================================================
     base_setup();
     poke_w(CODE + 0,  16'hF200);
@@ -639,7 +663,7 @@ module core_cpif_tb;
     expect_end("top of stack");
 
     // ======================================================================
-    // Control registers -- UM 7.4.14: VBR out and in, and a code table 7-5
+    // Control registers -- UM 10.4.14: VBR out and in, and a code table 7-5
     // does not have, which is a protocol violation.
     // ======================================================================
     base_setup();
@@ -671,7 +695,7 @@ module core_cpif_tb;
     expect_end("control register");
 
     // ======================================================================
-    // Multiple main processor registers -- UM 7.4.15 -- D1, D6 and A3.
+    // Multiple main processor registers -- UM 10.4.15 -- D1, D6 and A3.
     // ======================================================================
     base_setup();
     poke_w(CODE + 0,  16'hF200);
@@ -703,7 +727,7 @@ module core_cpif_tb;
     expect_end("multiple registers");
 
     // ======================================================================
-    // Multiple coprocessor registers -- UM 7.4.16 and figure 7-38: two
+    // Multiple coprocessor registers -- UM 10.4.16 and figure 7-38: two
     // twelve-byte operands to -(A1), each written upwards from where A1 has
     // stepped down to.
     // ======================================================================
@@ -732,7 +756,7 @@ module core_cpif_tb;
 
 
     // ======================================================================
-    // Transfer status register and scanPC -- UM 7.4.17. Out: the scanPC and
+    // Transfer status register and scanPC -- UM 10.4.17. Out: the scanPC and
     // then the status register. In: the status register, then a new scanPC,
     // which moves the program on to wherever the coprocessor says.
     // ======================================================================
@@ -765,7 +789,7 @@ module core_cpif_tb;
     expect_end("SR and scanPC");
 
     // ======================================================================
-    // Take midinstruction exception -- UM 7.4.19: acknowledge, the ten-word
+    // Take midinstruction exception -- UM 10.4.19: acknowledge, the ten-word
     // frame, and after RTE the response CIR is read again.
     // ======================================================================
     base_setup();
@@ -781,6 +805,8 @@ module core_cpif_tb;
     check(reached, "midinstruction: the handler runs");
     base = ISP0 - 32'h14;
     check(peek_w(base + 6) === 16'h9104, "midinstruction: format $9, $104");
+    check_f9(base, 16'h2700, CODE + 4, 12'h104, CODE, 16'hF200, 1'b0, 32'h0,
+             "midinstruction");
     run_until(CODE + 4, 3000, reached);
     check(reached, "midinstruction: RTE, and the dialogue ends");
     expect_cir(1'b0, R_CMD, 2, 32'h0900, "midinstruction");
@@ -790,7 +816,47 @@ module core_cpif_tb;
     expect_end("midinstruction");
 
     // ======================================================================
-    // Take postinstruction exception -- UM 7.4.20: the six-word frame with
+    // ... after an effective address has been evaluated, which the frame
+    // then carries at +$10 -- UM figure 10-43 -- and which RTE puts back for
+    // the write to the previously evaluated address that comes after it.
+    // ======================================================================
+    base_setup();
+    poke_l(32'h0000_0104, HAND);           // vector 65
+    poke_w(CODE + 0,  16'hF228);           // cpGEN (d16,A0)
+    poke_w(CODE + 2,  16'h0200);
+    poke_w(CODE + 4,  16'h0040);           // d16
+    poke_w(CODE + 6,  16'h60FE);
+    poke_w(HAND + 0,  16'h4E73);           // RTE
+    cp.push_resp(16'h8A00);                // CA, evaluate and transfer <ea>
+    cp.push_resp(16'h1D41);                // take midinstruction, vector 65
+    cp.push_resp(16'hA002);                // CA, write 2 bytes to the <ea>
+    cp.push_resp(16'h0802);
+    cp.push_opnd(32'h1234_0000);
+    poke_l(DATA + 32'h40, 32'h0000_0000);
+    reset_dut();
+    dut.u_seq.areg[0] = DATA;
+    run_until(HAND, 3000, reached);
+    check(reached, "midinstruction after <ea>: the handler runs");
+    base = ISP0 - 32'h14;
+    check_f9(base, 16'h2700, CODE + 6, 12'h104, CODE, 16'hF228, 1'b1, DATA + 32'h40,
+             "midinstruction after <ea>");
+    dut.u_seq.areg[0] = 32'h0;             // nothing may take the address from A0
+    run_until(CODE + 6, 3000, reached);
+    check(reached, "midinstruction after <ea>: RTE, and the dialogue ends");
+    check(peek_w(DATA + 32'h40) === 16'h1234,
+          "midinstruction after <ea>: the write went to the address the frame kept");
+    expect_cir(1'b0, R_CMD, 2, 32'h0200, "midinstruction after <ea>");
+    expect_cir(1'b1, R_RESP, 2, 32'h8A00, "midinstruction after <ea>");
+    expect_cir(1'b0, R_OADR, 4, DATA + 32'h40, "midinstruction after <ea>: the address");
+    expect_cir(1'b1, R_RESP, 2, 32'h1D41, "midinstruction after <ea>");
+    expect_cir(1'b0, R_CTRL, 2, 32'h0002, "midinstruction after <ea>: acknowledge");
+    expect_cir(1'b1, R_RESP, 2, 32'hA002, "midinstruction after <ea>: after RTE");
+    expect_cir(1'b1, R_OPND, 2, 32'h0000_1234, "midinstruction after <ea>: two bytes");
+    expect_cir(1'b1, R_RESP, 2, 32'h0802, "midinstruction after <ea>");
+    expect_end("midinstruction after <ea>");
+
+    // ======================================================================
+    // Take postinstruction exception -- UM 10.4.20: the six-word frame with
     // the scanPC as the program counter, so RTE goes on to the next
     // instruction.
     // ======================================================================
@@ -812,7 +878,7 @@ module core_cpif_tb;
     check(peek_l(base + 8) === CODE, "postinstruction: +$08 the operation word");
 
     // ======================================================================
-    // An interrupt in the dialogue -- UM 7.5.2.6: a null primitive with CA
+    // An interrupt in the dialogue -- UM 10.5.2.6: a null primitive with CA
     // and IA set, with a request pending, is serviced with the midinstruction
     // frame, and RTE goes back to the response CIR.
     // ======================================================================
@@ -838,6 +904,7 @@ module core_cpif_tb;
     check(peek_w(base + 6) === 16'h9074, "IA: format $9, autovector 5");
     check(peek_w(base + 0) === 16'h2000, "IA: +$00 the mask the program ran under");
     check(peek_l(base + 8) === CODE + 4, "IA: +$08 the coprocessor instruction");
+    check_f9(base, 16'h2000, CODE + 8, 12'h074, CODE + 4, 16'hF200, 1'b0, 32'h0, "IA");
     run_until(CODE + 8, 3000, reached);
     check(reached, "IA: RTE, and the dialogue ends");
     expect_cir(1'b0, R_CMD, 2, 32'h0B00, "IA");
@@ -876,7 +943,7 @@ module core_cpif_tb;
     li = cp.log_n;                         // the dialogue is checked above
 
     // ... and on the master stack, with the throwaway frame on the interrupt
-    // stack -- UM 6.1.9 and 7.5.2.6.
+    // stack -- UM 8.1.9 and 10.5.2.6.
     base_setup();
     poke_l(32'h0000_0074, HAND);
     poke_w(CODE + 0,  16'h46FC);           // MOVE #$3000,SR: M set, mask 0
@@ -904,7 +971,7 @@ module core_cpif_tb;
 
     // ======================================================================
     // A trace pending keeps a general instruction's dialogue open until the
-    // coprocessor says it has finished -- UM 7.5.2.5 -- and then the trace is
+    // coprocessor says it has finished -- UM 10.5.2.5 -- and then the trace is
     // taken.
     // ======================================================================
     base_setup();
@@ -931,7 +998,7 @@ module core_cpif_tb;
     expect_end("trace");
 
     // ======================================================================
-    // A bus error on an interface register after the first -- UM 7.5.2.8 --
+    // A bus error on an interface register after the first -- UM 10.5.2.8 --
     // is a bus error. The long frame; RTE reruns the access and the dialogue
     // carries on from it.
     // ======================================================================
@@ -966,7 +1033,7 @@ module core_cpif_tb;
     expect_end("CIR bus error");
 
     // ======================================================================
-    // A bus error on an operand a primitive is moving -- UM 7.5.2.8 -- with a
+    // A bus error on an operand a primitive is moving -- UM 10.5.2.8 -- with a
     // handler that runs a coprocessor instruction of its own before its RTE,
     // as a page-fault handler that switches FPU contexts does. Three
     // twelve-byte operands from (A0) to the coprocessor, the fifth long word
@@ -1141,7 +1208,7 @@ module core_cpif_tb;
 
     // ======================================================================
     // Evaluate effective address and transfer data to registers and from an
-    // immediate -- UM 7.4.9: a byte into D2's low byte, a word sign extended
+    // immediate -- UM 10.4.9: a byte into D2's low byte, a word sign extended
     // into A4, a byte immediate and a six-byte one.
     // ======================================================================
     base_setup();
@@ -1223,10 +1290,10 @@ module core_cpif_tb;
 
 
     // ======================================================================
-    // Busy with an interrupt pending -- UM 7.4.3: "it services pending
+    // Busy with an interrupt pending -- UM 10.4.3: "it services pending
     // interrupts using a preinstruction exception stack frame", four words
     // with the operation word's address, and then starts the instruction
-    // again. Not ready on cpSAVE does the same -- UM 7.5.2.6.
+    // again. Not ready on cpSAVE does the same -- UM 10.5.2.6.
     // ======================================================================
     base_setup();
     poke_l(32'h0000_0074, HAND);           // autovector 5
@@ -1255,7 +1322,7 @@ module core_cpif_tb;
     expect_end("busy, interrupted");
 
     // MOVEC with a control register code the MC68020 does not have is an
-    // illegal instruction -- UM 6.1.5.
+    // illegal instruction -- UM 8.1.5.
     base_setup();
     poke_l(32'h0000_0010, HAND);           // vector 4
     poke_w(CODE + 0,  16'h4E7A);           // MOVEC $805,D0
@@ -1286,8 +1353,8 @@ module core_cpif_tb;
 
     // ======================================================================
     // The MC68881's port: its sixteen-bit registers answer with DSACK1 alone,
-    // on D31-D16 whatever A1 says (MC68881 UM 7.2). A word write to the command
-    // CIR at A1 = 1 then reaches it on the upper half, where UM table 5-7 has
+    // on D31-D16 whatever A1 says (MC68881 UM 10.2). A word write to the command
+    // CIR at A1 = 1 then reaches it on the upper half, where UM20 table 5-7 has
     // the processor duplicate it; a word read of the restore CIR at A1 = 1 comes
     // back on the upper half too, which is what a sixteen-bit port means.
     // ======================================================================

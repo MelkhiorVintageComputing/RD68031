@@ -2966,7 +2966,7 @@ opcode('0100111001111011', 'movec_to_ctl', 'MOVEC Rn,Rc')
 
 
 # ==========================================================================
-# EXCEPTION PROCESSING -- UM 6.1
+# EXCEPTION PROCESSING -- UM 8.1
 #
 # "Exception processing occurs in four functional steps."
 #
@@ -2988,7 +2988,7 @@ opcode('0100111001111011', 'movec_to_ctl', 'MOVEC Rn,Rc')
 # caller says which frame to build by which routine it jumps to.
 #
 # The frame is written from the top down, which is what a stack is: one pointer,
-# no address arithmetic, and it ends where the frame begins. UM 6.4 explicitly
+# no address arithmetic, and it ends where the frame begins. UM 8.4 explicitly
 # allows it -- "the processor does not necessarily read or write the stack frame
 # data in sequential order" -- and says only that the offsets must come out
 # right.
@@ -3026,10 +3026,10 @@ def exception(stem, frame, six):
     # copy is what goes in the frame.
     u('a copy of the status register as it was',
       asrc='SR', alu='A', dst='T3', size='WORD')
-    u('supervisor, and no tracing of the handler -- UM 6.1 step one',
+    u('supervisor, and no tracing of the handler -- UM 8.1 step one',
       asrc='SR', alu='EXCSR', dst='SR', size='WORD')
     # Setting S may have changed which register A7 is. Everything from here
-    # runs on the supervisor stack, which is what UM 6.1 step three asks for.
+    # runs on the supervisor stack, which is what UM 8.1 step three asks for.
     label(stem + '_stack')
     u('the stack pointer, now the supervisor one',
       asrc='SP', alu='A', dst='EA', size='LONG')
@@ -3037,9 +3037,9 @@ def exception(stem, frame, six):
     u('and the stack pointer is where the frame begins',
       asrc='EA', alu='A', dst='SP', size='LONG')
     label(stem + '_vector')
-    u('the vector address: the base plus the offset -- UM 6.1 step four',
+    u('the vector address: the base plus the offset -- UM 8.1 step four',
       asrc='VBR', bsrc='T0', alu='ADD', dst='T1', size='LONG')
-    u('read the vector. UM 2.1.2 puts every vector but the reset one in '
+    u('read the vector. UM Table 8-1 puts every vector but the reset one in '
       'supervisor DATA space',
       bus='READ', fc='DATA', asel='T1', bytes=4)
     u('... and that is where the handler is',
@@ -3054,7 +3054,7 @@ exception('exc_f2', 'F2', True)
 # --------------------------------------------------------------------------
 # The sources that need no operand
 #
-# UM table 6-5 says which frame each takes and what the stacked program counter
+# UM Table 8-6 says which frame each takes and what the stacked program counter
 # points at. The two that matter:
 #
 #   format $0, and the FAULTING instruction    illegal, A-line, F-line,
@@ -3071,14 +3071,14 @@ def exc_here(stem, vec, executed=False):
 
     `executed` is false for the four that are raised INSTEAD of running an
     instruction -- illegal, the two unimplemented lines, and the privilege
-    violation. UM 6.1.7: such an instruction "does not cause a trace exception
+    violation. UM 8.1.7: such an instruction "does not cause a trace exception
     since it is not executed", which is what notrace says.
     """
     label(stem)
     u('the vector offset',
       asrc='VECOFF', alu='A', dst='T0', size='LONG', vec=vec,
       notrace=(0 if executed else 1))
-    u('the frame carries the address of THIS instruction -- UM table 6-5',
+    u('the frame carries the address of THIS instruction -- UM Table 8-6',
       asrc='PC_D', alu='A', dst='T1', size='LONG', next='exc_f0')
 
 
@@ -3115,7 +3115,7 @@ opcode('1010------------', 'exc_line_a', 'an A-line instruction')
 
 
 # ==========================================================================
-# RTE -- UM 6.1.12
+# RTE -- UM 8.1.13
 #
 # "When the processor executes an RTE instruction, it examines the stack frame
 # on top of the active supervisor stack to determine if it is a valid frame and
@@ -3125,7 +3125,9 @@ opcode('1010------------', 'exc_line_a', 'an A-line instruction')
 #   format $1   restore the SR alone, add eight -- and then START AGAIN, on
 #               whatever stack the restored SR now selects
 #   format $2   restore the SR and the PC, add twelve
-#   anything else   a format error, vector 14
+#   format $9   the coprocessor's -- UM 10.4.19, at the end of this file
+#   format $A, $B   the bus fault frames: checked, then put back -- below
+#   anything else   a format error, vector 14 -- UM 8.1.8
 #
 # The stack pointer is stepped BEFORE the status register is written, because
 # writing the status register is what decides which of the three stack pointers
@@ -3151,12 +3153,12 @@ u('a six-word frame?',
 u('a four-word one?',
   seq='COND', cond='FMT0', next='rte_four')
 u('a short bus fault frame?',
-  seq='COND', cond='FMTA', next='rte_fault_short')
+  seq='COND', cond='FMTA', next='rte_check_short')
 u('a long one?',
-  seq='COND', cond='FMTB', next='rte_fault_long')
-u('a coprocessor midinstruction frame? UM 7.4.19',
+  seq='COND', cond='FMTB', next='rte_check_long')
+u('a coprocessor midinstruction frame? UM 10.4.19',
   seq='COND', cond='FMT9', next='rte_nine')
-u('and anything else is a format error -- UM 6.1.8',
+u('and anything else is a format error -- UM 8.1.8',
   next='exc_format')
 
 label('rte_four')
@@ -3199,7 +3201,7 @@ u('the program counter comes back',
 u('... then wait for the pipe and decode',
   seq='DECODE')
 
-# The throwaway frame. UM 6.1.12: read the status register, step the stack,
+# The throwaway frame. UM 8.1.13: read the status register, step the stack,
 # write the status register, "and then begins RTE processing again ... on top of
 # the active stack, which may or may not be the same stack used for the previous
 # operation". The second frame may be any format, including another throwaway.
@@ -3218,7 +3220,7 @@ u('and do it all again',
 
 
 # ==========================================================================
-# RTE out of a bus fault frame -- UM 6.2.3 and doc/ssw.md
+# RTE out of the long bus fault frame -- UM 8.2.3 and doc/ssw.md
 #
 # "Another method of completing a faulted bus cycle is to allow the processor to
 # rerun the bus cycles during execution of the RTE instruction that terminates
@@ -3240,8 +3242,11 @@ u('and do it all again',
 # by the time it is written.
 #
 # The status register comes LAST and the stack pointer is stepped before it, for
-# the reason UM 6.1.12 gives the four-word frame: writing the status register is
+# the reason UM 8.1.13 gives the four-word frame: writing the status register is
 # what decides which of the three stack pointers A7 means.
+#
+# The short frame has a walk of its own, below: it carries none of this
+# design's state, and RTE reads none out of it -- doc/checkpoint.md rule 1.
 # ==========================================================================
 # What each fault frame's builder writes and each RTE reads back, by offset:
 # assemble.py's check_frame_fields holds them to frames.INTERNAL.
@@ -3249,7 +3254,7 @@ FRAME_WRITES = {}
 FRAME_READS = {}
 
 
-def rte_fault(stem, long_frame):
+def rte_fault(stem):
     label(stem)
     u('the frame base, which is where the walk starts',
       asrc='SP', alu='A', dst='EA_SAVE', size='LONG')
@@ -3270,33 +3275,30 @@ def rte_fault(stem, long_frame):
         (0x14, 2, 'RUPC'),
         (0x16, 2, 'STG_D'),
         (0x18, 4, 'DOB'),
+        (0x1C, 4, 'T0'),
+        (0x20, 4, 'T1'),
+        # Writing this is what says the pipe is whole, and every other pipe
+        # field is behind it in the walk.
+        (0x24, 4, 'FILL'),
+        (0x28, 4, 'T2'),
+        (0x2C, 4, 'DIB'),
+        (0x30, 4, 'T3'),
+        (0x34, 2, 'XW'),
+        (0x36, 2, 'INT36'),
+        (0x38, 4, 'EA'),
+        (0x44, 2, 'LINK'),
+        (0x46, 4, 'PC_PREV'),
+        # The primitive a bus error interrupted: what the rest of its
+        # transfer reads its length and direction from, and which a
+        # handler's own coprocessor instructions have since overwritten.
+        (0x4A, 2, 'CPRIM'),
     ]
-    if long_frame:
-        fields += [
-            (0x1C, 4, 'T0'),
-            (0x20, 4, 'T1'),
-            # Writing this is what says the pipe is whole, and every other pipe
-            # field is behind it in the walk.
-            (0x24, 4, 'FILL'),
-            (0x28, 4, 'T2'),
-            (0x2C, 4, 'DIB'),
-            (0x30, 4, 'T3'),
-            (0x34, 2, 'XW'),
-            (0x36, 2, 'INT36'),
-            (0x38, 4, 'EA'),
-            (0x44, 2, 'LINK'),
-            (0x46, 4, 'PC_PREV'),
-            # The primitive a bus error interrupted: what the rest of its
-            # transfer reads its length and direction from, and which a
-            # handler's own coprocessor instructions have since overwritten.
-            (0x4A, 2, 'CPRIM'),
-        ]
 
     FRAME_READS[stem] = [(off, n, dst) for off, n, dst in fields if n]
     at = 0
     for off, nbytes, dst in fields:
         if nbytes == 0:
-            u('the queue depth, which is what the rerun bits say -- UM 6.2.1',
+            u('the queue depth, which is what the rerun bits say -- UM 8.2.1',
               dst=dst)
             continue
         step = off - at
@@ -3312,25 +3314,15 @@ def rte_fault(stem, long_frame):
           asrc='RDATA', alu='A', dst=dst, size='LONG' if nbytes == 4 else 'WORD')
         at = off
 
-    if not long_frame:
-        # UM 6.2: "when the short bus fault stack frame applies, the address of
-        # the pipe stage B word is the value in the PC plus four". The long
-        # frame carries that address; the short one is only ever built at an
-        # instruction boundary, where the pipe is sequential and the arithmetic
-        # is exact, so it is derived rather than read -- and writing it is what
-        # says the pipe is whole.
-        u('stage B is at the program counter plus four -- UM 6.2',
-          asrc='PC_D', bsrc='FOUR', alu='ADD', dst='FILL', size='LONG')
-
     u('+$00: the status register, read while the stack pointer is still the base',
       bus='READ', fc='DATA', asel='SP', bytes=2)
     u('the stack pointer, past the frame, while it is still this stack',
-      asrc='SP', bsrc='FRAME_B_BYTES' if long_frame else 'FRAME_A_BYTES',
+      asrc='SP', bsrc='FRAME_B_BYTES',
       alu='ADD', dst='SP', size='LONG')
     u('and now the status register, which may change which stack that was',
       asrc='RDATA', alu='A', dst='SR', size='WORD')
-    # UM 6.2.3: "if the DF bit is still set at the time of the RTE execution, the
-    # faulted data cycle is rerun by the RTE instruction"; UM 6.2.2: with it
+    # UM 8.2.3: "if the DF bit is still set at the time of the RTE execution, the
+    # faulted data cycle is rerun by the RTE instruction"; UM 8.2.1: with it
     # cleared, "the data has been correctly written to memory for a write". Both
     # hand the operand back to the bus unit -- doc/checkpoint.md rule 3, the unit
     # of restart is the operand -- and DF decides how much of it is left, which
@@ -3344,8 +3336,131 @@ def rte_fault(stem, long_frame):
       rstop=1, seq='RESUME')
 
 
-rte_fault('rte_fault_short', False)
-rte_fault('rte_fault_long', True)
+# --------------------------------------------------------------------------
+# Is the frame one to restore at all? UM 8.1.13: "for both the short and long
+# bus fault stack frames, the processor first checks the format value on the
+# stack for validity. In addition, for the long stack frame, the processor
+# compares the version number in the stack with its own version number ...
+# The RTE instruction also reads from both ends of the stack frame to make sure
+# it is accessible. If the frame is invalid or inaccessible, the processor
+# takes a format error or a bus error exception, respectively."
+#
+# Both checks come BEFORE the walk, because the walk writes each field straight
+# into the register it came from: a frame refused half-way would leave the
+# machine half restored, and the format error's own frame would then carry a
+# program counter that is no longer the RTE's. Here nothing has moved yet: a
+# bus error on the far end is an ordinary data fault on this microword, which
+# commits nothing (rule 2) and is re-executed when its handler returns, and a
+# format error stacks the RTE's own address below a frame it has not touched
+# -- UM 8.1.13, "in this way, the faulty stack frame remains intact".
+#
+# The near end is the format word at +$06, already read.
+# --------------------------------------------------------------------------
+def _far_end(frame_bytes):
+    u('the far end of the frame -- UM 8.1.13, "both ends"',
+      asrc='T1', bsrc=frame_bytes, alu='ADD', dst='T2', size='LONG')
+    u('... its last word',
+      asrc='T2', bsrc='TWO', alu='SUB', dst='T2', size='LONG')
+    u('... read, to know it is there; the word itself is not wanted',
+      bus='READ', fc='DATA', asel='T2', bytes=2)
+
+
+label('rte_check_long')
+_far_end('FRAME_B_BYTES')
+u('the version word -- UM 8.1.13, "at location SP+$36 in the long stack frame"',
+  asrc='T1', bsrc='VEROFF', alu='ADD', dst='T2', size='LONG')
+u('... read',
+  bus='READ', fc='DATA', asel='T2', bytes=2)
+u('... and held, because the test below reads it',
+  asrc='RDATA', alu='A', dst='XW', size='WORD')
+u('another version\'s frame is a format error -- UM 8.1.8',
+  seq='COND', cond='VERBAD', next='exc_format')
+rte_fault('rte_fault_long')
+
+
+# --------------------------------------------------------------------------
+# RTE out of a SHORT bus fault frame -- doc/checkpoint.md rule 1.
+#
+# This design never builds one (every fault frame it writes is the long one,
+# doc/divergences.md), so a short frame RTE meets came from somewhere else --
+# software, or another processor -- and its internal words mean nothing here.
+# It has no version field to say so, so RTE does not read them: it restores
+# the frame from its architectural fields alone, as UM Table 8-6 defines a
+# fault "at an instruction boundary".
+#
+#   +$00 the status register, last, as for every frame
+#   +$02 the program counter: the next instruction, whose operation word UM
+#        8.2 places in stage D -- "the address of the stage C word is the
+#        value in the program counter plus two". The frame does not carry
+#        stage D, so RTE reads it, from the program space of the stacked
+#        status register (UM 8.2.1).
+#   +$0A the special status word: RC and RB as for the long frame, and DF on a
+#        write means the write is still to be done. The instruction that made
+#        it has finished, so it goes to the bus unit as a posted write of its
+#        own (rule 9) -- the operand is +$10, +$18 and SIZE, and nothing else.
+#        UM 8.2.2: "data read faults only generate the long bus fault frame",
+#        so DF on a read has nowhere to deliver its data; it is dropped.
+#   +$0C, +$0E stage C and stage B, taken as valid where RC and RB are clear.
+#
+# and then resumes at rte_boundary, an instruction boundary.
+# --------------------------------------------------------------------------
+label('rte_check_short')
+_far_end('FRAME_A_BYTES')
+label('rte_fault_short')
+u('the frame base, which is where the walk starts',
+  asrc='SP', alu='A', dst='EA_SAVE', size='LONG')
+u('+$00: the status register, held for the space stage D is read from',
+  bus='READ', fc='DATA', asel='EA_SAVE', bytes=2)
+u('... held',
+  asrc='RDATA', alu='A', dst='XW', size='WORD')
+_short = [
+    (0x02, 4, 'PC_D'),
+    (0x0A, 2, 'SSWA'),
+    (0x0A, 0, 'PIPE_F'),
+    (0x0C, 2, 'STG_C'),
+    (0x0E, 2, 'STG_B'),
+    (0x10, 4, 'DFA'),
+    (0x18, 4, 'DOB'),
+]
+FRAME_READS['rte_fault_short'] = [(0x00, 2, 'XW')] + \
+    [(off, n, dst) for off, n, dst in _short if n]
+_at = 0
+for _off, _n, _dst in _short:
+    if _n == 0:
+        u('the queue depth, which is what the rerun bits say -- UM 8.2.1',
+          dst=_dst)
+        continue
+    if _off != _at:
+        u('... to +$%02X' % _off,
+          asrc='EA_SAVE', bsrc={2: 'TWO', 4: 'FOUR', 6: 'SIX', 8: 'EIGHT'}[_off - _at],
+          alu='ADD', dst='EA_SAVE', size='LONG')
+    u('read +$%02X' % _off,
+      bus='READ', fc='DATA', asel='EA_SAVE', bytes=_n)
+    u('... into %s' % _dst.lower(),
+      asrc='RDATA', alu='A', dst=_dst, size='LONG' if _n == 4 else 'WORD')
+    _at = _off
+u('stage D is the word at the program counter -- UM 8.2',
+  asrc='PC_D', alu='A', dst='T1', size='LONG')
+u('... read from the stacked status register\'s program space -- UM 8.2.1',
+  bus='READ', fc='FRAMEPROG', asel='T1', bytes=2)
+u('... into stage D',
+  asrc='RDATA', alu='A', dst='STG_D', size='WORD')
+u('stage B is at the program counter plus four -- UM 8.2',
+  asrc='PC_D', bsrc='FOUR', alu='ADD', dst='FILL', size='LONG')
+u('the frame was taken at an instruction boundary, and resumes at one',
+  asrc='UBOUND', alu='A', dst='RUPC', size='WORD')
+u('+$00: the status register, read while the stack pointer is still the base',
+  bus='READ', fc='DATA', asel='SP', bytes=2)
+u('the stack pointer, past the frame, while it is still this stack',
+  asrc='SP', bsrc='FRAME_A_BYTES', alu='ADD', dst='SP', size='LONG')
+u('and now the status register, which may change which stack that was',
+  asrc='RDATA', alu='A', dst='SR', size='WORD')
+u('hand the posted write back, if there is one, and resume',
+  rstop=1, seq='RESUME')
+
+label('rte_boundary')
+u('an instruction boundary: decode what stage D holds',
+  seq='DECODE')
 
 exc_here('exc_format', 14, executed=True)
 
@@ -3353,7 +3468,7 @@ exc_here('exc_format', 14, executed=True)
 # THE SUPERVISOR INSTRUCTIONS -- PRM 6
 #
 # Every one of them begins the same way, and it is the only thing that makes
-# the privilege violation of UM 6.1.6 happen at all: "if a user program attempts
+# the privilege violation of UM 8.1.6 happen at all: "if a user program attempts
 # to execute a privileged instruction, a privilege violation exception occurs".
 # The frame carries the address of the instruction that tried -- table 6-5,
 # "first word of instruction causing privilege violation" -- which is what
@@ -3364,7 +3479,7 @@ exc_here('exc_format', 14, executed=True)
 # labels is not on any path -- which is what it was, and the sweep found MOVE
 # #imm,SR running happily in user mode.
 def _privileged():
-    u('privileged -- UM 6.1.6',
+    u('privileged -- UM 8.1.6',
       seq='COND', cond='USER', next='exc_priv')
 
 
@@ -3418,7 +3533,7 @@ u('the user stack pointer into the address register',
 # RESET and STOP -- PRM 6
 # ==========================================================================
 label('reset_insn')
-u('privileged -- UM 6.1.6',
+u('privileged -- UM 8.1.6',
   seq='COND', cond='USER', next='exc_priv')
 u('assert RESET for 512 clock periods. PRM 6: "the processor state, other than '
   'the program counter, is unaffected"',
@@ -3442,7 +3557,7 @@ u('assert RESET for 512 clock periods. PRM 6: "the processor state, other than '
 # enabled when the STOP instruction begins execution". Both are decided at that
 # decode, ahead of the stop bit.
 label('stop_insn')
-u('privileged -- UM 6.1.6',
+u('privileged -- UM 8.1.6',
   seq='COND', cond='USER', next='exc_priv')
 u('the word of immediate that follows',
   asrc='STG_C', alu='A', dst='T0', size='WORD', pf='CONSUME')
@@ -3473,7 +3588,7 @@ opcode('0100111001101---', 'move_usp_from',   'MOVE USP,An')
 # handler", which means this microcode's only business with it is to eat it.
 #
 # Both take vector 7 and a six-word frame, with the address of the instruction
-# that trapped at +$08 -- UM table 6-5.
+# that trapped at +$08 -- UM Table 8-6.
 # ==========================================================================
 # TRAPV tests V, and its own condition field -- bits 11:8 of $4E76 -- reads as
 # NE. So it cannot borrow the sequencer's cc evaluation and tests the flag.
@@ -3505,7 +3620,7 @@ opcode('0100111001110110', 'trapv', 'TRAPV')
 
 
 # ==========================================================================
-# The trace exception -- UM 6.1.7
+# The trace exception -- UM 8.1.7
 #
 # The sequencer puts this in front of the decode arm when the instruction that
 # has just finished was traced, so it is entered at exactly the point the
@@ -3526,7 +3641,7 @@ u('and the frame carries the address of the next one',
 
 
 # ==========================================================================
-# The interrupt exception -- UM 6.1.9
+# The interrupt exception -- UM 8.1.9
 #
 # The sequencer dispatches here at an instruction boundary when a request is
 # pending and no trace is, and it has latched the level. What is left is the
@@ -3541,13 +3656,13 @@ u('and the frame carries the address of the next one',
 #   AVEC    it wants the autovector for its level, 24 + level
 #   BERR    nobody answered: a spurious interrupt, vector 24
 #
-# The mask is raised to the level BEFORE anything else, which is UM 6.1's "for
+# The mask is raised to the level BEFORE anything else, which is UM 8.1's "for
 # the reset and interrupt exceptions, the processor also updates the interrupt
 # priority mask" and what stops the same request being taken again the moment
 # the handler's first instruction ends.
 # ==========================================================================
 label('exc_irq')
-# UM 6.1 step one is "an internal copy is made of the status register", and only
+# UM 8.1 step one is "an internal copy is made of the status register", and only
 # then "for the reset and interrupt exceptions, the processor also updates the
 # interrupt priority mask". The order is visible in the frame: what is stacked is
 # the mask the interrupted program was running under, not the one this interrupt
@@ -3556,7 +3671,7 @@ label('exc_irq')
 # never asked to block still blocked.
 u('a copy of the status register as it was, before anything moves',
   asrc='SR', alu='A', dst='T3', size='WORD')
-u('the mask goes up to this level -- UM 6.1 step one, second half',
+u('the mask goes up to this level -- UM 8.1 step one, second half',
   asrc='SR', bsrc='IRQLEVEL', alu='SETMASK', dst='SR', size='WORD')
 u('the acknowledge cycle: CPU space, type $F, the level on A3-A1',
   bus='READ', fc='CPU', bytes=1, cpuspace='IACK',
@@ -3567,7 +3682,7 @@ u('the device supplied a vector number',
   asrc='IRQVEC', alu='A', dst='T0', size='LONG', next='exc_irq_go')
 
 label('exc_irq_auto')
-u('the autovector for this level -- UM table 6-1, vectors 25 to 31',
+u('the autovector for this level -- UM Table 8-1, vectors 25 to 31',
   asrc='AUTOVEC', alu='A', dst='T0', size='LONG', next='exc_irq_go')
 
 label('exc_irq_spurious')
@@ -3575,15 +3690,15 @@ u('a spurious interrupt -- vector 24',
   asrc='VECOFF', alu='A', dst='T0', size='LONG', vec=24)
 
 label('exc_irq_go')
-u('the frame carries the address of the next instruction -- UM table 6-5',
+u('the frame carries the address of the next instruction -- UM Table 8-6',
   asrc='PC_D', alu='A', dst='T1', size='LONG',
   seq='COND', cond='MASTER', next='exc_irq_master')
-u('supervisor, and no tracing of the handler -- UM 6.1 step one again; the '
+u('supervisor, and no tracing of the handler -- UM 8.1 step one again; the '
   'copy the frame carries was taken above',
   asrc='SR', alu='EXCSR', dst='SR', size='WORD', next='exc_f0_stack')
 
 # --------------------------------------------------------------------------
-# The throwaway frame -- UM 6.1.9
+# The throwaway frame -- UM 8.1.9
 #
 #   "If the M-bit in the SR is set, the processor clears the M-bit and creates
 #    a throwaway exception stack frame on top of the interrupt stack as part of
@@ -3606,7 +3721,7 @@ u('supervisor, and no tracing of the handler -- UM 6.1 step one again; the '
 # `rte_throwaway` does at the other end.
 # --------------------------------------------------------------------------
 label('exc_irq_master')
-u('supervisor, and no tracing of the handler -- UM 6.1 step one',
+u('supervisor, and no tracing of the handler -- UM 8.1 step one',
   asrc='SR', alu='EXCSR', dst='SR', size='WORD')
 u('the master stack: M is still set, so this is MSP',
   asrc='SP', alu='A', dst='EA', size='LONG')
@@ -3625,7 +3740,7 @@ u('and the interrupt stack pointer is where the throwaway begins',
 
 
 # ==========================================================================
-# BUS FAULT -- UM 6.1.2, 6.2 and doc/ssw.md
+# BUS FAULT -- UM 8.1.2, 8.2 and doc/ssw.md
 #
 # The sequencer comes here on the clock the bus unit reports a faulted operand,
 # and it comes here INSTEAD of retiring the microword that asked for it:
@@ -3635,7 +3750,7 @@ u('and the interrupt stack pointer is where the throwaway begins',
 # microword and reissues that same request.
 #
 # The frame is the long one, format $B, because a data fault is by definition
-# taken during the execution of an instruction -- UM 6.1.2, "when the exception
+# taken during the execution of an instruction -- UM 8.1.2, "when the exception
 # is taken during the execution of an instruction, the processor must save its
 # entire state for recovery and uses the long bus fault stack frame".
 #
@@ -3644,7 +3759,7 @@ u('and the interrupt stack pointer is where the throwaway begins',
 #   - it is built from the BOTTOM UP, not top down like the other frames. The
 #     status register at +$00 has to be written before the S bit is set, and its
 #     address is not known until the frame base has been computed, so the base
-#     comes first and the walk goes up from it. UM 6.4 allows either: "the
+#     comes first and the walk goes up from it. UM 8.4 allows either: "the
 #     processor does not necessarily read or write the stack frame data in
 #     sequential order".
 #   - the pointer is `ea_save` and not `ea`, because `ea` is the address buffer
@@ -3653,14 +3768,14 @@ u('and the interrupt stack pointer is where the throwaway begins',
 #     because T0 is the instruction's and is not written out until +$1C.
 #
 # What is NOT here: any microword that could itself fault without being a double
-# bus fault. UM 6.1.2 -- "if a bus error occurs during the exception processing
+# bus fault. UM 8.1.2 -- "if a bus error occurs during the exception processing
 # for a bus error, address error, or reset ... the processor enters the halted
 # state" -- and `g0_q`, set by the same edge that came here, is that window.
 # ==========================================================================
 def fault_frame(stem, long_frame):
     """A format $A or $B frame, built upward from its base.
 
-    One routine for both group-0 vectors. UM 6.1.3 makes the address error
+    One routine for both group-0 vectors. UM 8.1.3 makes the address error
     "similar to a bus error exception but internally initiated", differing only
     in the vector number, so the two share everything and the vector comes out of
     a latch -- FLTVEC and FLTFMT -- rather than out of the microword.
@@ -3673,12 +3788,12 @@ def fault_frame(stem, long_frame):
     u('+$00: the status register, written BEFORE anything sets S -- and so '
       'to supervisor data by name, since DATA would still be the user\'s space',
       bus='WRITE', fc='SDATA', asel='EA_SAVE', asrc='SR', alu='A', bytes=2)
-    u('supervisor, and no tracing of the handler -- UM 6.1 step one',
+    u('supervisor, and no tracing of the handler -- UM 8.1 step one',
       asrc='SR', alu='EXCSR', dst='SR', size='WORD')
     u('and the stack pointer is the frame base, which is now a supervisor one',
       asrc='EA_SAVE', alu='A', dst='SP', size='LONG')
 
-    # (offset, bytes, source) in ascending order. The offsets are UM table 6-5
+    # (offset, bytes, source) in ascending order. The offsets are UM Table 8-6
     # for the named fields and doc/checkpoint.md for the rest;
     # assemble.py's check_frame_fields proves the set against frames.py.
     fields = [
@@ -3710,14 +3825,14 @@ def fault_frame(stem, long_frame):
             (0x46, 4, 'PC_PREV'),
             (0x4A, 2, 'CPRIM'),
         ]
-        # UM table 6-5 makes the frame forty-six words whatever is in them. The
+        # UM Table 8-6 makes the frame forty-six words whatever is in them. The
         # words this design has no use for are written as zero rather than left
         # as whatever the handler's stack held: a frame is copied and restored
         # by a task switch, and one that carries the previous owner's stack is
         # a leak with no upside.
         fields += [(off, 4, 'ZERO') for off in range(0x4C, 0x5C, 4)]
     else:
-        # UM table 6-5 makes the short frame sixteen words. Its last two are
+        # UM Table 8-6 makes the short frame sixteen words. Its last two are
         # internal and this design has nothing to put in them: a format $A frame
         # is taken at an instruction boundary, where every register the long
         # frame's +$36 carries is either about to be set by the decode that
@@ -3744,7 +3859,7 @@ def fault_frame(stem, long_frame):
       next='exc_f0_vector')
 
 
-# UM table 6-5 gives the short frame to a fault taken at an instruction
+# UM Table 8-6 gives the short frame to a fault taken at an instruction
 # boundary. This design never builds it: a prefetch fault is taken by the
 # instruction's own last microword, which RTE re-executes, and that microword
 # may read any working register -- which only the long frame carries. RTE still

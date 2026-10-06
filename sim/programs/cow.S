@@ -12,8 +12,10 @@
 | user's registers, logs the frame, copies the page, updates the page table
 | through a subroutine that does unrelated work on the way, restores the
 | registers and returns with DF set, so the processor reruns the write itself
-| (UM 6.2.3). One page the kernel completes the write for instead, clearing DF
-| (UM 6.2.2). And the page table the handler reads is not mapped the first time,
+| (UM 8.2.3). One page the kernel completes the write for instead, clearing DF
+| (UM 8.2.2). The MMU is the MC68030's in one respect that matters here: it
+| treats a read-modify-write cycle as a write for protection (UM 8.2.3), so the
+| CAS faults on its read, and RTE reruns the whole operation. And the page table the handler reads is not mapped the first time,
 | so the first fault's handler takes a fault of its own -- a supervisor read,
 | handled by the same code two frames deep, and returned from into the handler.
 |
@@ -28,7 +30,7 @@
 
         .equ    ISP0,    0x3000         | the supervisor stack, growing down
         .equ    KVARS,   0x2000         | +0 faults, +4 log pointer, +8 done, +C SR
-        .equ    KLOG,    0x2010         | per fault: address, SSW, stacked SR
+        .equ    KLOG,    0x2010         | per fault: address, SSW, SR, format, version
         .equ    SHADOW,  0x2400         | the copy's other half
         .equ    PAGER,   0x27F0         | a page address written here maps it
         .equ    RESULTS, 0x6000         | what the user program records
@@ -86,7 +88,7 @@ _start:
         rte
 
 | The bus error handler. The frame is the long one, 46 words, and after the
-| MOVEM it starts 60 bytes up the stack.
+| MOVEM it starts 60 bytes up the stack. UM Table 8-6 for the offsets.
 buserr:
         movem.l %d0-%d7/%a0-%a6, -(%sp)
         lea     KVARS, %a5
@@ -96,6 +98,8 @@ buserr:
         move.l  %d0, (%a4)+
         move.w  60+0x0A(%sp), (%a4)+    | the special status word
         move.w  60+0x00(%sp), (%a4)+    | the status register it stacked
+        move.w  60+0x06(%sp), (%a4)+    | the format and vector offset
+        move.w  60+0x36(%sp), (%a4)+    | the version word -- UM 8.1.13
         move.l  %a4, 4(%a5)
 
         move.l  %d0, %d1
@@ -181,7 +185,8 @@ user:
         lea     0x6080, %a1
         lea     0x4330, %a0
         move.l  (%a1), 8(%a0)
-        | Read-modify-write.
+        | Read-modify-write -- the instruction kind, not RMC: ADDQ, BSET and
+        | BFINS read and then write with ordinary cycles.
         lea     0x4410, %a0
         addq.l  #3, (%a0)
         move.w  %ccr, (%a5)+            | +$08: all clear
@@ -190,6 +195,7 @@ user:
         move.w  %ccr, (%a5)+            | +$0A: Z, the bit was clear
         lea     0x4610, %a0
         bfins   %d2, (%a0){#4:#8}
+        | RMC: the MC68030's MMU refuses the READ (UM 8.2.3), RW = 1, RM = 1.
         lea     0x4710, %a0
         cas.l   %d3, %d4, (%a0)
         move.w  %ccr, (%a5)+            | +$0C: Z, the compare was equal

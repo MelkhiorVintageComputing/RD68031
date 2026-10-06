@@ -189,3 +189,47 @@ It does not matter to this design. The core's side of 48 — the late BERR sampl
 one clock after DSACK is recognised — leaves 24 ns at 20 MHz against the printed
 20, and would leave 14 against a 30. `make timing` uses the printed value. The user's decision, after M3: keep it
 as printed, and revisit the value only if it ever binds.
+
+---
+
+## 10. Where the long frame's version number is
+
+**Followed: UM 8.1.8, 8.1.13 and Table 8-6 — the top nibble of the word at
+`SP+$36`.**
+
+UM 8.1.8: RTE "compares the internal version number of the processor to that
+contained in the frame at memory location SP+54 (SP+$36)"; UM 8.1.13: "the
+version number is located in the most significant nibble (bits 15–12) of the
+word at location SP+$36 in the long stack frame"; and the MC68030 manual's own
+Table 8-6 draws `VERSION #` on the `+$36` row. The programmer's reference
+manual's figure B-12, "MC68020 and MC68030 Long Bus Cycle Stack Frame, Format
+$B", draws it on the row labelled `+$38`, with "INTERNAL REGISTERS, 3 WORDS"
+spanning `+$30` to `+$36`. The MC68020 manual's Table 6-5 has the same slip, and
+RD68021 recorded it there.
+
+Arithmetic settles it: three words from `+$30` end at `+$35`, and eighteen
+from `+$38` end at `+$5B`, the last byte of a 46-word frame. A version at
+`+$38` would leave one word unaccounted for and make the frame 47 words.
+`tools/ucode/frames.py` checks the frame gapless and 46 words long with the
+version at `+$36`.
+
+---
+
+## 11. "A short format stack frame" for the format error
+
+**Followed: Table 8-6 and UM 10.5.2.7 — the four-word frame, format `$0`.**
+
+UM 8.1.8, on the format error: "This exception saves a short format stack
+frame, generates exception vector number 14". In the same section "short" names
+format `$A`, the short bus fault frame (8.1.2, 8.2.1, Table 8-6: "SHORT BUS CYCLE
+FAULT STACK FRAME (16 WORDS)"). Table 8-6 lists "Format Error" under the four-word
+frame, format `$0`, with the stacked program counter pointing to the "RTE or
+cpRESTORE instruction", and UM 10.5.2.7 says of the coprocessor's format errors
+"the MC68030 uses the four-word pre-instruction stack frame and the format error
+vector number 14".
+
+The format error is not a bus fault, has nothing to put in a special status
+word, and is restarted by RTE as a pre-instruction exception; "short" in 8.1.8
+means "four-word". `core_exc_tb` checks the four-word frame for all ten format
+codes the MC68030 does not have, and `core_fault_tb` for a long frame of another
+version.
