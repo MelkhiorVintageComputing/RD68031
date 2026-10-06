@@ -56,7 +56,7 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$(ICACHE_ENTRIES)
 
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl paths audit ucode ucode-check sim sim-bus \
-        timing timing-verbose ea cache cycles cpif check clean
+        timing timing-verbose timing-build ea cache cycles cpif check clean
 
 all: lint
 
@@ -73,7 +73,7 @@ help:
 	@echo "  make sim-bus     ... just the bus-level ones"
 	@echo "  make paging      ... just the bus-fault and demand-paging ones"
 	@echo "  make cpif        ... just the coprocessor interface, against a scripted coprocessor"
-	@echo "  make timing      AC-specification feasibility, all four speed grades"
+	@echo "  make timing      AC-specification feasibility, all five MC68030EC grades"
 	@echo
 	@echo "The oracles, minutes each:"
 	@echo "  make ea          every addressing mode and extension-word shape, against the oracle"
@@ -440,24 +440,28 @@ cosim-long: dirs
 	@$(MAKE) --no-print-directory cosim STEPS=4000000
 
 # ---------------------------------------------------------------------------
-# AC timing
+# AC timing, against the MC68030EC data sheet
 #
 # One run per speed grade. The analysis measures separations in clock edges, so a
 # recording made at one frequency is evidence about that frequency and nothing
-# else: judging a 60 ns recording against the 33.33 MHz limits would credit the
+# else: judging a 50 ns recording against the 50 MHz limits would credit the
 # design with half-clocks it does not have there.
 #
-# Specification 1 gives each grade's minimum cycle time, and those are the four
-# periods below.
+# Specification 1 gives each grade's minimum cycle time, and those are the five
+# periods below: 20, 25, 33.33, 40 and 50 MHz, every grade the data sheet has.
 # ---------------------------------------------------------------------------
-TIMGRADES := 60:16_67 50:20 40:25 30:33_33
+TIMGRADES := 50:20 40:25 30:33 25:40 20:50
 PADSKEW   ?= 0
 
-timing: dirs
+timing-build: dirs
 	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/rd68031_timing_tb.vvp \
 	    -s rd68031_timing_tb $(RTL) sim/models/*.sv sim/tb/rd68031_timing_tb.sv \
 	    > $(BUILD)/timing.build.log 2>&1 \
 	  || { grep -v $(NOTES) $(BUILD)/timing.build.log; exit 1; }
+	@python3 tools/timing/feasible.py > $(BUILD)/timing-selftest.log \
+	  || { cat $(BUILD)/timing-selftest.log; exit 1; }
+
+timing: timing-build
 	@ok=1; for g in $(TIMGRADES); do \
 	  p=$${g%%:*}; f=$${g##*:}; \
 	  vvp $(BUILD)/rd68031_timing_tb.vvp +period=$$p \
@@ -469,9 +473,13 @@ timing: dirs
 	done; \
 	test $$ok -eq 1 && echo "PASS: timing"
 
-timing-verbose: dirs
-	@$(MAKE) --no-print-directory timing 2>&1 | head -5
-	@python3 tools/timing/analyse.py --freq 16_67 --verbose $(BUILD)/timing-16_67.log
+# The same, and then every grade again with its binding constraints, a pad
+# assignment that meets every limit, and the input sampling windows.
+timing-verbose: timing-build
+	@$(MAKE) --no-print-directory timing
+	@for g in $(TIMGRADES); do f=$${g##*:}; \
+	  python3 tools/timing/analyse.py --freq $$f --pad-skew $(PADSKEW) --verbose \
+	      $(BUILD)/timing-$$f.log; done
 
 # ---------------------------------------------------------------------------
 # The gate

@@ -76,8 +76,8 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET)
 | `as_n_o`, `as_oe` | out | Valid address, FC, SIZ and R/W (§7.1.3). |
 | `ds_n_o`, `ds_oe` | out | One strobe. *Changed:* **not asserted in a two-clock synchronous write** (§5.6.6). |
 | `dben_n_o`, `dben_oe` | out | Data buffer enable, active low (Table 5-2); three-state per Table 5-2 and specification 16. Its timing may preclude its use with two-clock synchronous cycles (§5.6.7): it is asserted for half a clock on a two-clock read. *Changed:* RD68021 drove it active high (`doc/bugs-found.md`). |
-| `dsack_n_i[1:0]` | in | `[1]` is DSACK1. Terminates an **asynchronous** cycle and gives the port size. **Both bits must be captured by the same flop pair on the same edge** and decoded afterwards, so that skew between them cannot make a 32-bit port look like an 8-bit one for a moment (inherited from RD68021; the MC68030 limit is to be checked against the MC68030EC skew specification at M3). |
-| `sterm_n_i` | in | *New.* Synchronous termination (§5.6.9): a 32-bit port, with read data latched on the next falling edge. A cycle terminated by STERM takes two clocks with no wait states. Sampled on the rising edge; it must meet setup and hold, unlike DSACK, which is synchronised. |
+| `dsack_n_i[1:0]` | in | `[1]` is DSACK1. Terminates an **asynchronous** cycle on the falling edge where **either** is first recognised (§7.3.1 state 3; specifications 47A/47B), and gives the port size **one clock later**, on the falling edge that latches the data: MC68030EC specification 31A lets the second DSACK trail the first by up to 10 ns at 20 MHz and 3 ns at 50 MHz, with only one of them meeting 47A (footnote 3). Both bits are captured by one flop pair on that edge. *Changed at M3:* RD68021 took the port size on the recognising edge, which read a 32-bit port with a trailing DSACK1 as an 8-bit one (`doc/bugs-found.md`). |
+| `sterm_n_i` | in | *New.* Synchronous termination (§5.6.9): a 32-bit port, with read data latched on the next falling edge. A cycle terminated by STERM takes two clocks with no wait states. Sampled on the **rising** edge, against specifications 60/61 — where DSACK is sampled on the falling edge, against 47A/47B. Neither goes through a synchroniser. |
 
 ### Cache control (§5.7) — *new*
 
@@ -93,7 +93,7 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET)
 | Port | Dir | Notes |
 |---|---|---|
 | `ipl_n_i[2:0]` | in | Encoded level, active low; `ipl_n_i[2]` is the most significant. Synchronised internally. |
-| `ipend_n_o` | out | An interrupt above the mask has been recognised internally. Never three-stated. |
+| `ipend_n_o` | out | An interrupt above the mask has been recognised internally. Never three-stated. A rising-edge register (MC68030EC specification 6, "Clock High to ... IPEND ... Valid"). *Changed at M3:* it was a combinational compare that moved on both edges (`doc/bugs-found.md`). |
 | `avec_n_i` | in | Requests an autovector during an interrupt acknowledge cycle; ignored in every other cycle (§7.4.1.2). |
 
 ### Bus arbitration (§5.9)
@@ -108,7 +108,7 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET)
 
 | Port | Dir | Notes |
 |---|---|---|
-| `berr_n_i` | in | Bus error. With HALT, selects retry rather than exception. |
+| `berr_n_i` | in | Bus error. With HALT, selects retry rather than exception. Sampled on falling edges only — the termination samples, the late window (specification 27A), and, at M3, the end of a retry too (`doc/bugs-found.md`). |
 | `reset_n_i` | in | External reset input. Unlike the MC68000 and MC68010 it does **not** need HALT asserted with it. |
 | `reset_n_o`, `reset_n_oe` | out | Open drain. `reset_n_o` is constant 0; the `RESET` instruction asserts `reset_n_oe` for **512 clocks** (§7.8) to reset peripherals without disturbing the core. |
 | `halt_n_i` | in | Suspends bus activity at the end of the current cycle; with BERR, requests a retry. *Changed:* **input only** (Table 5-2). The MC68020 drove HALT on a double bus fault; the MC68030 shows the halted state on STATUS instead (§5.11.4). |
@@ -186,3 +186,24 @@ behaviour between cycles and after reset, never on relinquish or in reset.
 `bus_reset_tb` checks every group in reset and after it, `bus_arb_tb` on
 relinquish, single-wire arbitration and while halted, and `bus_error_tb` while
 halted and while waiting to retry.
+
+## Where each input is sampled
+
+Settled at M3 against the MC68030EC data sheet; specification numbers are its
+own. Every row is measured: `rd68031_timing_tb` moves the input half a
+nanosecond before and half a nanosecond after the edge named, and the core
+behaves differently the two times (`doc/ac-timing.md`).
+
+| Input | Edge | How | Specifications |
+|---|---|---|---|
+| `dsack_n_i` | falling: entering S3 and each wait to terminate; entering S5 for the port size | directly, no synchroniser (§7.3.1 state 3) | 47A, 47B, 28A; 31A, the skew |
+| `berr_n_i`, `halt_n_i` | falling: with DSACK; the late window entering S5, or after STERM; each burst beat; each clock of a retry | directly | 47A, 47B; 27A for the late window; 28A |
+| `avec_n_i` | falling, with DSACK | directly | 47A, 47B, 28A |
+| `sterm_n_i` | rising: entering S2, each wait, each burst beat | directly (§7.1, a synchronous input) | 60, 61 |
+| `cback_n_i` | rising, with STERM | directly | 60, 61 |
+| `ciin_n_i` | rising, with STERM; or entering S4 of a DSACK cycle (§7.2.8) | directly | 60, 61 |
+| `d_i` | falling: entering S5, or after STERM | directly | 27, 30; 29 for the asynchronous hold |
+| `ipl_n_i`, `br_n_i`, `bgack_n_i`, `halt_n_i`, `cdis_n_i`, `mmudis_n_i`, `reset_n_i` | falling | two falling-edge ranks, `rd68031_sync` (§7.1, figure 7-1) | 47A, 47B |
+
+HALT appears twice: the termination samples read the pin (Table 7-8 case 2),
+and the halt itself goes through the synchroniser (§7.5.3).

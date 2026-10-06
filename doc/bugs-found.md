@@ -191,3 +191,84 @@ not hold the bus.
 **Stops it coming back:** `bus_arb_tb`'s relinquish and retry on the first read
 (BG asserted, the bus released, the rerun asserting RMC) and on the write (BG
 never asserted while RMC is).
+
+---
+
+## M3 · The port size was read from DSACK on the edge that recognised it
+
+**What:** the bus unit captured DSACK1 and DSACK0 into one flop pair on the
+falling edge that first saw either, and took the port size from that capture.
+MC68030EC specification 31A lets the second DSACK trail the first by up to
+10 ns at 20 MHz and 3 ns at 50 MHz, and footnote 3 asks only that "#47A must be
+met by DSACK0 or DSACK1" — one of them. So a 32-bit port whose DSACK1 trailed
+its DSACK0 by a legal nanosecond was recognised on the edge as an 8-bit port: a
+long word became four byte cycles, the operand engine assembled the bytes from
+the wrong lanes, and nothing reported an error. The comment above the capture
+cited 31A as the reason for capturing both bits together, which prevents a
+torn sample but not a late one. Inherited from RD68021, whose own 31A says the
+same.
+
+**Found by:** M3's re-reading of 31A and its footnote against the MC68030EC
+data sheet, which M1 had flagged; then the new skew test in
+`rd68031_timing_tb`, which failed at every grade with the old capture
+("a skew of 19.0 ns gave the wrong port size or data" at 50 MHz).
+
+**Fixed by:** the cycle still terminates on the edge either DSACK is first
+recognised on (UM 7.3.1 state 3), but the port size is taken one clock later, on
+the falling edge that latches the data, when both have arrived and the device
+still holds them — it keeps DSACK "asserted until it detects the negation of AS"
+(UM 7.3.1 state 5), which is that edge. In the half clock before it, `early_q`
+reads the pins directly; nothing on a rising edge does.
+
+**Stops it coming back:** `make timing`'s skew test, DSACK0 first and DSACK1
+first, a clock less a nanosecond apart, at every grade; specification 31A fails
+if the long word does not arrive whole in one cycle.
+
+---
+
+## M3 · The end of a retry read BERR and HALT on the rising edge
+
+**What:** a retry waits for BERR and HALT both to be negated, and the bus unit
+tested that with the raw pins, in the next-state logic of its rising-edge state
+register. Both are asynchronous inputs: UM 7.1 latches them "during a sample
+window around the falling edge of the clock", specifications 47A and 47B bound
+them only there, and UM 7.5 even recommends that a device move them "with the
+rising edge". So the one place the core read them was the one instant a
+compliant device may be changing them — in silicon, a metastable input to a
+multi-bit state register. In simulation it was a race between the testbench's
+assignment and the flop.
+
+**Found by:** the input probes of `rd68031_timing_tb`. The retry probe negates
+BERR and HALT half a nanosecond either side of a falling edge and times the
+rerun; the core reran at the same instant both times — the sample was not at
+that edge — and 47A and 47B failed at every grade.
+
+**Fixed by:** `retry_clr_q`, a falling-edge register of "both negated", which
+the rising-edge logic reads. No synchroniser rank is added; the rerun is at most
+half a clock later than before. `bus_error_tb`, `bus_arb_tb` and `bus_burst_tb`
+pass unchanged.
+
+**Stops it coming back:** the `retry_negate` probe, checked against 47A and 47B
+at every grade.
+
+---
+
+## M3 · IPEND was combinational and moved on both edges
+
+**What:** `ipend_n_o` was the inverted output of a comparison between the
+synchronised interrupt level, a falling-edge register, and the mask in `sr_q`, a
+rising-edge one. So it moved on falling edges when a level arrived and on rising
+edges when the mask changed, where MC68030EC specification 6 times IPEND from
+"Clock High", with the address; and a comparison of several bits of each could
+glitch on any edge that changed two of them, which is the decode
+`doc/coding-standard.md` forbids on a pin.
+
+**Found by:** going through specification 6's signal list for M3; IPEND is the
+one pin it names that the bus unit does not own.
+
+**Fixed by:** `ipend_q`, a rising-edge register of the same comparison. The
+sequencer acts on `irq_pending`, not on the pin, so nothing else moves.
+
+**Stops it coming back:** `core_exc_tb` checks every change of IPEND over the
+whole run falls on a rising edge, and that it changes at all. Run against the old
+combinational pin, it fails: IPEND moved on a falling edge nine times.

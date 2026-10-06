@@ -330,6 +330,9 @@ EXEMPT = [
     ('biu', 'rmc_first_q',  '... except while its first bus cycle waits to be '
                             'retried -- UM 7.7.4, relinquish and retry'),
     ('biu', 'halt_hold',    'the processor is halted'),
+    ('biu', 'retry_clr_q',  'BERR and HALT both negated, as the last falling '
+                            'edge saw them: the end of a retry. About the '
+                            'pins, sampled afresh every clock'),
 
     # The MC68030 bus, M1. Cycle-level like the rest: a fault is recognised at
     # the end of a bus cycle (or of a burst), and nothing here outlives it.
@@ -384,6 +387,8 @@ EXEMPT = [
     ('seq', 'dfc_q',        'architectural'),
     ('seq', 'cacr_q',       'architectural'),
     ('seq', 'caar_q',       'architectural'),
+    ('seq', 'ipend_q',      'the IPEND pin, registered: about the pins and '
+                            'the mask, recomputed every clock'),
     ('seq', 'irq_prev_q',   'the interrupt level at the last instruction '
                             'boundary. It is about the PINS, not about the '
                             'instruction: a fault does not change what the '

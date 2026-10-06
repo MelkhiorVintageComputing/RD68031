@@ -152,3 +152,39 @@ second would drive a bus the processor still drove.
 This design releases on AS alone when BGACK is asserted, RMC three-stated with
 the rest, and finishes the sequence — RMC asserted again — when the bus comes
 back. `bus_arb_tb` checks it.
+
+---
+
+## 8. Which speed grades the MC68030 comes in
+
+**Followed: the MC68030EC data sheet — 20, 25, 33.33, 40 and 50 MHz.**
+
+The user's manual and the data sheet do not agree on what parts exist. UM 14.1,
+ordering information, lists 20, 25 and 33.33 MHz parts and no others. UM 12.4.1
+goes slower: it gives specification 31 "with a 16.67-MHz processor" as 50 ns, and
+Table 12-3 has a column for an MC68030RC16. The data sheet, MC68030EC/D Rev. 1 —
+the document UM 13 sends the reader to for "AC timing specifications" — prints
+five columns, 20, 25, 33.33, 40 and 50 MHz; no 16.67 MHz, and two grades the
+ordering list does not have.
+
+`doc/plan.md` asked for a 16.67 MHz grade, which came from the MC68020's table and
+matches the user's manual. It cannot be judged: there is no column of limits for
+it. `make timing` judges the five the data sheet prints. Where the two documents
+overlap they agree — specification 31 at 20 MHz is 43 ns in both.
+
+---
+
+## 9. Specification 48 is tighter at 20 MHz than at 25 MHz
+
+**Followed: the data sheet as printed — 20 ns at 20 MHz, 25 ns at 25 MHz.**
+
+"DSACKx Asserted to BERR, HALT Asserted", the most a device may take, is 20, 25,
+18, 14 and 13 ns at the five grades: the only limit in the AC tables that loosens
+as the part gets faster. `MC68030EC_split/README.md` confirms the digits against
+the printed page and keeps the crop. Nothing in the user's manual gives the
+number; 7.2.8 only says BERR and HALT "must be asserted within the time given as parameter #48 ... in any asynchronous system". The 20 MHz
+value may be a misprint for 30, the MC68020's at 16.67 MHz.
+
+It does not matter to this design. The core's side of 48 — the late BERR sample
+one clock after DSACK is recognised — leaves 24 ns at 20 MHz against the printed
+20, and would leave 14 against a 30. `make timing` uses the printed value.

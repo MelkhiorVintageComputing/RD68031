@@ -5,19 +5,22 @@
 
 """Read an event log and pair its events the way the anchors ask.
 
-    python3 tools/timing/events.py build/timing-events.log
+    python3 tools/timing/events.py build/timing-50.log
 
-The log is what sim/tb/rd68031_timing_tb.sv emits: a scenario marker, then one
-line per pin transition giving the time, the clock edge it happened on, and the
-event's name. Nothing in it knows what a specification is.
+The log is what sim/tb/rd68031_timing_tb.sv emits: the clock period, a few facts
+about the design, then scenarios -- a marker, then one line per transition
+giving the time, the clock edge it happened on, and the event's name -- and the
+input probes. Nothing in it knows what a specification is.
 
 THE PAIRING RULE, stated once because every separation depends on it: an
 occurrence of `a` is paired with the **first occurrence of `b` strictly later in
 the log**. That one rule covers all three shapes a separation comes in -- a width
 (as.assert to as.negate), a gap (as.negate to the next as.assert) and a
 cross-signal separation (addr.valid to as.assert) -- with no special case for any
-of them, and it is why each scenario is a separate log: a read's AS and a write's
-DS must never be able to pair.
+of them, and it is why each scenario is a separate stretch of the log: a read's
+AS and a write's DS must never be able to pair. "Strictly later in the log", not
+in time: the testbench writes a clock edge's internal events (smp.*, clk.end)
+before the pins that move on it, so a sample pairs with a pin on its own edge.
 """
 
 import sys
@@ -36,23 +39,59 @@ class Event(object):
         return '%s@%.1f%s' % (self.name, self.t, self.edge)
 
 
+class Probe(object):
+    """One input probe: the same input changed off_b and off_a ns from an edge
+    of kind `edge`, and what the core did each time."""
+    __slots__ = ('name', 'edge', 'off_b', 'off_a', 'out_b', 'out_a')
+
+    def __init__(self, f):
+        self.name = f[1]
+        self.edge = f[2]
+        self.off_b, self.off_a, self.out_b, self.out_a = [float(x) for x in f[3:7]]
+
+    @property
+    def split(self):
+        """The two runs differed: the core sampled inside (off_b, off_a]."""
+        return abs(self.out_b - self.out_a) > 1e-6
+
+
+class Log(object):
+    def __init__(self):
+        self.period = None
+        self.facts = {}
+        self.scen = {}
+        self.probes = {}
+        self.skews = {}       # name -> [(value, ok), ...]
+
+    def get(self, scen, default=None):
+        return self.scen.get(scen, [] if default is None else default)
+
+
 def read(path):
-    """The log, as {scenario: [Event, ...]} in time order."""
-    out = {}
+    out = Log()
     cur = None
     with open(path) as fh:
         for line in fh:
             f = line.split()
             if not f:
                 continue
-            if f[0] == 'S':
+            if f[0] == 'C':
+                out.period = float(f[1])
+            elif f[0] == 'H':
+                out.facts[f[1]] = f[2]
+            elif f[0] == 'S':
                 cur = f[1]
-                out.setdefault(cur, [])
+                out.scen.setdefault(cur, [])
             elif f[0] == 'T':
                 if cur is None:
                     raise SystemExit('events: a transition before any scenario')
-                lst = out[cur]
+                lst = out.scen[cur]
                 lst.append(Event(float(f[1]), f[2], f[3], len(lst)))
+            elif f[0] == 'P':
+                p = Probe(f)
+                out.probes[p.name] = p
+            elif f[0] == 'Q':
+                out.skews.setdefault(f[1], []).append((float(f[2]), f[3] == '1'))
     return out
 
 
@@ -64,10 +103,9 @@ def pairs(events, a, b):
     """Every (a, b) the pairing rule gives, in order."""
     out = []
     bs = occurrences(events, b)
-    j = 0
     for ea in occurrences(events, a):
         # the first b strictly after this a in the log
-        k = j
+        k = 0
         while k < len(bs) and bs[k].idx <= ea.idx:
             k += 1
         if k < len(bs):
@@ -80,8 +118,10 @@ def main():
         print(__doc__)
         return 1
     log = read(sys.argv[1])
-    for scen in sorted(log):
-        evs = log[scen]
+    print('clock %.3f ns; %s' % (log.period or 0.0,
+                                 ', '.join('%s=%s' % kv for kv in sorted(log.facts.items()))))
+    for scen in sorted(log.scen):
+        evs = log.scen[scen]
         print('%s: %d events, %.1f ns to %.1f ns'
               % (scen, len(evs), evs[0].t if evs else 0, evs[-1].t if evs else 0))
         names = {}
@@ -89,6 +129,14 @@ def main():
             names[e.name] = names.get(e.name, 0) + 1
         for n in sorted(names):
             print('    %-16s %d' % (n, names[n]))
+    for name in sorted(log.probes):
+        p = log.probes[name]
+        print('probe %-18s CLK%s  %+.1f -> %g   %+.1f -> %g   %s'
+              % (name, p.edge, p.off_b, p.out_b, p.off_a, p.out_a,
+                 'sampled in between' if p.split else 'NOT SAMPLED THERE'))
+    for name in sorted(log.skews):
+        for v, ok in log.skews[name]:
+            print('skew  %-26s %.1f ns  %s' % (name, v, 'ok' if ok else 'WRONG'))
     return 0
 
 

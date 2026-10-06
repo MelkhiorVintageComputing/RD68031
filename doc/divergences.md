@@ -145,4 +145,8 @@ on asynchronous and synchronous reads and writes; `bus_reset_tb` checks it
 released after `rst_n` until the first cycle; `bus_error_tb` and `bus_arb_tb`
 check it held while halted; `bus_arb_tb` checks it released on relinquish. All
 of them run with the default; nothing runs or elaborates the cleared setting,
-which differs only in `addr_drive` being constant.
+which differs only in `addr_drive` being constant. Since M3 `make timing`
+measures the release against MC68030EC specifications 7, 8 and 13 at every
+cycle end it happens on, at all five grades — specification 7 there, where the
+data sheet draws it only on relinquish — and says in its log which setting it
+ran (`doc/ac-timing.md`, "`ADDR_HIZ_BETWEEN_CYCLES`").

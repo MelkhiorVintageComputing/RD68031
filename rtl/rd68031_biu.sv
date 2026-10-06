@@ -453,11 +453,20 @@ module rd68031_biu #(
 
   // Retry clears when BOTH BERR and HALT have been negated -- UM 7.5.2, "does not
   // begin another bus cycle until the HALT signal is negated by external logic",
-  // and BERR "should be negated before S2 of the read cycle". These are the raw
-  // pins: they are the same inputs the termination sample uses, and putting a
-  // synchroniser here would delay the restart by two clocks for no reason.
+  // and BERR "should be negated before S2 of the read cycle".
+  //
+  // Sampled on the FALLING edge, like every other use of these two pins. They
+  // are asynchronous inputs, which UM 7.1 latches "during a sample window around
+  // the falling edge of the clock" and specifications 47A and 47B bound only
+  // there; a device is free to move them at a rising edge -- UM 7.5 even
+  // recommends it. This was the raw pins, read by the rising-edge state
+  // register's next-state logic, which is a metastable sample of a multi-bit
+  // register exactly where a device changes them (doc/bugs-found.md, M3). One
+  // falling-edge flop, as the termination samples are: no synchroniser rank is
+  // added, so the restart is at most half a clock later than it was.
+  logic retry_clr_q;
   logic retry_clear;
-  assign retry_clear = berr_n_i && halt_n_i;
+  assign retry_clear = retry_clr_q;
 
   // The asynchronous termination inputs, in positive logic, for the falling-edge
   // samples; and the synchronous ones, for the rising-edge samples.
@@ -675,7 +684,17 @@ module rd68031_biu #(
   logic [1:0] port_off;      // the address's offset within the port
   logic [2:0] xfer_n;        // bytes this transfer will actually move
 
-  assign port_code = sterm_q ? rd68031_pkg::DSACK_32 : dsack_q;
+  // The port size of a DSACK cycle is taken one clock after the edge that
+  // recognised DSACK, at the falling edge that latches the data -- see the
+  // falling-edge block. In the half clock before that edge (S4, after the
+  // rising edge that entered it) it is the pins themselves, for early_q, the
+  // only register clocked on that edge that reads it; no rising-edge register
+  // ever sees this arm, because st_n is S5 again before the next rising edge.
+  logic [1:0] dsack_port;
+  assign dsack_port = ((st_p == rd68031_pkg::ST_S4) && (st_n != rd68031_pkg::ST_S5))
+                    ? dsack_n_i : dsack_q;
+
+  assign port_code = sterm_q ? rd68031_pkg::DSACK_32 : dsack_port;
 
   // The long word a transfer carries. The first is the cycle's own address; a
   // burst beat is the next long word in the line, wrapping -- "the count
@@ -1433,10 +1452,22 @@ module rd68031_biu #(
   // latched (at the end of S4, or at the falling edge after STERM), and the
   // verdict of a synchronous cycle is taken on that same edge.
   //
-  // DSACK1 and DSACK0 are captured by the same flop pair on the same edge and
-  // decoded afterwards. Specification 31A allows skew between them; sampling them
-  // independently would let a 32-bit port present transiently as an 8-bit one,
-  // and the operand engine would assemble the wrong bytes with no error anywhere.
+  // DSACK1 and DSACK0 TERMINATE the cycle on the edge where either is first
+  // recognised, and give the PORT SIZE one clock later, on the edge that
+  // latches the data. MC68030EC specification 31A, footnote 3: "the maximum
+  // allowable skew between DSACK0 to DSACK1 asserted or DSACK1 to DSACK0
+  // asserted; specification #47A must be met by DSACK0 or DSACK1" -- by one of
+  // them, so the other may arrive after the recognising edge. UM 7.3.1 state 3
+  // terminates "as long as at least one of the DSACKx signals is recognized",
+  // and UM 7.3 makes "the bus master ... responsible for de-skewing the
+  // acknowledge and data signals from the slave devices". A port size taken on
+  // the recognising edge read a 32-bit port whose DSACK1 trailed DSACK0 by a
+  // legal 3 ns as an 8-bit port, and the operand engine assembled the wrong
+  // bytes with no error anywhere (doc/bugs-found.md, M3). One clock later both
+  // are valid whenever 31A + 47A fits in a clock, which it does at every grade,
+  // and the device still holds them: it "keeps its data and DSACKx signals
+  // asserted until it detects the negation of AS" (UM 7.3.1 state 5), which is
+  // this same edge. Both bits are still captured by one flop pair on one edge.
   // ==========================================================================
   // The six acceptable asynchronous terminations -- UM Table 7-8, with the case
   // numbers the manual gives them. The table indexes on two samples a clock
@@ -1488,8 +1519,12 @@ module rd68031_biu #(
       d_latched <= '0;
       bg_n_o    <= 1'b1;
       early_q   <= 1'b0;
+      retry_clr_q <= 1'b1;
     end else begin
       st_n <= st_n_nxt;
+
+      // BERR and HALT both negated, for the end of a retry -- see retry_clear.
+      retry_clr_q <= berr_n_i && halt_n_i;
 
       // The rising edge that ended S5, or a burst beat's BL, has consumed the
       // verdict; clear it for the next transfer. A retried cycle keeps nothing
@@ -1548,7 +1583,6 @@ module rd68031_biu #(
       // The asynchronous sample: entering S3, and again at every ST_WL while
       // waiting.
       if (st_n_nxt == rd68031_pkg::ST_S3 || st_n_nxt == rd68031_pkg::ST_WL) begin
-        dsack_q <= dsack_n_i;
         if (berr_s && halt_s) begin
           term_q   <= 1'b1;  term_rty <= 1'b1;               // case 5
         end else if (berr_s) begin
@@ -1579,8 +1613,10 @@ module rd68031_biu #(
 
       // Table 7-8's second sample, for a cycle DSACKx ended. It applies only to
       // a cycle that terminated normally -- a cycle already in error does not get
-      // a second verdict.
+      // a second verdict. The port size is taken here too, one clock after the
+      // recognising edge -- specification 31A, above.
       if ((st_p == rd68031_pkg::ST_S4) && (st_n_nxt == rd68031_pkg::ST_S5)) begin
+        dsack_q <= dsack_n_i;
         if (!term_err && !term_rty) begin
           if (berr_s && halt_s)   term_rty <= 1'b1;          // case 6
           else if (berr_s)        term_err <= 1'b1;          // case 4

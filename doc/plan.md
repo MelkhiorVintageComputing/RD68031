@@ -180,7 +180,7 @@ A C++ machine that mirrors the Linux and QEMU m68k `virt` board, so that a stock
 | M0 | Scaffolding: the RD68021 fork renamed, CLAUDE.md, the 030 pin list in `doc/pinout.md`, submodules, the spikes above | `make check` on the fork (still an MC68020) |
 | M1 | BIU: the asynchronous S0–S5 path forked from `rd68021_biu.sv`, plus synchronous STERM cycles, burst (CBREQ/CBACK), CIIN/CIOUT, DBEN, STATUS/REFILL | `bus_*_tb`, `bus_sync_tb`, `bus_burst_tb` |
 | M2 | Bus exceptions (BERR/HALT retry and rerun, late BERR on synchronous cycles) and arbitration; CPU space and reset re-checked | `bus_error_tb`, `bus_arb_tb`, `bus_cpuspace_tb`, `bus_reset_tb` |
-| M3 | AC feasibility against `MC68030EC` specs at 16/20/25/33/40/50 MHz (`tools/timing/specs.py` retargeted) | `make timing` |
+| M3 | AC feasibility against `MC68030EC` specs at 20/25/33.33/40/50 MHz, every grade the data sheet has — it has no 16.67 MHz (`doc/manual-contradictions.md`, 8) (`tools/timing/specs.py` retargeted) | `make timing` |
 | M4 | Checkpoint freeze: 030 frames ($0 $1 $2 $9 $A $B), the 030 SSW (FC/FB/RC/RB/DF/RM/RW/SIZE/FC2-0, no CALLM state); `frames.py` updated | `doc/checkpoint.md`, `doc/ssw.md` |
 | M5 | Walking skeleton: seq, ifu and microcode on the new BIU; CALLM/RTM removed (illegal) | it runs |
 | M6–M7 | EA engine and integer core against UAE030; then cputest | `make ea vectors-all cputest cosim` |

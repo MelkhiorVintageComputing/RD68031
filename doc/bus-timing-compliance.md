@@ -10,8 +10,11 @@ As of M2 it covers the three kinds of bus cycle the MC68030 has — asynchronous
 (DSACK), synchronous (STERM) and burst (CBREQ/CBACK) — with dynamic bus sizing,
 misaligned operands, CIIN/CIOUT, and the emulator pins STATUS, REFILL and
 MMUDIS (M1); and bus exception control, arbitration, CPU space cycles and reset
-re-verified against the MC68030 manual on all three kinds of cycle (M2). The AC solver (`make timing`) still
-judges the asynchronous cycle against the MC68020's Section 10 until M3.
+re-verified against the MC68030 manual on all three kinds of cycle (M2); and,
+at M3, every pin and every input against the AC tables of the MC68030EC data
+sheet at all five of its grades (`make timing`, `doc/ac-timing.md`). Specification
+numbers in this file are the MC68030EC's
+(`MC68030EC_split/ac-electrical-specifications.csv`).
 
 ## The ruler
 
@@ -40,8 +43,8 @@ without the glitches a decode of a multi-bit state has (`doc/bugs-found.md`).
 | falling → S1 | **AS** asserted; **DS** asserted on a read; **DBEN** asserted on a write; **CBREQ** asserted if this cycle may burst; ECS and OCS negated | 7.3.1/7.3.2 state 1, 7.1.5, 7.1.6, 7.3.4 state 1, specs 9, 12A, 42 |
 | rising → S2 | **DBEN** asserted on a read; write data driven on D31–D0; **STERM tested** (not asserted: the cycle carries on) | 7.3.1 state 2, 7.3.2 state 2, 7.3.4 state 2, specs 40, 23 |
 | falling → S3 | **DSACK1/DSACK0 sampled** — "as long as at least one of the DSACKx signals is recognized by the end of S2"; **DS** asserted on a write | 7.3.1/7.3.2 state 3, specs 47A, 47B |
-| rising → S4 | **CIIN latched** — "on the rising edge of bus cycle state 4" | 7.2.8, 7.2.9, 7.3.1 state 4 |
-| falling → S5 | **read data latched**; AS, DS and CBREQ negated; DBEN negated on a read; Table 7-8's second sample | 7.3.1 states 4 and 5, specs 27, 12, 41 |
+| rising → S4 | **CIIN latched** — "on the rising edge of bus cycle state 4" | 7.2.8, 7.2.9, 7.3.1 state 4, specs 60, 61 |
+| falling → S5 | **read data latched**; **the port size taken from DSACK1/DSACK0**; AS, DS and CBREQ negated; DBEN negated on a read; Table 7-8's second sample | 7.3.1 states 4 and 5, specs 27, 27A, 31A, 12, 41 |
 | rising, ending S5 | address group and CIOUT released; write data released; DBEN negated on a write | 7.3.1/7.3.2 state 5, specs 7, 8, 43 |
 
 A **wait state** is one whole clock inserted between S3 and S4, and the sample
@@ -52,25 +55,26 @@ STERM too, which is how a synchronous device's wait states fall out of the same
 pair of states.
 
 `sim/tb/bus_ruler_tb.sv` asserts every row as a seven-tick pattern from the
-rising edge entering S0, and then the widths the pattern implies against UM20
-Section 10's minima at 16.67 MHz — the numbers the AC solver still uses until M3:
+rising edge entering S0, and then the widths the pattern implies against the
+MC68030EC minima at 20 MHz, the bus harness's clock:
 
-| Spec | What | Minimum (UM20, 16.67 MHz) | This design |
+| Spec | What | Minimum (MC68030EC, 20 MHz) | This design |
 |---|---|--:|--:|
-| 10 | ECS width asserted | 20 ns | 30 ns |
-| 11 | address valid to AS asserted | 15 ns | 30 ns |
-| 14 | AS and DS width asserted (read) | 100 ns | 120 ns |
-| 14A | DS width asserted (write) | 40 ns | 60 ns |
-| 15 | AS, DS width negated | 40 ns | 60 ns |
-| 22 | R/W low to DS asserted (write) | 75 ns | 90 ns |
-| 26 | data-out valid to DS asserted | 15 ns | 30 ns |
-| 44 | R/W low to DBEN asserted (write) | 15 ns | 30 ns |
-| 45 | DBEN width asserted, read | 60 ns | 90 ns |
-| 45 | DBEN width asserted, write | 120 ns | 150 ns |
+| 10 | ECS width asserted | 15 ns | 25 ns |
+| 11 | address valid to AS asserted | 10 ns | 25 ns |
+| 14 | AS and DS width asserted (asynchronous read) | 85 ns | 100 ns |
+| 14A | DS width asserted (write) | 38 ns | 50 ns |
+| 15 | AS, DS width negated | 38 ns | 50 ns |
+| 22 | R/W low to DS asserted (write) | 60 ns | 75 ns |
+| 26 | data-out valid to DS asserted | 10 ns | 25 ns |
+| 44 | R/W low to DBEN asserted (write) | 10 ns | 25 ns |
+| 45 | DBEN width asserted, asynchronous read | 50 ns | 75 ns |
+| 45 | DBEN width asserted, asynchronous write | 100 ns | 125 ns |
 
 **This is not the AC-timing conformance analysis.** An RTL model has no pad delays,
-so the limits become a feasibility question instead, and that is `make timing` —
-retargeted to the MC68030EC tables at M3.
+so the limits become a feasibility question instead, and that is `make timing`,
+which judges these and every other specification at all five grades, on every
+kind of cycle (`doc/ac-timing.md`).
 
 ### Synchronous cycle
 
@@ -240,9 +244,21 @@ extra cycles the MC68030 runs to complete a cache entry from a narrow port
 (6.1.3.1, figures 6-5 to 6-10) are the data cache's and come with it at M10; until
 then this behaves as an MC68030 with its data cache disabled.
 
-`DSACK1` and `DSACK0` are captured by the same flop pair on the same edge and
-decoded afterwards, so that skew between them cannot make a 32-bit port present
-transiently as an 8-bit one.
+**The port size is taken one clock after DSACK terminates the cycle.** Either
+DSACK1 or DSACK0 terminates the cycle on the falling edge it is first recognised
+on — "as long as at least one of the DSACKx signals is recognized by the end of
+S2" (7.3.1 state 3) — and the port size is read from both on the falling edge
+that latches the data, one clock later. Specification 31A allows the second to
+trail the first by up to 3 ns at 50 MHz and 10 ns at 20 MHz, with "#47A ... met
+by DSACK0 or DSACK1" (footnote 3) — by one of them — so on the recognising edge
+the other may not have arrived; and "the bus master is responsible for
+de-skewing the acknowledge and data signals from the slave devices" (7.3). One
+clock later both have, and the device still holds them: it keeps DSACK
+"asserted until it detects the negation of AS" (7.3.1 state 5), which is that
+same edge. Both bits are still captured by one flop pair on one edge. RD68021
+took the port size on the recognising edge, and a 32-bit port with a trailing
+DSACK1 read as an 8-bit one (`doc/bugs-found.md`, M3); `make timing` now asserts
+the two DSACKs as far apart as a clock allows, both ways round.
 
 ## Bus exception control
 
@@ -291,7 +307,9 @@ residual. In an operand of several cycles — dynamic bus sizing or misalignment
 starts at the faulted one; the cycles after it never run.
 
 **Retry** terminates the cycle, places the control signals in their inactive
-state, waits for BERR *and* HALT to be negated, and reissues the cycle unchanged
+state, waits for BERR *and* HALT to be negated — sampled on the falling edges, as
+every other use of the two pins is, against specifications 47A and 47B; it was
+the raw pins on the rising edge until M3 (`doc/bugs-found.md`) — and reissues the cycle unchanged
 — address, FC, SIZ, R/W, CBREQ on a burst's first access ("causes the processor
 to retry the bus cycle and assert CBREQ again", 7.5.2), and OCS if the cycle
 had it. The manual is silent on whether OCS comes again on the rerun of an
@@ -483,7 +501,7 @@ is in `doc/divergences.md`.
 **MMUDIS** is synchronised by two falling-edge ranks, like CDIS, and goes to the
 top level's sink until the MMU of M11 (`bus_status_tb`).
 
-## Known gaps at M2
+## Known gaps at M3
 
 | | |
 |---|---|
@@ -492,7 +510,6 @@ top level's sink until the MMU of M11 (`bus_status_tb`).
 | Which requests are cachable and burstable — CACR's enables, freeze, burst enables | M10 |
 | CIOUT's value — the ATC entry's or the TTx register's CI bit | M11 |
 | STATUS's ATC-miss, spurious/autovector and F-line indications | `doc/divergences.md` |
-| AC limits against the MC68030EC tables | M3 |
 | A bus error while RTE loads a frame is not a double bus fault | M8–M9, `doc/divergences.md` |
 | The external RESET input resetting the processor | M8–M9, `doc/divergences.md` |
 | The MMU's CPU-space accesses, and the internal bus error of an MMU fault (7.5) | M11 |

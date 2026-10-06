@@ -4,8 +4,8 @@
 
 // RD68031 -- the bus cycle on the manual's own ruler.
 //
-// UM 7.3 measures a bus cycle in states, one per CLK half period, and UM20 figures 10-3
-// and 10-4 draw every pin against them. This testbench indexes its observations the
+// UM 7.3 measures a bus cycle in states, one per CLK half period, and MC68030EC
+// figures 3 and 4 draw every pin against them. This testbench indexes its observations the
 // same way: tick 0 is the rising edge that enters S0, tick 1 the falling edge that
 // enters S1, and so on to tick 6, the rising edge that ends S5. Pins are sampled
 // SNAP ns after each edge.
@@ -17,13 +17,15 @@
 //      5.3.2 -- which say exactly which signal moves in which state.
 //
 //   2. The widths and separations the pattern implies, in nanoseconds, against the
-//      minima UM20 Section 10 prints for the 16.67 MHz grade. A half clock is 30 ns
-//      there, so every one of these is a real number and not a tautology.
+//      minima the MC68030EC data sheet prints for its 20 MHz grade, the harness's
+//      clock. A half clock is 25 ns there, so every one of these is a real number
+//      and not a tautology.
 //
 // This is not the AC-timing conformance analysis, which is a different thing: an
-// RTL model has no pad delays, so section 10's limits become a feasibility question
-// rather than a measurement. That is `make timing`, in M3. What is checked here is
-// the part that does not need pad delays -- the distances between clock edges.
+// RTL model has no pad delays, so the data sheet's limits become a feasibility
+// question rather than a measurement. That is `make timing`, at every grade. What
+// is checked here is the part that does not need pad delays -- the distances
+// between clock edges.
 
 `timescale 1ns / 1ps
 
@@ -85,13 +87,13 @@ module bus_ruler_tb;
 
   task automatic expect_ge(input string name, input realtime got_ns,
                            input real want_ns);
-    $sformat(what, "%s: %0.1f ns, specification minimum %0.1f ns at 16.67 MHz",
+    $sformat(what, "%s: %0.1f ns, MC68030EC specification minimum %0.1f ns at 20 MHz",
              name, got_ns, want_ns);
     check(got_ns >= want_ns, what);
   endtask
 
   initial begin
-    $display("bus_ruler_tb: the bus cycle against UM 7.3 and UM20 figures 10-3, 10-4");
+    $display("bus_ruler_tb: the bus cycle against UM 7.3 and MC68030EC figures 3, 4");
     reset_dut();
     for (t = 0; t < 4096; t = t + 1) s32.mem[t] = 8'h10 + t[7:0];
 
@@ -128,13 +130,13 @@ module bus_ruler_tb;
           "read SIZ is long word throughout the cycle");
 
     expect_ge("read, specification 10, ECS width asserted",
-              t_ecs_hi - t_ecs_lo, 20.0);
+              t_ecs_hi - t_ecs_lo, 15.0);
     expect_ge("read, specification 14, AS and DS width asserted",
-              t_as_hi - t_as_lo, 100.0);
+              t_as_hi - t_as_lo, 85.0);
     expect_ge("read, specification 45, DBEN width asserted",
-              t_dben_hi - t_dben_lo, 60.0);
+              t_dben_hi - t_dben_lo, 50.0);
     expect_ge("read, specification 11, address valid to AS asserted",
-              t_as_lo - t_ecs_lo, 15.0);
+              t_as_lo - t_ecs_lo, 10.0);
 
     // ---------------------------------------------------------------------
     // Write, 32-bit port, no wait states. UM 7.3.2.
@@ -167,15 +169,15 @@ module bus_ruler_tb;
     expect_pattern("write D_OE", doe_r, 7'b0011110);
 
     expect_ge("write, specification 14A, DS width asserted",
-              t_ds_hi - t_ds_lo, 40.0);
+              t_ds_hi - t_ds_lo, 38.0);
     expect_ge("write, specification 45, DBEN width asserted",
-              t_dben_hi - t_dben_lo, 120.0);
+              t_dben_hi - t_dben_lo, 100.0);
     expect_ge("write, specification 22, R/W low to DS asserted",
-              t_ds_lo - t_rw, 75.0);
+              t_ds_lo - t_rw, 60.0);
     expect_ge("write, specification 26, data-out valid to DS asserted",
-              t_ds_lo - t_dout, 15.0);
+              t_ds_lo - t_dout, 10.0);
     expect_ge("write, specification 44, R/W low to DBEN asserted",
-              t_dben_lo - t_rw, 15.0);
+              t_dben_lo - t_rw, 10.0);
 
     // ---------------------------------------------------------------------
     // Two reads back to back. Specification 15 is the only width that needs a
@@ -189,7 +191,7 @@ module bus_ruler_tb;
           as_hi_first = $realtime;
           @(negedge as_n_o);
           expect_ge("specification 15, AS width negated between cycles",
-                    $realtime - as_hi_first, 40.0);
+                    $realtime - as_hi_first, 38.0);
         end
         op_read(32'h0000_0301, 4, got, cycles);   // misaligned: two bus cycles
       join
@@ -213,8 +215,8 @@ module bus_ruler_tb;
       expect_pattern("waited read ECS", ecs_r, 7'b0111111);
       expect_pattern("waited read AS", as_r, 7'b1000000);  // still asserted
       expect_pattern("waited read DBEN", dben_r, 7'b1100000);
-      expect_ge("waited read, AS width asserted",
-                t_as_hi - t_as_lo, 100.0);
+      expect_ge("waited read, specification 14, AS width asserted",
+                t_as_hi - t_as_lo, 85.0);
     end
 
     $display("bus_ruler_tb: %0d checks, %0d failures", checks, fails);

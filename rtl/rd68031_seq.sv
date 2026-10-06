@@ -1410,7 +1410,24 @@ module rd68031_seq #(
   // UM20 6.1.9: IPEND "signals to external devices that an interrupt exception
   // will be taken at an upcoming instruction boundary". It is a pin and is
   // never three-stated.
-  assign ipend_n_o = ~irq_ipend;
+  //
+  // A RISING-edge register. MC68030EC specification 6 times IPEND from "Clock
+  // High", with the address, and figure 8 draws it there. The comparison it
+  // registers reads the level from the input synchroniser, a falling-edge
+  // register, and the mask from sr_q, a rising-edge one, so as a combinational
+  // output it moved on both edges -- and, being a comparison of several bits
+  // of each, could glitch on any edge that changed two of them, which is the
+  // decode doc/coding-standard.md forbids on a pin (doc/bugs-found.md, M3).
+  // Registered, it is one rising edge later than the comparison, which is
+  // still before the boundary the sequencer acts at: the sequencer reads
+  // irq_pending, not the pin.
+  logic ipend_q;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) ipend_q <= 1'b0;
+    else        ipend_q <= irq_ipend;
+  end
+
+  assign ipend_n_o = ~ipend_q;
 
   // ==========================================================================
   // Tracing -- UM20 6.1.7 and table 6-2

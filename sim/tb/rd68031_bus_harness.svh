@@ -24,16 +24,16 @@
 // nanoseconds after each edge, late enough that the edge has settled and early
 // enough that nothing else has happened.
 //
-// CLK_PERIOD is 60 ns by default -- 16.67 MHz, the slowest MC68020 grade, which
-// the AC solver judges against until M3 retargets it to the MC68030EC tables.
+// CLK_PERIOD is 50 ns by default -- 20 MHz, the slowest grade in the MC68030EC
+// clock table (specification 1). The AC analysis runs it at every grade.
 //
 // This file is included inside a module, so it carries no `timescale of its own:
 // the directive is not allowed there, and the including testbench sets it.
 
-// The clock period, in nanoseconds. 60 ns -- 16.67 MHz -- is the slowest speed
-// grade in the MC68020's clock table and the default here, but the AC analysis
+// The clock period, in nanoseconds. 50 ns -- 20 MHz -- is the slowest speed
+// grade in the MC68030EC clock table and the default here, but the AC analysis
 // needs one run per grade: the separations it measures are in clock edges, so a
-// 16.67 MHz recording is evidence about 16.67 MHz and nothing else.
+// 20 MHz recording is evidence about 20 MHz and nothing else.
 real CLK_PERIOD;
 
 // Pins are sampled this long after each edge: late enough that the edge has
@@ -97,6 +97,10 @@ logic  [1:0] beat_num, beat_port;
 // the test -- UM 12.7.1.
 logic        sts_bound_drv, sts_pend_drv, sts_exc_drv, sts_refill_drv;
 logic        mmudis_drv;
+// The interrupt level and CDIS, active high here. Nothing but rd68031_timing_tb
+// moves them: the bus unit only synchronises them.
+logic  [2:0] ipl_drv;
+logic        cdis_drv;
 logic        mmudis_sync_n;
 
 // The fetch port has the same contract as the data port: the operand completes at
@@ -201,13 +205,13 @@ rd68031_biu dut (
     .dsack_n_i (dsack_n_i), .sterm_n_i (sterm_n_i),
     .ciin_n_i (ciin_n_i), .ciout_n_o (ciout_n_o), .ciout_oe (ciout_oe),
     .cbreq_n_o (cbreq_n_o), .cbreq_oe (cbreq_oe), .cback_n_i (cback_n_i),
-    .ipl_n_i (3'b111), .avec_n_i (~avec_drv),
+    .ipl_n_i (~ipl_drv), .avec_n_i (~avec_drv),
     .br_n_i (~br_drv), .bg_n_o (bg_n_o), .bgack_n_i (~bgack_drv),
     .berr_n_i (~berr_drv),
     .reset_n_i (~reset_in_drv & ~reset_n_oe), .reset_n_o (reset_n_o),
     .reset_n_oe (reset_n_oe),
     .halt_n_i (~halt_drv),
-    .cdis_n_i (1'b1), .mmudis_n_i (~mmudis_drv),
+    .cdis_n_i (~cdis_drv), .mmudis_n_i (~mmudis_drv),
     .refill_n_o (refill_n_o), .status_n_o (status_n_o)
 );
 
@@ -236,15 +240,19 @@ tri1       sterm_ext_n;
 
 assign dsack_n_i = dsack32 & dsack16 & dsack8 & dsackw & dsackss & dsacksn
                  & dsack_ext_n;
-// Two of the synchronous inputs can also be forced by the test, from a rising
-// edge as UM 7.1 asks of a synchronous input, to show what the processor ignores.
+// Three of the synchronous inputs can also be forced by the test, from a rising
+// edge as UM 7.1 asks of a synchronous input, to show what the processor ignores
+// -- or, in rd68031_timing_tb, at a chosen distance from the edge that samples
+// them.
 logic sterm_force;
 logic cback_force;
+logic ciin_force;
 assign sterm_n_i = sterm32 & sterm16 & sterm8 & stermw & stermss & stermsn
                  & sterm_ext_n & ~sterm_force;
 assign cback_n_i = cback32 & cback16 & cback8 & cbackw & cbackss & cbacksn
                  & ~cback_force;
-assign ciin_n_i  = ciin32  & ciin16  & ciin8  & ciinw  & ciinss  & ciinsn;
+assign ciin_n_i  = ciin32  & ciin16  & ciin8  & ciinw  & ciinss  & ciinsn
+                 & ~ciin_force;
 
 rd68031_slave #(.PORT_BYTES (4), .WAITS (0), .BASE (32'h0000_0000),
                 .MASK (32'hF000_0000)) s32 (
@@ -298,7 +306,7 @@ rd68031_slave #(.PORT_BYTES (4), .WAITS (0), .SYNC (1'b1), .BURST (1'b0),
 // Clock, reset, bookkeeping
 // ---------------------------------------------------------------------------
 initial begin
-  if (!$value$plusargs("period=%f", CLK_PERIOD)) CLK_PERIOD = 60.0;
+  if (!$value$plusargs("period=%f", CLK_PERIOD)) CLK_PERIOD = 50.0;
   clk = 1'b0;
   forever #(CLK_PERIOD/2.0) clk = ~clk;
 end
@@ -340,8 +348,11 @@ task automatic reset_dut();
   sts_exc_drv    = 1'b0;
   sts_refill_drv = 1'b0;
   mmudis_drv   = 1'b0;
+  ipl_drv      = 3'd0;
+  cdis_drv     = 1'b0;
   sterm_force  = 1'b0;
   cback_force  = 1'b0;
+  ciin_force   = 1'b0;
   fetch_pending = 1'b0;
   berr_drv     = 1'b0;
   avec_drv     = 1'b0;

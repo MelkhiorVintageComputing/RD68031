@@ -32,6 +32,23 @@ module core_exc_tb;
   bit          reached;
   logic [31:0] sp;
 
+  // IPEND moves on rising edges only: MC68030EC specification 6 times it from
+  // "Clock High", with the address. Every change of the pin, over the whole
+  // run, is checked to fall on one -- after reset, and with the interrupts
+  // below making it move. A flop's output settles in the NBA region, after the
+  // rising edge's own blocking assignment to t_rise.
+  realtime     t_rise;
+  int unsigned ipend_moves, ipend_bad;
+  initial begin t_rise = 0; ipend_moves = 0; ipend_bad = 0; end
+  always @(posedge clk) t_rise = $realtime;
+  always @(ipend_n_o) if (rst_n === 1'b1) begin
+    ipend_moves = ipend_moves + 1;
+    if (!(clk === 1'b1 && $realtime == t_rise)) begin
+      ipend_bad = ipend_bad + 1;
+      $display("  FAIL: IPEND moved at %0t, not on a rising edge", $time);
+    end
+  end
+
   // ------------------------------------------------------------------------
   // The thing on the other end of an interrupt acknowledge -- UM 5.4.1 and
   // 6.1.9. Three answers are possible and all three are tested: a vector
@@ -745,6 +762,9 @@ module core_exc_tb;
     check(reached, "posted, interrupt: RTE, and the autovector handler runs");
     check(iack_level === 3'd5, "posted, interrupt: the acknowledge asked for level 5");
     check(peek_l(32'h0000_8000) === 32'hFACE_B00C, "posted, interrupt: the write was rerun");
+
+    check(ipend_moves > 0, "IPEND moved at all during the run");
+    check(ipend_bad == 0, "IPEND moved only on rising edges (specification 6)");
 
     if (fails == 0 && pipe_fails == 0) $display("PASS: core_exc_tb");
     else                               $display("FAIL: core_exc_tb");

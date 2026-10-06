@@ -5,7 +5,7 @@
 
 """The difference-constraint system, and Bellman-Ford.
 
-An RTL model has no pad delays, so Section 10's limits cannot be measured from
+An RTL model has no pad delays, so the data sheet's AC limits cannot be measured from
 it. They can still be answered, because every one of them is a statement about
 the same unknowns: the delay from a clock edge to the pin moving.
 
@@ -52,13 +52,22 @@ class System(object):
         self.var(y)
         self.edges.append((y, x, c, why, kind))
 
-    def bound(self, x, lo, hi, why):
+    def bound(self, x, lo, hi, why, kind='bound'):
         """lo <= d[x] <= hi, either end optional."""
         self.var(x)
         if hi is not None:
-            self.le(x, '#0', hi, why, 'bound')
+            self.le(x, '#0', hi, why, kind)
         if lo is not None:
-            self.le('#0', x, -lo, why, 'bound')
+            self.le('#0', x, -lo, why, kind)
+
+    def floor(self, x):
+        """d[x] >= 0. A pad delay is a delay: a pin cannot move before the
+        clock edge that moves it. Without this, a pin whose specifications give
+        it only a maximum -- data-out valid, specification 23 -- could be given
+        a negative delay, and a separation measured from it would be met by a
+        pin moving before its own clock edge. Its own kind, so that it is never
+        reported as a budget the data sheet printed."""
+        self.bound(x, 0.0, None, 'a pad delay is not negative (%s)' % x, 'floor')
 
     def sep(self, xa, ta, xb, tb, lo, hi, why):
         """lo <= (tb + d[xb]) - (ta + d[xa]) <= hi"""
@@ -254,6 +263,30 @@ def _self_test():
         fails += 1
         print('  FAIL: the bound\'s margin: expected 30.0, got %s'
               % (('%.1f' % min(bnd)) if bnd else 'none'))
+
+    # The floor: a separation that can only be met by a pin moving before its
+    # own clock edge is not met. Two pins 10 ns apart in the simulation asked to
+    # be 20 ns apart, where only b's delay has a budget (0..30): with the floor
+    # a's delay cannot go negative, and b's 30 ns makes it -- feasible. Ask for
+    # 50 and it is not, though a delay of -10 on a would have done it.
+    def floor_ok(s):
+        s.floor('a')
+        s.bound('b', 0.0, 30.0, 'b')
+        s.sep('a', 0.0, 'b', 10.0, 20.0, None, 'a->b >= 20')
+    case('a separation met above the floor', floor_ok, True)
+
+    def floor_bad(s):
+        s.floor('a')
+        s.bound('b', 0.0, 30.0, 'b')
+        s.sep('a', 0.0, 'b', 10.0, 50.0, None, 'a->b >= 50')
+    case('a separation that needs a negative delay', floor_bad, False)
+
+    # A separation between two edges inside the core, neither with a pad delay:
+    # both ends are the fixed node, so it is a constant, checked as a loop.
+    case('an internal separation that holds',
+         lambda s: s.sep('#0', 0.0, '#0', 20.0, 15.0, None, 'int >= 15'), True)
+    case('an internal separation that does not',
+         lambda s: s.sep('#0', 0.0, '#0', 20.0, 25.0, None, 'int >= 25'), False)
 
     if fails:
         print('FAIL: feasible.py self-test, %d failures' % fails)
