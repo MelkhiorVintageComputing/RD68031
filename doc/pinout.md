@@ -11,7 +11,8 @@ behaviour state by state. The rows marked *new* are the MC68030's additions, and
 *changed* marks a pin that behaves differently from the MC68020's. MMUDIS is synchronised
 and goes to a sink until the MMU of M11; CIOUT is driven from the request, negated by
 every requester until M11; CBREQ is asserted only for a request that allows a line fill,
-which no requester makes until the caches of M10.
+which no requester makes until the caches of M10. M2 settled the output-enable groups
+against §7 and Table 5-2 (below).
 
 The original has three-state and bidirectional pins. This core has none: every such pin is
 split into an input `_i`, an output `_o` and an output-enable `_oe`. An external wrapper
@@ -100,8 +101,8 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET)
 | Port | Dir | Notes |
 |---|---|---|
 | `br_n_i` | in | Bus request. |
-| `bg_n_o` | out | Bus grant. Never three-stated — no `_oe`. |
-| `bgack_n_i` | in | Bus grant acknowledge. Three-wire arbitration (§7.7). |
+| `bg_n_o` | out | Bus grant. Never three-stated — no `_oe`. The seven-state arbiter of figure 7-61. |
+| `bgack_n_i` | in | Bus grant acknowledge. Three-wire arbitration (§7.7), or single-wire: BGACK alone releases the bus (§7.7.4). |
 
 ### Bus exception control (§5.10)
 
@@ -123,26 +124,62 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET)
 
 ## Output-enable domains
 
-"During the reset period, the entire bus three-states (except for non-three-statable
-signals, which are driven to their inactive state)" (§7.8). The reset this design has is
-`rst_n`, and every enable below is negated while it is asserted. The external RESET input
-is synchronised but does not reset the core (`doc/divergences.md`). With bus relinquish and
-the release at the end of each cycle that gives three groups:
+Settled at M2 from Table 5-2's "Three-State" column, the MC68030EC
+specifications that measure each release, and UM 7.5.3, 7.7.4 and 7.8.
 
-| Enable | Covers | Negated when |
-|---|---|---|
-| `a_oe`, `fc_oe`, `siz_oe`, `rmc_oe`, `ciout_oe` | address, FC, SIZ, RMC, CIOUT | between bus cycles, on bus relinquish, and in reset |
-| `d_oe` | data | except from S2 to the end of a write cycle |
-| `as_oe`, `ds_oe`, `rw_oe`, `dben_oe`, `cbreq_oe` | AS, DS, R/W, DBEN, CBREQ | on bus relinquish and in reset |
-| `reset_n_oe` | RESET | open drain — asserted only to pull low |
+Table 5-2 lists as three-statable: FC0–FC2, A0–A31, D0–D31, SIZ0/SIZ1, R/W, RMC,
+AS, DS, DBEN, CIOUT and CBREQ. Not three-statable: OCS, ECS, IPEND, BG, RESET,
+REFILL and STATUS. The three-statable ones fall in three groups by when they are
+released:
 
-CIOUT is in the address group because specifications 6, 7 and 8 measure it with the
-address, FC, SIZ and RMC; CBREQ is in the control group because specification 16 is
-"Clock High to AS, DS, R/W, DBEN, CBREQ High Impedance".
+| Enable | Covers | Negated when | Source |
+|---|---|---|---|
+| `a_oe`, `fc_oe`, `siz_oe`, `ciout_oe` | address, FC, SIZ, CIOUT | between bus cycles (with `ADDR_HIZ_BETWEEN_CYCLES`), on bus relinquish, in reset | specifications 6, 7, 8: "Clock High to Function Code, Size, RMC, CIOUT, Address, Data High Impedance" |
+| `rmc_oe` | RMC | as the address group, except that it stays driven for the whole of a locked run, gaps included | specification 7; UM 7.1.1 |
+| `d_oe` | data | except from S2 to the end of a write cycle; while halted; on relinquish; in reset | 7.3.2, 7.5.3, specification 7 |
+| `as_oe`, `ds_oe`, `rw_oe`, `dben_oe`, `cbreq_oe` | AS, DS, R/W, DBEN, CBREQ | on bus relinquish and in reset only | specification 16: "Clock High to AS, DS, R/W, DBEN, CBREQ High Impedance" |
+| `reset_n_oe` | RESET | open drain — asserted only to pull low | Table 5-2, 7.8 |
 
-`ecs_n_o`, `ocs_n_o`, `ipend_n_o`, `bg_n_o`, `refill_n_o` and `status_n_o` have no enable;
-they are always driven (Table 5-2).
+So **CIOUT is in the address group** — specifications 6, 7, 8, 11 and 13 all
+measure it with the address, FC, SIZ and RMC — and **CBREQ is in the control
+group**, with AS and DS: specification 16 releases it, and specifications 9
+and 12 drive it on the edges AS and DS move on. M1 had placed them so
+provisionally; §7 and the specifications agree.
 
-`ADDR_HIZ_BETWEEN_CYCLES` is a parameter, inherited from RD68021, for a board that needs
-the address bus held between cycles. It changes only the first group's behaviour at the end
-of a cycle, never on relinquish or reset.
+**Relinquish** is the arbiter's T (UM 7.7.4, figure 7-61): every group above is
+released "after the next rising edge following the negation of AS and RMC",
+and driven again "immediately following a state change, when bus mastership is
+returned". RMC does not hold the bus while BGACK alone asserts T — single-wire
+arbitration "applies to all bus cycles of a read-modify-write sequence" — nor
+while the first read of a read-modify-write waits to be retried
+(`doc/manual-contradictions.md`, 6 and 7).
+
+**Halted** (UM 7.5.3): the data bus is released, the control group is driven
+inactive — "not high-impedance state" — and the address group stays driven
+with the halted cycle's values, released on a grant and driven again with the
+same values when the bus comes back.
+
+**Reset** (UM 7.8): "during the reset period, the entire bus three-states
+(except for non-three-statable signals, which are driven to their inactive
+state)". The reset this design has is `rst_n`, and every enable above is
+negated while it is asserted; ECS, OCS, BG, REFILL and STATUS are driven
+negated, and IPEND by the sequencer. "Once RESET negates, all control signals
+are driven to their inactive state, the data bus is in read mode, and the
+address bus is driven": the control group is driven at once, R/W high; the
+address group follows `ADDR_HIZ_BETWEEN_CYCLES` (`doc/divergences.md`). The
+external RESET input is synchronised but does not reset the core
+(`doc/divergences.md`), and does not three-state the bus either: it is `rst_n`
+that stands for it.
+
+`ecs_n_o`, `ocs_n_o`, `ipend_n_o`, `bg_n_o`, `refill_n_o` and `status_n_o` have
+no enable; they are always driven (Table 5-2).
+
+`ADDR_HIZ_BETWEEN_CYCLES` is a parameter, inherited from RD68021, set by
+default: it releases the address group at the end of every cycle. Cleared, the
+group stays driven between cycles, which is what the MC68030EC read and write
+figures draw (`doc/divergences.md`). It changes only the first two groups'
+behaviour between cycles, never on relinquish or reset.
+
+`bus_reset_tb` checks every group in reset and after it, `bus_arb_tb` on
+relinquish, single-wire arbitration and while halted, and `bus_error_tb` while
+halted and while waiting to retry.

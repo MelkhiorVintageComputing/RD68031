@@ -62,3 +62,93 @@ all three paragraphs.
 7.1.7: "Refer to 7.3.2 Asynchronous Write Cycle for timing relationships of
 STERM." 7.3.2 does not mention STERM; its timing is in 7.3.4 and 7.3.5, the
 synchronous read and write cycles, and in 7.2.10. This design takes it from those.
+
+---
+
+## 4. Is BERR with STERM case 3 or case 4 of Table 7-9?
+
+**Followed: the table and 7.5.1 — case 4, the late bus error, recognised on the
+falling edge after STERM.**
+
+The summary before Table 7-9 says: "Bus Error Termination: BERR is asserted in
+lieu of, at the same time, or before STERM (case 3) or after STERM (case 4)".
+The table's own rows say otherwise. Case 3 is STERM "NA" at N and "A" at N+2
+with BERR "A/S" then "S" — BERR *before* STERM; case 4 is STERM "A" and BERR
+"A" at N, with N+2 "not part of bus cycle" — BERR *with* STERM. 7.5.1's third
+way of recognising a bus error is that same row: "BERR is asserted and
+recognized on the next falling clock edge following the rising clock edge on
+which STERM is asserted and recognized", and figure 7-51, "Late Bus Error with
+STERM", draws it. Retry has the same split between its summary (case 5 "at the
+same time") and its rows (case 6, "A" with STERM).
+
+Both readings end in a bus error, so the result is the same either way; what
+the choice decides is which edge samples it. This design samples BERR and HALT
+on the falling edge after the rising edge that recognises STERM, and
+`bus_error_tb` runs cases 4 and 6 with BERR asserted on STERM's edge and cases
+3 and 5 one edge before it.
+
+---
+
+## 5. Does a halt or a retry negate RMC?
+
+**Followed: no — RMC stays asserted while the bus is halted or waiting to
+retry in the middle of a read-modify-write.**
+
+7.5.2: on a retry "the processor terminates the bus cycle, places the control
+signals in their inactive state, and does not begin another bus cycle until the
+HALT signal is negated"; and, two paragraphs on, "the processor retries any
+read or write cycle of a read-modify-write operation separately; RMC remains
+asserted during the entire retry sequence". RMC is one of the bus control
+signals (7.1.1, "Bus Control Signals"; 5.6), so the first sentence negates it
+and the second keeps it. 7.5.3 says the same of a halt as the first sentence
+does of a retry — "bus control signals are driven inactive" — and nothing
+about RMC.
+
+The second sentence is the specific one, and it is the one that keeps the
+operation indivisible, which is RMC's whole purpose (7.3.3). This design keeps
+RMC asserted, and driven, through a retry and through a halt alike;
+`bus_error_tb` checks it during a halt, and `bus_arb_tb` that BG stays negated
+through a retried write.
+
+---
+
+## 6. "BG will not be asserted while RMC is asserted" — but relinquish and retry
+
+**Followed: 7.7.4 and 7.5.2 — the first read cycle of a read-modify-write may
+be relinquished with BERR, HALT and BR.**
+
+The note under figure 7-61: "The BG output will not be asserted while RMC is
+asserted." 7.7.4: "One way for an alternate bus master to force the MC68030 to
+release the bus applies only to the first read cycle of an read-modify-write
+sequence. The MC68030 allows normal bus arbitration during this read cycle; a
+normal relinquish and retry operation (asserting BERR, HALT, and BR at the same
+time) is used." And 7.5.2: "The MC68030 does not relinquish the bus during a
+read-modify-write operation, except during the first read cycle." That
+relinquish needs BG, and by entry 5 RMC is asserted through the retry it is
+part of.
+
+This design lifts the RMC lock while — and only while — the first bus cycle of
+a locked run waits to be retried: BG is asserted, the bus, RMC with it, is
+three-stated once granted, and the retried read asserts RMC again. On every
+later cycle of the run, BR waits for RMC to negate. `bus_arb_tb` checks both.
+
+---
+
+## 7. Does the bus wait for RMC to be released — single-wire arbitration
+
+**Followed: 7.7.4's single-wire paragraph — BGACK releases the bus between the
+cycles of a read-modify-write.**
+
+7.7.4: "If T is true, the address, data, and control buses are placed in the
+high-impedance state after the next rising edge following the negation of AS
+and RMC." Two pages on, single-wire arbitration "applies to all bus cycles of
+a read-modify-write sequence": "an alternate master forces the MC68030 to
+release the bus by asserting BGACK and waits for AS to negate before taking the
+bus ... AS must be observed to be negated (high) on two consecutive clock
+edges". RMC does not negate inside the sequence, so read by the first sentence
+the bus would never be released, and an alternate master that followed the
+second would drive a bus the processor still drove.
+
+This design releases on AS alone when BGACK is asserted, RMC three-stated with
+the rest, and finishes the sequence — RMC asserted again — when the bus comes
+back. `bus_arb_tb` checks it.

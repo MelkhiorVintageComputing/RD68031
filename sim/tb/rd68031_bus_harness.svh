@@ -55,6 +55,7 @@ logic  [3:0] req_cpuspace;
 logic  [7:0] req_cpuaddr;
 logic        req_burst;
 logic        req_ciout;
+logic        req_cpfault;   // a bus error on this CPU-space operand is a fault
 logic        req_ciin;
 logic        req_ack;
 logic        req_last;
@@ -142,6 +143,8 @@ logic halt_drv;
 logic br_drv;
 logic bgack_drv;
 logic dbf_drv;
+logic reset_req_drv;  // the RESET instruction's request -- UM 7.8
+logic reset_in_drv;   // the RESET pin driven low from outside, active high here
 
 // The three-state data bus.
 wire [31:0] dbus;
@@ -161,7 +164,7 @@ rd68031_biu dut (
     .req_valid (req_valid), .req_kind (req_kind), .req_fc (req_fc),
     .req_addr (req_addr), .req_bytes (req_bytes), .req_wdata (req_wdata),
     .req_rmc (req_rmc), .req_cpuspace (req_cpuspace), .req_cpuaddr (req_cpuaddr),
-    .req_cpfault (1'b0), .req_burst (req_burst), .req_ciout (req_ciout),
+    .req_cpfault (req_cpfault), .req_burst (req_burst), .req_ciout (req_ciout),
     .req_post (1'b0), .req_taken (), .post_busy (), .req_fault_post (),
     .req_ack (req_ack), .req_last (req_last), .req_early (), .req_rdata (req_rdata),
     .req_end (req_end), .req_fault (req_fault), .req_fault_wr (req_fault_wr),
@@ -178,7 +181,7 @@ rd68031_biu dut (
     .beat_valid (beat_valid), .beat_err (beat_err), .beat_data (beat_data),
     .beat_addr (beat_addr), .beat_num (beat_num), .beat_port (beat_port),
     .beat_ciin (beat_ciin), .beat_fetch (beat_fetch),
-    .reset_req (1'b0), .reset_busy (reset_busy), .dbf (dbf_drv),
+    .reset_req (reset_req_drv), .reset_busy (reset_busy), .dbf (dbf_drv),
     .sts_bound (sts_bound_drv), .sts_pend (sts_pend_drv), .sts_exc (sts_exc_drv),
     .sts_refill (sts_refill_drv),
     .ipl_sync_n (ipl_sync_n), .reset_sync_n (reset_sync_n),
@@ -201,7 +204,8 @@ rd68031_biu dut (
     .ipl_n_i (3'b111), .avec_n_i (~avec_drv),
     .br_n_i (~br_drv), .bg_n_o (bg_n_o), .bgack_n_i (~bgack_drv),
     .berr_n_i (~berr_drv),
-    .reset_n_i (1'b1), .reset_n_o (reset_n_o), .reset_n_oe (reset_n_oe),
+    .reset_n_i (~reset_in_drv & ~reset_n_oe), .reset_n_o (reset_n_o),
+    .reset_n_oe (reset_n_oe),
     .halt_n_i (~halt_drv),
     .cdis_n_i (1'b1), .mmudis_n_i (~mmudis_drv),
     .refill_n_o (refill_n_o), .status_n_o (status_n_o)
@@ -224,13 +228,20 @@ assign dbus = oew  ? dw  : 32'bz;
 assign dbus = oess ? dss : 32'bz;
 assign dbus = oesn ? dsn : 32'bz;
 
-assign dsack_n_i = dsack32 & dsack16 & dsack8 & dsackw & dsackss & dsacksn;
+// A testbench may put devices of its own on the bus -- the CPU-space responders
+// of bus_cpuspace_tb, for one -- by driving these. They pull up when nobody
+// does, so every other testbench can ignore them.
+tri1 [1:0] dsack_ext_n;
+tri1       sterm_ext_n;
+
+assign dsack_n_i = dsack32 & dsack16 & dsack8 & dsackw & dsackss & dsacksn
+                 & dsack_ext_n;
 // Two of the synchronous inputs can also be forced by the test, from a rising
 // edge as UM 7.1 asks of a synchronous input, to show what the processor ignores.
 logic sterm_force;
 logic cback_force;
 assign sterm_n_i = sterm32 & sterm16 & sterm8 & stermw & stermss & stermsn
-                 & ~sterm_force;
+                 & sterm_ext_n & ~sterm_force;
 assign cback_n_i = cback32 & cback16 & cback8 & cbackw & cbackss & cbacksn
                  & ~cback_force;
 assign ciin_n_i  = ciin32  & ciin16  & ciin8  & ciinw  & ciinss  & ciinsn;
@@ -320,6 +331,7 @@ task automatic reset_dut();
   req_cpuspace = 4'd0;
   req_cpuaddr  = 8'd0;
   req_burst    = 1'b0;
+  req_cpfault  = 1'b0;
   req_ciout    = 1'b0;
   fetch_burst  = 1'b0;
   fetch_ciout  = 1'b0;
@@ -337,6 +349,8 @@ task automatic reset_dut();
   br_drv       = 1'b0;
   bgack_drv    = 1'b0;
   dbf_drv      = 1'b0;
+  reset_req_drv = 1'b0;
+  reset_in_drv = 1'b0;
   fetch_addr   = 32'd0;
   fetch_fc     = 3'b110;
   repeat (4) @(posedge clk);

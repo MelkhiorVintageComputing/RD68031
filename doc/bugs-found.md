@@ -101,3 +101,93 @@ named, if only to leave it open.
 **Stops it coming back:** nothing automatic for a testbench — iverilog does not
 warn about an unconnected input. The rtl/ side is covered by Verilator's
 `PINMISSING` under `make lint`.
+
+---
+
+## M2 · BGACK alone did nothing: no single-wire arbitration
+
+**What:** the arbiter left state 0 only on BR. Figure 7-61 also goes from state
+0 to state 4 on BGACK, whatever BR is — "as shown by the path from state 0 to
+state 4, BGACK alone can be used to place the processor's external bus buffers
+in the high-impedance state, providing single-wire arbitration capability"
+(UM 7.7.4). An alternate master using it, which "waits for AS to negate before
+taking the bus", drove the bus while the processor still drove it, and the
+processor went on starting cycles under it. During a read-modify-write the
+release, once the arc was there, still waited for RMC to negate, which inside
+the sequence it never does (`doc/manual-contradictions.md`, 7). Inherited
+from RD68021, which recorded two of the figure's seven states as unreadable.
+
+**Found by:** rendering figure 7-61's page as an image rather than reading its
+text layer, which loses the overbars. Every label was then legible, and the
+0-to-4 arc and states 5 and 6 were plain.
+
+**Fixed by:** the seven states of the figure, arc for arc (`rd68031_biu`), and
+the release not waiting for RMC when BGACK is asserted.
+
+**Stops it coming back:** `bus_arb_tb`'s single-wire cases — an idle bus, a
+cycle, a read-modify-write, a burst — and the state 6 to 3 case.
+
+---
+
+## M2 · The re-grant pulsed BG while the old master still held the bus
+
+**What:** with BR still asserted when BGACK came — a second master on the
+wire-ORed request — the five-state arbiter went from state 4 back to state 1,
+then 2; state 2 leaves on "A is asserted", and A was still asserted by the
+first master, so BG was negated again two clocks later, and again, for as long
+as the first master kept the bus. The second master saw a train of two-clock
+grants rather than one held until it could take over. Figure 7-61's states 5
+and 6 exist for exactly this: 6 holds G while A stays asserted and passes to 2
+only once A negates.
+
+**Found by:** the same rendering of figure 7-61.
+
+**Fixed by:** states 5 and 6.
+
+**Stops it coming back:** `bus_arb_tb`'s re-grant case, which holds BGACK from
+one master for eight clocks with BR still asserted and checks BG throughout,
+then the hand-over to the second.
+
+---
+
+## M2 · HALT asserted on an idle bus did not stop the next cycle
+
+**What:** the bus unit consulted HALT only at the end of a cycle. With the bus
+idle when HALT came, the next request started a cycle anyway, and the bus
+halted only after it. UM 7.5.3: "the MC68030 halts external bus activity at the
+next bus cycle boundary" — and single-stepping (figure 7-57) is built on HALT
+being asserted between cycles. Fixing it exposed a second fault behind it: the
+arbiter deferred a grant while the bus unit "has made an internal decision to
+execute a bus cycle", and with HALT holding a pending request off, that
+decision was never made and never unmade, so BR was never granted.
+
+**Found by:** writing `bus_error_tb`'s single-step case from figure 7-57.
+
+**Fixed by:** HALT, synchronised, in the condition for starting any cycle, and
+in the arbiter's deferral.
+
+**Stops it coming back:** `bus_error_tb`'s "HALT asserted on an idle bus" and
+single-step checks; `bus_arb_tb`'s "halted on an idle bus with a request
+pending".
+
+---
+
+## M2 · Relinquish and retry did not relinquish on a read-modify-write's first read
+
+**What:** the RMC lock masked BR from the first cycle of a locked run on, so
+BERR, HALT and BR on its first read were a plain retry and the alternate master
+waited out the whole sequence. UM 7.7.4 makes that read the one exception: "the
+MC68030 allows normal bus arbitration during this read cycle; a normal
+relinquish and retry operation ... is used"; 7.5.2, "except during the first
+read cycle" (`doc/manual-contradictions.md`, 6).
+
+**Found by:** reading 7.7.4 against the RMC inhibit while extending
+`bus_arb_tb`.
+
+**Fixed by:** `rmc_first_q`, set for the first bus cycle of a locked run and
+kept through its retries; while that cycle waits to be retried the lock does
+not hold the bus.
+
+**Stops it coming back:** `bus_arb_tb`'s relinquish and retry on the first read
+(BG asserted, the bus released, the rerun asserting RMC) and on the write (BG
+never asserted while RMC is).

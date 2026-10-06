@@ -54,6 +54,11 @@ module rd68031_slave #(
     parameter bit BURST       = 1'b0,   // answer CBREQ with CBACK
     parameter int BURST_WAITS = 0,      // wait states before each later beat
     parameter bit CIIN        = 1'b0,   // assert CIIN on every read
+    // Answer CPU space (FC = 111) instead of memory: an interrupting device,
+    // a breakpoint responder or a coprocessor. BASE and MASK then select on the
+    // synthesised CPU-space address -- the type field on A19-A16 and whatever
+    // else the test wants (UM figure 7-42).
+    parameter bit CPUSPACE    = 1'b0,
     parameter logic [31:0] BASE = 32'h0000_0000,
     parameter logic [31:0] MASK = 32'hFF00_0000,  // address & MASK == BASE selects
     parameter int ABITS       = 12                // bytes of store, as a power of two
@@ -136,7 +141,8 @@ module rd68031_slave #(
   // breakpoint acknowledge for BKPT #5 is at $00000014, which is inside this
   // model's range, and without this the memory and the breakpoint device both
   // answered it.
-  assign selected = !as_n_i && (fc_i != 3'b111) && ((a_i & MASK) == BASE);
+  assign selected = !as_n_i && ((fc_i == 3'b111) == CPUSPACE)
+                 && ((a_i & MASK) == BASE);
 
   // The DSACK encoding for this port width -- UM Table 7-1, active low. A
   // localparam and an assign, not an always_comb: a process that reads only

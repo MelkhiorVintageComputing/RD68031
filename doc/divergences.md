@@ -60,5 +60,52 @@ consumes it. The processor is reset by `rst_n`, which is not an MC68030 pin
 RD68021, which never acted on the RESET input either; it belongs with the reset
 exception, in the M8–M9 rework of exception processing.
 
-**How it is checked:** `bus_status_tb` checks the three-stating under `rst_n`.
-Nothing checks `reset_n_i`, because it does nothing.
+Two consequences on the bus:
+
+- **Arbitration under `rst_n`.** "Bus arbitration requests are recognized during
+  normal processing, RESET assertion, HALT assertion, and even when the
+  processor has halted due to a double bus fault" (7.7). Under the RESET pin
+  they are — the arbiter does not see the pin either — but `rst_n` resets the
+  arbiter with everything else, and BG stays negated while it is asserted.
+- **The address bus after reset.** "Once RESET negates, all control signals are
+  driven to their inactive state, the data bus is in read mode, and the address
+  bus is driven" (7.8, figure 7-64). With `ADDR_HIZ_BETWEEN_CYCLES` set, the
+  default, the address group is released between cycles, and so also from
+  `rst_n` negating to the first cycle; with it clear the address is driven
+  there as the figure draws it. The default is RD68021's reading of
+  specification 7 as a release at the end of every cycle (its
+  `doc/divergences.md`, "The address group is released between bus cycles").
+  The MC68030EC figures do not support it: the four read and write cycle
+  figures mark specification 8, "Clock High to ... Address Invalid", at the end
+  of a cycle, and specification 7, "... High Impedance", appears on the bus
+  arbitration figure alone. So the part most likely keeps the address driven
+  between cycles, as 7.8 says it does after reset. M3, which retargets the
+  timing to those tables, is where to settle the default.
+
+**How it is checked:** `bus_status_tb` and `bus_reset_tb` check the three-stating
+under `rst_n` and the pins after it; `bus_reset_tb` checks that the RESET pin,
+held low from outside or by the RESET instruction, leaves the bus unit running
+and arbitration working.
+
+---
+
+## A bus error while RTE reads its frame is not a double bus fault
+
+**UM 8.1.2:** "If a bus error occurs during the exception processing for a bus
+error, address error, or reset or while the processor is loading internal state
+information from the stack during the execution of an RTE instruction, a double
+bus fault occurs"; and 8.1.13, Return from Exception: "once the processor
+begins to load the frame to restore its internal state, the assertion of the
+BERR signal causes the processor to enter the halted state with the continuous
+assertion of the STATUS signal".
+
+**What this design does:** the sequencer declares a double bus fault for a bus
+error during exception processing for a bus error, address error or reset —
+the cases UM20 6.1.2 lists, which is where RD68021 took them from — and not
+during RTE's frame reads, which take an ordinary bus error exception. The
+halted state itself, STATUS asserted continuously, is as the MC68030 has it
+(7.5.4). The RTE case belongs with the M8–M9 rework of exception processing.
+
+**How it is checked:** `core_fault_tb` checks the double bus fault that is
+implemented; `bus_arb_tb` checks STATUS and arbitration in it. Nothing checks
+the RTE case, because it is not implemented.

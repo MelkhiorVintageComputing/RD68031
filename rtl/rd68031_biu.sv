@@ -389,11 +389,25 @@ module rd68031_biu #(
   // "The BG output will not be asserted while RMC is asserted" -- the note under
   // figure 7-61, and 7.7.4: the arbiter ignores "bus requests (assertions of BR)
   // that occur after the first read cycle of the read-modify-write sequence".
+  //
+  // The one exception is that first read cycle: "the MC68030 allows normal bus
+  // arbitration during this read cycle; a normal relinquish and retry operation
+  // (asserting BERR, HALT, and BR at the same time) is used" (UM 7.7.4), and
+  // "the MC68030 does not relinquish the bus during a read-modify-write
+  // operation, except during the first read cycle" (UM 7.5.2). So while the
+  // first bus cycle of a locked run is waiting to be retried, the lock does not
+  // hold the bus.
+  logic rmc_first_q;   // the cycle under way is the first of a locked run
+  logic rmc_lock;
+  assign rmc_lock = rmc_hold
+                 && !(rmc_first_q && (st_p == rd68031_pkg::ST_RETRY));
+
   logic arb_req;
-  assign arb_req = arb_r && !rmc_hold;
+  assign arb_req = arb_r && !rmc_lock;
 
   function automatic logic arb_g_of(input rd68031_pkg::arb_state_e st);
-    arb_g_of = (st == rd68031_pkg::ARB_GRANT) || (st == rd68031_pkg::ARB_WAIT);
+    arb_g_of = (st == rd68031_pkg::ARB_GRANT) || (st == rd68031_pkg::ARB_WAIT)
+            || (st == rd68031_pkg::ARB_REGRANT) || (st == rd68031_pkg::ARB_REWAIT);
   endfunction
 
   function automatic logic arb_t_of(input rd68031_pkg::arb_state_e st);
@@ -430,8 +444,12 @@ module rd68031_biu #(
   assign bus_is_idle = (st_p == rd68031_pkg::ST_IDLE)
                        && (st_n == rd68031_pkg::ST_IDLE);
 
+  // HALT stops the NEXT cycle from starting, whether the bus was busy or idle
+  // when it came: "the MC68030 halts external bus activity at the next bus
+  // cycle boundary" (UM 7.5.3). Synchronised, as every asynchronous input
+  // other than the termination samples is.
   logic start_ok;
-  assign start_ok = want_cycle && !arb_t_of(arb_nxt);
+  assign start_ok = want_cycle && halt_sync_n && !arb_t_of(arb_nxt);
 
   // Retry clears when BOTH BERR and HALT have been negated -- UM 7.5.2, "does not
   // begin another bus cycle until the HALT signal is negated by external logic",
@@ -517,28 +535,55 @@ module rd68031_biu #(
   end
 
   // ---------------------------------------------------------------------------
-  // The arbiter's next state -- UM 7.7.4, in the prose's own words
+  // The arbiter's next state -- UM figure 7-61, all seven states
+  //
+  // Read off a rendering of the figure (its overbars are lost in the text
+  // layer, not on the page). R is BR and A is BGACK, both synchronised; G is
+  // BG and T the three-state control. Each arc is the figure's label:
+  //
+  //   0 --RA'--> 1    0 --XA--> 4    0 --R'A'--> 0
+  //   1 --XX---> 2
+  //   2 --RA'--> 2    2 --XA or R'A'--> 3
+  //   3 --XX---> 4
+  //   4 --R'A--> 4    4 --R'A'--> 0  4 --RX--> 5
+  //   5 --XX---> 6
+  //   6 --RA---> 6    6 --RA'--> 2   6 --R'X--> 3
+  //
+  // 0-1-2-3-4-0 is the ordinary relinquish 7.7.4 walks through in prose. 0-4 is
+  // single-wire arbitration: "BGACK alone can be used to place the processor's
+  // external bus buffers in the high-impedance state". 4-5-6 is the re-grant of
+  // 7.7.3, "if a BR is still pending after the assertion of BGACK, another BG is
+  // asserted within a few clocks of the negation of BG", with "the processor
+  // does not perform any external bus cycles before it reasserts BG" -- T stays
+  // asserted throughout -- and state 6 holds that grant for as long as the old
+  // master still asserts BGACK, handing over to state 2 to wait for the new
+  // one's.
+  //
+  // R is the request as the RMC lock leaves it wherever it can assert G:
+  // "the BG output will not be asserted while RMC is asserted".
   // ---------------------------------------------------------------------------
   always_comb begin
     arb_nxt = arb;
     unique case (arb)
       // "Request R and acknowledge A keep the arbiter in state 0 as long as they
       // are both negated. When a request R is received, both grant G and signal T
-      // are asserted."
-      //
-      // ... "except when the MC68030 has made an internal decision to execute a
-      // bus cycle. Then, the assertion of BG is deferred until the bus cycle has
-      // begun" (UM 7.7).
+      // are asserted" -- "except when the MC68030 has made an internal decision
+      // to execute a bus cycle. Then, the assertion of BG is deferred until the
+      // bus cycle has begun" (UM 7.7).
       //
       // That deferral is exactly one edge: the edge on which an idle bus with a
       // request pending enters S0. Testing st_p_nxt for it would be the direct
       // transcription and is a combinational loop -- st_p_nxt depends on
       // start_ok, which depends on this state -- so the test is on the registered
-      // state instead, which says the same thing one expression earlier.
+      // state instead, which says the same thing one expression earlier. A bus
+      // held by HALT has made no such decision, and does not defer.
       rd68031_pkg::ARB_IDLE: begin
-        if (arb_req && !(bus_is_idle && want_cycle))
-             arb_nxt = rd68031_pkg::ARB_GRANT;
-        else arb_nxt = rd68031_pkg::ARB_IDLE;
+        if (arb_a)
+          arb_nxt = rd68031_pkg::ARB_HELD;
+        else if (arb_req && !(bus_is_idle && want_cycle && halt_sync_n))
+          arb_nxt = rd68031_pkg::ARB_GRANT;
+        else
+          arb_nxt = rd68031_pkg::ARB_IDLE;
       end
       // "The next clock causes a change to state 2."
       rd68031_pkg::ARB_GRANT: arb_nxt = rd68031_pkg::ARB_WAIT;
@@ -553,17 +598,16 @@ module rd68031_biu #(
       // "With acknowledge A asserted, the arbiter remains in state 4 until A is
       // negated or request R is again asserted. When A is negated, the arbiter
       // returns to the original state."
-      //
-      // The re-grant arc is 7.7.3's requirement rather than a state read off
-      // figure 7-61: "if a BR is still pending after the assertion of BGACK,
-      // another BG is asserted within a few clocks of the negation of BG", and
-      // "the processor does not perform any external bus cycles before it
-      // reasserts BG" -- which is why it goes to ARB_GRANT, where T is still
-      // asserted, and not through ARB_IDLE.
       rd68031_pkg::ARB_HELD: begin
-        if (arb_req)  arb_nxt = rd68031_pkg::ARB_GRANT;
+        if (arb_req)     arb_nxt = rd68031_pkg::ARB_REGRANT;
         else if (!arb_a) arb_nxt = rd68031_pkg::ARB_IDLE;
-        else          arb_nxt = rd68031_pkg::ARB_HELD;
+        else             arb_nxt = rd68031_pkg::ARB_HELD;
+      end
+      rd68031_pkg::ARB_REGRANT: arb_nxt = rd68031_pkg::ARB_REWAIT;
+      rd68031_pkg::ARB_REWAIT: begin
+        if (!arb_r)      arb_nxt = rd68031_pkg::ARB_DROP;
+        else if (!arb_a) arb_nxt = rd68031_pkg::ARB_WAIT;
+        else             arb_nxt = rd68031_pkg::ARB_REWAIT;
       end
       default: arb_nxt = rd68031_pkg::ARB_IDLE;
     endcase
@@ -1177,6 +1221,7 @@ module rd68031_biu #(
       arb        <= rd68031_pkg::ARB_IDLE;
       hiz_q      <= 1'b0;
       rmc_hold   <= 1'b0;
+      rmc_first_q <= 1'b0;
       halt_hold  <= 1'b0;
     end else begin
       st_p      <= st_p_nxt;
@@ -1219,7 +1264,14 @@ module rd68031_biu #(
       // for that edge; combinational on the way down, because "the bus control
       // signals (controlled by T) are driven by the processor, immediately
       // following a state change, when bus mastership is returned".
-      hiz_q <= arb_t_of(arb_nxt) && !as_win && !rmc_hold;
+      //
+      // RMC holds the bus only while it locks it. Single-wire arbitration is
+      // the other exception: it "applies to all bus cycles of a
+      // read-modify-write sequence" -- "an alternate master forces the MC68030
+      // to release the bus by asserting BGACK and waits for AS to negate before
+      // taking the bus" (UM 7.7.4) -- so with A asserted the release does not
+      // wait for RMC.
+      hiz_q <= arb_t_of(arb_nxt) && !as_win && (!rmc_lock || arb_a);
 
       halt_hold <= (st_p_nxt == rd68031_pkg::ST_HALT);
 
@@ -1272,7 +1324,10 @@ module rd68031_biu #(
       end
 
       if (beat_end && op_active) begin
-        op_first <= 1'b0;
+        // A retried cycle is rerun "using the same access information" (UM
+        // 7.5.2), and that includes OCS if the cycle had it: a retry of the
+        // first cycle of an operand is still the first cycle of the operand.
+        if (!term_rty) op_first <= 1'b0;
         if (op_rw) op_data <= rd_merged;
         op_addr <= op_addr + {29'd0, xfer_done};
         op_rem  <= op_rem - xfer_done;
@@ -1316,6 +1371,10 @@ module rd68031_biu #(
       // residual.
       if (st_p_nxt == rd68031_pkg::ST_S0) begin
         rmc_hold  <= next_rmc;
+        // The first bus cycle of a locked run, and it stays the first through
+        // however many times it is retried.
+        if (st_p != rd68031_pkg::ST_RETRY)
+          rmc_first_q <= next_rmc && !rmc_hold;
         cyc_addr  <= next_addr;
         cyc_fc    <= next_fc;
         cyc_siz   <= this_siz;

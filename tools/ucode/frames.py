@@ -323,10 +323,12 @@ EXEMPT = [
     ('biu', 'op_cpflt',     'whether a bus error on it is a fault -- a '
                             'coprocessor register access -- which the next '
                             'request, or a rerun, sets again'),
-    ('biu', 'arb',          'the arbiter. UM figure 5-44: it is not part of the '
+    ('biu', 'arb',          'the arbiter. UM figure 7-61: it is not part of the '
                             'processor state and a fault does not disturb it.'),
     ('biu', 'bg_n_o',       'the grant pin'),
     ('biu', 'rmc_hold',     'arbitration is inhibited across a read-modify-write'),
+    ('biu', 'rmc_first_q',  '... except while its first bus cycle waits to be '
+                            'retried -- UM 7.7.4, relinquish and retry'),
     ('biu', 'halt_hold',    'the processor is halted'),
 
     # The MC68030 bus, M1. Cycle-level like the rest: a fault is recognised at

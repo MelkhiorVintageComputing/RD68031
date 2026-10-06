@@ -113,20 +113,19 @@ package rd68031_pkg;
   // ==========================================================================
   // Bus arbitration -- UM figure 7-61 and 7.7.4
   //
-  // The figure's seven states carry their G and T outputs as overbarred labels,
-  // and the overbars do not survive the manual's text layer, so states 5 and 6
-  // cannot be read from it. What 7.7.4's prose states completely is the normal
-  // sequence 0-1-2-3-4-0, and that is what these five states are; the re-grant
-  // arc is 7.7.3's requirement rather than a state read off the diagram. See
-  // RD68021's doc/divergences.md; the MC68030's figure 7-61 extracts
-  // no better.
+  // The figure's seven states, numbered as the figure numbers them. Its
+  // overbars do not survive the manual's text layer, but they do survive a
+  // rendering of the page, and that is what these are read from -- the
+  // transitions are in rd68031_biu. G is BG, T the three-state control.
   // ==========================================================================
   typedef enum logic [2:0] {
     ARB_IDLE,    // state 0: G and T negated, the processor is bus master
     ARB_GRANT,   // state 1: G and T asserted
     ARB_WAIT,    // state 2: held, until A is asserted or R is negated
     ARB_DROP,    // state 3: G negated, T held
-    ARB_HELD     // state 4: the external master has the bus
+    ARB_HELD,    // state 4: G negated, T held -- an external master has the bus
+    ARB_REGRANT, // state 5: G asserted again for a request pending in state 4
+    ARB_REWAIT   // state 6: held while the old master still asserts A
   } arb_state_e;
 
   // ==========================================================================

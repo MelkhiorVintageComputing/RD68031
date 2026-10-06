@@ -2845,8 +2845,9 @@ module rd68031_seq #(
   // attempt to alter the current state of memory. Only an external RESET can
   // restart a processor halted by a double bus fault."
   //
-  // Once set it stays set: the bus unit drives HALT out from it, nothing here
-  // retires again, and only the asynchronous reset clears it. Declared at the
+  // Once set it stays set: the bus unit shows it on STATUS, asserted
+  // continuously (UM 7.5.4 -- HALT is an input only on the MC68030), nothing
+  // here retires again, and only the asynchronous reset clears it. Declared at the
   // top of the module, because the stall logic reads it first.
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n)                 dbf_q <= 1'b0;
