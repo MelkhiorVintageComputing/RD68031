@@ -187,4 +187,5 @@ value may be a misprint for 30, the MC68020's at 16.67 MHz.
 
 It does not matter to this design. The core's side of 48 — the late BERR sample
 one clock after DSACK is recognised — leaves 24 ns at 20 MHz against the printed
-20, and would leave 14 against a 30. `make timing` uses the printed value.
+20, and would leave 14 against a 30. `make timing` uses the printed value. The user's decision, after M3: keep it
+as printed, and revisit the value only if it ever binds.

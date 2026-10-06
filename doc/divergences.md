@@ -109,14 +109,14 @@ the RTE case, because it is not implemented.
 
 ## The address group is released between bus cycles
 
-**UM 7.8 and the MC68030EC figures.** Nothing in the manual says the address
-bus is released between cycles, and what it draws suggests it is not. The four
+**UM 7.8 and the MC68030EC figures.** Nothing in the MC68030 manual says the
+address bus is released between cycles, and what it draws could suggest it is not. The four
 read and write cycle figures of MC68030EC (figures 3 to 6) mark specification
 8, "Clock High to Function Code, Size, RMC, IPEND, CIOUT, Address Invalid", at
 the end of a cycle; specification 7, "Clock High to Function Code, Size, RMC,
 CIOUT, Address, Data High Impedance", appears on the bus arbitration figure
 (figure 7) alone; and after reset "the address bus is driven" (7.8, figure
-7-64). So the part most likely keeps the address group — A31–A0, FC2–FC0,
+7-64). Read alone, that suggests the part keeps the address group — A31–A0, FC2–FC0,
 SIZ1/SIZ0, CIOUT — driven from one cycle to the next and three-states it only
 on bus relinquish and in reset.
 
@@ -130,14 +130,24 @@ remain in the same state"). RMC follows the same enable outside a locked
 run (`doc/pinout.md`). The control group is unaffected: it is released
 only on relinquish and in reset (`doc/pinout.md`).
 
-**Why:** the user's decision, taken after M2 asked whether the MC68030EC
-figures meant the default should change: keep the release, which is RD68021's
-reading of specification 7 as a release at the end of every cycle (its
-`doc/divergences.md`, "The address group is released between bus cycles"). A
-board that needs the address held between cycles sets `ADDR_HIZ_BETWEEN_CYCLES`
-to 0 on `rd68031_top`, and the group then stays driven between cycles and after
-reset as the figures draw it. The parameter changes nothing on relinquish or in
-reset.
+**What the MC68020 manual says.** The MC68030's asynchronous bus cycles are
+compatible with the MC68020's, and where the MC68030 documentation is ambiguous
+the MC68020's is the tie-breaker. It is not ambiguous here: the MC68020's read
+and write cycle figures (`MC68020UM_split/figure-10-03-read-cycle.md` and
+`figure-10-04-write-cycle.md`, UM20 figures 10-3 and 10-4) list specification 7,
+"Clock High to Address, Data, FC, Size, RMC High Impedance", among the
+specifications of an ordinary read and write cycle -- a release at the end of
+every cycle, not only on relinquish. RD68021 implements exactly that, with the
+same default (its `doc/divergences.md`, "The address group is released between
+bus cycles"). The MC68030EC data sheet, drawing specification 7 only on
+relinquish, is silent rather than contrary: it does not say the address is held.
+
+**Why:** the user's decision, after M2 and M3 raised the question: keep the
+release, on the MC68020 evidence above. The MC68030EC reading -- the address
+held between cycles -- remains available as `ADDR_HIZ_BETWEEN_CYCLES` = 0 on
+`rd68031_top`, inherited from RD68021, which keeps the group driven between
+cycles and after reset; it changes nothing on relinquish or in reset. The user
+does not expect a board to need it, and it is not tested (below).
 
 **How it is checked:** `bus_ruler_tb` and `bus_sync_tb` check the address enable
 cycle by cycle — driven from S0 and released on the edge that ends the cycle —
