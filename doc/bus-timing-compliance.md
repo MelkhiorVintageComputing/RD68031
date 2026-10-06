@@ -294,9 +294,13 @@ starts at the faulted one; the cycles after it never run.
 state, waits for BERR *and* HALT to be negated, and reissues the cycle unchanged
 — address, FC, SIZ, R/W, CBREQ on a burst's first access ("causes the processor
 to retry the bus cycle and assert CBREQ again", 7.5.2), and OCS if the cycle
-had it. The manual does not say whether OCS comes again on the rerun of an
-operand's first cycle; it is the same cycle "using the same access
-information", so this design repeats it. Part-way through an operand, only the
+had it. The manual is silent on whether OCS comes again on the rerun of an
+operand's first cycle: 5.6.1 says only that "OCS is not asserted for
+subsequent cycles that are performed due to dynamic bus sizing or operand
+misalignment", and a retry is neither. The rerun is the same cycle "using the
+same access information", so this design asserts OCS again on it — on the
+retry of a burst's first access too — and the user has confirmed that choice
+since M2; it is an interpretation of a silence, not a divergence. Part-way through an operand, only the
 faulted cycle is rerun. "The processor retries any read or write cycle of a
 read-modify-write operation separately; RMC remains asserted during the entire
 retry sequence."
@@ -439,8 +443,8 @@ drops with it, and ECS, OCS, BG, STATUS and REFILL, which Table 5-2 lists as
 not three-stated, are driven inactive. "Once RESET negates, all control
 signals are driven to their inactive state, the data bus is in read mode" —
 R/W high, the data not driven — "and the address bus is driven": not with
-`ADDR_HIZ_BETWEEN_CYCLES` set, its default, which releases it until the first
-cycle (`doc/divergences.md`).
+`ADDR_HIZ_BETWEEN_CYCLES` set, its default by the user's decision, which
+releases it until the first cycle (`doc/divergences.md`).
 
 The RESET instruction drives RESET for 512 clocks — "the processor drives the
 RESET signal for 512 clock cycles ... the internal registers of the processor

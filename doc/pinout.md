@@ -134,7 +134,7 @@ released:
 
 | Enable | Covers | Negated when | Source |
 |---|---|---|---|
-| `a_oe`, `fc_oe`, `siz_oe`, `ciout_oe` | address, FC, SIZ, CIOUT | between bus cycles (with `ADDR_HIZ_BETWEEN_CYCLES`), on bus relinquish, in reset | specifications 6, 7, 8: "Clock High to Function Code, Size, RMC, CIOUT, Address, Data High Impedance" |
+| `a_oe`, `fc_oe`, `siz_oe`, `ciout_oe` | address, FC, SIZ, CIOUT | between bus cycles (with `ADDR_HIZ_BETWEEN_CYCLES`, the default; `doc/divergences.md`), on bus relinquish, in reset | specifications 6, 7, 8: "Clock High to Function Code, Size, RMC, CIOUT, Address, Data High Impedance" |
 | `rmc_oe` | RMC | as the address group, except that it stays driven for the whole of a locked run, gaps included | specification 7; UM 7.1.1 |
 | `d_oe` | data | except from S2 to the end of a write cycle; while halted; on relinquish; in reset | 7.3.2, 7.5.3, specification 7 |
 | `as_oe`, `ds_oe`, `rw_oe`, `dben_oe`, `cbreq_oe` | AS, DS, R/W, DBEN, CBREQ | on bus relinquish and in reset only | specification 16: "Clock High to AS, DS, R/W, DBEN, CBREQ High Impedance" |
@@ -174,11 +174,14 @@ that stands for it.
 `ecs_n_o`, `ocs_n_o`, `ipend_n_o`, `bg_n_o`, `refill_n_o` and `status_n_o` have
 no enable; they are always driven (Table 5-2).
 
-`ADDR_HIZ_BETWEEN_CYCLES` is a parameter, inherited from RD68021, set by
-default: it releases the address group at the end of every cycle. Cleared, the
-group stays driven between cycles, which is what the MC68030EC read and write
-figures draw (`doc/divergences.md`). It changes only the first two groups'
-behaviour between cycles, never on relinquish or reset.
+`ADDR_HIZ_BETWEEN_CYCLES` is a parameter of `rd68031_top`, inherited from
+RD68021, set by default: it releases the address group whenever the bus unit
+goes idle at the end of a cycle. Cleared, the group stays driven between
+cycles, which is what the MC68030EC read and write figures draw. The default
+is the user's decision, kept after M2 raised the question; a board that needs
+the address held between cycles clears it (`doc/divergences.md`, "The address
+group is released between bus cycles"). It changes only the address group's
+behaviour between cycles and after reset, never on relinquish or in reset.
 
 `bus_reset_tb` checks every group in reset and after it, `bus_arb_tb` on
 relinquish, single-wire arbitration and while halted, and `bus_error_tb` while
