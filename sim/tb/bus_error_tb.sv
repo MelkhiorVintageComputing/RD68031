@@ -2,12 +2,12 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 -- bus exception control: UM Table 5-8, all six cases.
+// RD68031 -- bus exception control: UM Table 7-8, all six cases.
 //
 // The table indexes two samples by "the number of the current even bus state":
 // n is S2, one clock after AS asserts, and n+2 is S4. Every case below asserts
 // its signals on the rising edge of exactly those states, which is also what
-// UM 5.5 asks an external device to do so that specification 47A and 47B are met
+// UM 7.5 asks an external device to do so that specification 47A and 47B are met
 // for the same falling edge.
 //
 //   1  DSACK, no BERR, no HALT                  normal cycle terminate and continue
@@ -33,7 +33,7 @@ module bus_error_tb;
   string       what;
 
   initial begin
-    $display("bus_error_tb: UM Table 5-8, six cases");
+    $display("bus_error_tb: UM Table 7-8, six cases");
     reset_dut();
     for (t = 0; t < 4096; t = t + 1) s32.mem[t] = 8'h10 + t[7:0];
 
@@ -133,7 +133,7 @@ module bus_error_tb;
 
     // -------------------------------------------------------------------
     // Case 2: HALT at state n, no BERR. The cycle completes normally; the next
-    // one does not start until HALT is negated. UM 5.5.3: "HALT by itself does
+    // one does not start until HALT is negated. UM 7.5.3: "HALT by itself does
     // not terminate a bus cycle."
     // -------------------------------------------------------------------
     fork
@@ -144,7 +144,7 @@ module bus_error_tb;
     check(cycles == 1,                "case 2: one bus cycle");
 
     // While halted: the data bus is released, AS and DS are negated but still
-    // driven, and the address group stays driven (UM 5.5.3).
+    // driven, and the address group stays driven (UM 7.5.3).
     repeat (2) @(posedge clk);
     check(d_oe === 1'b0,  "halted: the data bus is high impedance");
     check(as_n_o === 1'b1, "halted: AS is negated");
@@ -184,7 +184,7 @@ module bus_error_tb;
     end
 
     // -------------------------------------------------------------------
-    // AVEC -- UM 5.4.1: "the AVEC signal can be used to terminate interrupt
+    // AVEC -- UM 7.1.7: "the autovector (AVEC) signal can be used to terminate interrupt
     // acknowledge cycles ... AVEC is ignored during all other bus cycles."
     // A board that ties it low -- a Sun-3/60 replica autovectors everything
     // that way -- must still see its ordinary cycles wait for DSACK. The slave

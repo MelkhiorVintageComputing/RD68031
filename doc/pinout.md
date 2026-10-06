@@ -5,9 +5,13 @@ Derived from **Table 5-1, Signal Index**, **Table 5-2, Signal Summary** and §5.
 This design implements the MC68030, not the MC68EC030, so the MMU signals are present
 and the address bus is 32 bits.
 
-**Status: the M0 target.** `rtl/rd68031_top.sv` still has the MC68020 port list it was
-forked with. M1 changes it to this one. The rows marked *new* are the MC68030's
-additions, and *changed* marks a pin that behaves differently from the MC68020's.
+**Status: M1 has moved `rtl/rd68031_top.sv` to this list.** Every pin below exists on the
+top level and is driven or sampled as described; `doc/bus-timing-compliance.md` has the
+behaviour state by state. The rows marked *new* are the MC68030's additions, and
+*changed* marks a pin that behaves differently from the MC68020's. MMUDIS is synchronised
+and goes to a sink until the MMU of M11; CIOUT is driven from the request, negated by
+every requester until M11; CBREQ is asserted only for a request that allows a line fill,
+which no requester makes until the caches of M10.
 
 The original has three-state and bidirectional pins. This core has none: every such pin is
 split into an input `_i`, an output `_o` and an output-enable `_oe`. An external wrapper
@@ -16,7 +20,7 @@ recombines them:
 ```systemverilog
 assign pad = core_oe ? core_o : 1'bz;   // three-state pin
 assign core_i = pad;
-assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET, HALT)
+assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET)
 ```
 
 `_oe` is **active high — asserted means the core is driving**. Active-low signals keep the
@@ -49,7 +53,7 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET, HALT)
 
 | Port | Dir | Notes |
 |---|---|---|
-| `d_i[31:0]` | in | Latched on the falling edge entering S5. |
+| `d_i[31:0]` | in | Latched on the falling edge entering S5 of an asynchronous cycle, or on the falling edge after the rising edge STERM is recognised on (§7.1.4: "on the last falling edge of the clock for that bus cycle"). |
 | `d_o[31:0]` | out | **All 32 bits are driven on every write**, duplicated across the lanes, because at the start of a write the port size is not yet known (§7.2.1). |
 | `d_oe` | out | |
 
@@ -70,7 +74,7 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET, HALT)
 | `rmc_n_o`, `rmc_oe` | out | Asserted across every bus cycle of a read-modify-write, and inhibits `BG` absolutely while it is up. |
 | `as_n_o`, `as_oe` | out | Valid address, FC, SIZ and R/W (§7.1.3). |
 | `ds_n_o`, `ds_oe` | out | One strobe. *Changed:* **not asserted in a two-clock synchronous write** (§5.6.6). |
-| `dben_n_o`, `dben_oe` | out | Data buffer enable; three-state per Table 5-2. Its timing may preclude its use with two-clock synchronous cycles (§5.6.7). |
+| `dben_n_o`, `dben_oe` | out | Data buffer enable, active low (Table 5-2); three-state per Table 5-2 and specification 16. Its timing may preclude its use with two-clock synchronous cycles (§5.6.7): it is asserted for half a clock on a two-clock read. *Changed:* RD68021 drove it active high (`doc/bugs-found.md`). |
 | `dsack_n_i[1:0]` | in | `[1]` is DSACK1. Terminates an **asynchronous** cycle and gives the port size. **Both bits must be captured by the same flop pair on the same edge** and decoded afterwards, so that skew between them cannot make a 32-bit port look like an 8-bit one for a moment (inherited from RD68021; the MC68030 limit is to be checked against the MC68030EC skew specification at M3). |
 | `sterm_n_i` | in | *New.* Synchronous termination (§5.6.9): a 32-bit port, with read data latched on the next falling edge. A cycle terminated by STERM takes two clocks with no wait states. Sampled on the rising edge; it must meet setup and hold, unlike DSACK, which is synchronised. |
 
@@ -119,20 +123,25 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET, HALT)
 
 ## Output-enable domains
 
-The bus three-states during reset, apart from the signals that never three-state, which
-are driven to their inactive state. That is the MC68020 rule, to be confirmed against §7.8
-at M1. It gives three groups, together with bus relinquish and the release at the end of
-each cycle:
+"During the reset period, the entire bus three-states (except for non-three-statable
+signals, which are driven to their inactive state)" (§7.8). The reset this design has is
+`rst_n`, and every enable below is negated while it is asserted. The external RESET input
+is synchronised but does not reset the core (`doc/divergences.md`). With bus relinquish and
+the release at the end of each cycle that gives three groups:
 
 | Enable | Covers | Negated when |
 |---|---|---|
-| `a_oe`, `d_oe`, `fc_oe`, `siz_oe`, `rmc_oe`, `ciout_oe`, `cbreq_oe` | address, data, FC, SIZ, RMC, CIOUT, CBREQ | between bus cycles, on bus relinquish, and while RESET is asserted |
-| `as_oe`, `ds_oe`, `rw_oe`, `dben_oe` | AS, DS, R/W, DBEN | on bus relinquish and while RESET is asserted |
+| `a_oe`, `fc_oe`, `siz_oe`, `rmc_oe`, `ciout_oe` | address, FC, SIZ, RMC, CIOUT | between bus cycles, on bus relinquish, and in reset |
+| `d_oe` | data | except from S2 to the end of a write cycle |
+| `as_oe`, `ds_oe`, `rw_oe`, `dben_oe`, `cbreq_oe` | AS, DS, R/W, DBEN, CBREQ | on bus relinquish and in reset |
 | `reset_n_oe` | RESET | open drain — asserted only to pull low |
 
+CIOUT is in the address group because specifications 6, 7 and 8 measure it with the
+address, FC, SIZ and RMC; CBREQ is in the control group because specification 16 is
+"Clock High to AS, DS, R/W, DBEN, CBREQ High Impedance".
+
 `ecs_n_o`, `ocs_n_o`, `ipend_n_o`, `bg_n_o`, `refill_n_o` and `status_n_o` have no enable;
-they are always driven (Table 5-2). Which group CIOUT and CBREQ belong to is provisional
-until M1 reads §7.
+they are always driven (Table 5-2).
 
 `ADDR_HIZ_BETWEEN_CYCLES` is a parameter, inherited from RD68021, for a board that needs
 the address bus held between cycles. It changes only the first group's behaviour at the end

@@ -22,7 +22,7 @@
 // Restoring division, one quotient bit per clock, 32 clocks. The sequencer
 // stalls on `busy` exactly as it stalls on a bus cycle, so the instruction
 // timing falls out of the structure rather than being designed --
-// doc/timing-divergences.md measures it against UM section 8.
+// doc/timing-divergences.md measures it against UM20 section 8.
 
 module rd68031_divider (
     input  logic        clk,

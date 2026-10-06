@@ -7,7 +7,7 @@
 // The milestone test for the bus unit. Three things are checked, and the first is
 // the one that decides whether the operand engine is right:
 //
-//   1. UM Table 5-6, "Memory Alignment and Port Size Influence on Read/Write Bus
+//   1. UM Table 7-6, "Memory Alignment and Port Size Influence on Read/Write Bus
 //      Cycles", every row: the NUMBER of bus cycles an operand takes, for each
 //      operand size, each value of A1-A0 and each of the three port widths. The
 //      table is transcribed below exactly as printed.
@@ -15,9 +15,9 @@
 //   2. The data actually moved, both ways. A read of n bytes at an address must
 //      assemble the n bytes stored there, in order, whatever the port width and
 //      whatever the alignment; a write must leave exactly those n bytes and no
-//      others. That is Tables 5-4, 5-5 and 5-7 checked where they matter.
+//      others. That is Tables 7-4, 7-5 and 7-7 checked where they matter.
 //
-//   3. One OCS per operand and one ECS per bus cycle (UM 5.1.1), which is the
+//   3. One OCS per operand and one ECS per bus cycle (UM 7.1.1), which is the
 //      property that makes the operand rather than the cycle the unit of the
 //      sequencer's contract.
 
@@ -27,7 +27,7 @@ module bus_sizing_tb;
 
 `include "rd68031_bus_harness.svh"
 
-  // UM Table 5-6, bus cycles, in the manual's own order: 32-bit, 16-bit, 8-bit.
+  // UM Table 7-6, bus cycles, in the manual's own order: 32-bit, 16-bit, 8-bit.
   // Indexed [bytes][a1a0][port], port 0 = 32, 1 = 16, 2 = 8. Zero means the table
   // has no entry there.
   int unsigned t56 [1:4][0:3][0:2];
@@ -74,7 +74,7 @@ module bus_sizing_tb;
     base[1] = 32'h1000_0000; pname[1] = "16-bit";
     base[2] = 32'h2000_0000; pname[2] = " 8-bit";
 
-    $display("bus_sizing_tb: UM Table 5-6 and the byte lanes");
+    $display("bus_sizing_tb: UM Table 7-6 and the byte lanes");
     reset_dut();
 
     // Paint every slave with a known, position-dependent pattern so that a byte
@@ -112,7 +112,7 @@ module bus_sizing_tb;
           check((got & mask) === (want & mask), what);
 
           $sformat(what,
-                   "read %0d byte(s) at A1A0=%0d on a %s port: %0d bus cycles, Table 5-6 says %0d",
+                   "read %0d byte(s) at A1A0=%0d on a %s port: %0d bus cycles, Table 7-6 says %0d",
                    n, a, pname[p], cycles, t56[n][a][p]);
           check(cycles == t56[n][a][p], what);
 
@@ -149,7 +149,7 @@ module bus_sizing_tb;
           op_write(addr, n, want, cycles);
 
           $sformat(what,
-                   "write %0d byte(s) at A1A0=%0d on a %s port: %0d bus cycles, Table 5-6 says %0d",
+                   "write %0d byte(s) at A1A0=%0d on a %s port: %0d bus cycles, Table 7-6 says %0d",
                    n, a, pname[p], cycles, t56[n][a][p]);
           check(cycles == t56[n][a][p], what);
 
@@ -180,14 +180,14 @@ module bus_sizing_tb;
     end
 
     // ---------------------------------------------------------------------
-    // Instruction prefetch: Table 5-6's own first row, 1:2:4, and always a long
+    // Instruction prefetch: Table 7-6's own first row, 1:2:4, and always a long
     // word from a long-word boundary whatever address is asked for.
     // ---------------------------------------------------------------------
     begin
       logic [31:0] fdata;
       for (p = 0; p < 3; p = p + 1) begin
         op_fetch(base[p] + 32'h0000_0300, fdata, cycles);
-        $sformat(what, "prefetch on a %s port: %0d bus cycles, Table 5-6 says %0d",
+        $sformat(what, "prefetch on a %s port: %0d bus cycles, Table 7-6 says %0d",
                  pname[p], cycles, t56[4][0][p]);
         check(cycles == t56[4][0][p], what);
         $sformat(what, "prefetch on a %s port: the long word at $300", pname[p]);
@@ -197,7 +197,7 @@ module bus_sizing_tb;
       end
 
       // "Instruction prefetches are always two words from a long-word boundary"
-      // -- UM Table 5-6's own footnote. An odd-word address still reads the long
+      // -- UM Table 7-6's own footnote. An odd-word address still reads the long
       // word it sits in.
       op_fetch(32'h0000_0302, fdata, cycles);
       check(fdata === 32'h10111213, "prefetch at $302 reads the long word at $300");
@@ -205,7 +205,7 @@ module bus_sizing_tb;
 
     // ---------------------------------------------------------------------
     // Wait states: the slave at $3000_0000 inserts three, and a bus cycle is
-    // three clocks plus one per wait (UM 5.3.1 state 3).
+    // three clocks plus one per wait (UM 7.3.1 state 3).
     // ---------------------------------------------------------------------
     begin
       time t0, t1;

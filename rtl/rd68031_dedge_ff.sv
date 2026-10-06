@@ -2,22 +2,24 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 - SystemVerilog MC68020
+// RD68031 - SystemVerilog MC68030
 //
 // An output that changes on both clock edges, built from a positive-edge flop and a
 // negative-edge flop combined with XOR.
 //
-// Several pins assert on one edge of the bus-state ruler and negate on the other:
-// AS and DS assert on the falling edge entering S1 and negate on the falling edge
-// entering S5, and ECS and OCS assert on a rising edge and negate on the very next
-// falling edge -- one half clock, which is what specification 10 measures.
+// DBEN is the pin that needs it: on a read it is asserted on the rising edge
+// entering S2 and negated on the falling edge entering S5; on a write it is
+// asserted on the falling edge entering S1 and negated on the rising edge that
+// ends S5 (UM 7.1.6, specifications 40 to 43). Decoded from the two bus-state
+// registers instead, it glitches whenever two state bits change on one edge --
+// doc/bugs-found.md.
 //
 // Only one side can change at any instant, so the XOR is glitch-free, and every one
 // of the six front-ends infers it correctly (doc/coding-standard.md, measured).
 //
-// set_p toggles the positive-edge half, set_n the negative-edge half. The output is
-// the XOR, so the caller arranges for the two halves to disagree exactly while the
-// signal is asserted.
+// toggle_p flips the positive-edge half, toggle_n the negative-edge half. The
+// output is the XOR, so the caller toggles a half exactly when the value after
+// that edge is to differ from the value before it.
 
 module rd68031_dedge_ff #(
     parameter bit RESET_VAL = 1'b0

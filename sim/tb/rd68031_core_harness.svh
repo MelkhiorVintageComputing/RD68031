@@ -32,12 +32,15 @@ logic        rw_o, rw_oe;
 logic        rmc_n_o, rmc_oe;
 logic        as_n_o, as_oe;
 logic        ds_n_o, ds_oe;
-logic        dben_o, dben_oe;
+logic        dben_n_o, dben_oe;
 logic  [1:0] dsack_n_i;
+logic        sterm_n_i, cback_n_i, ciin_n_i;
+logic        ciout_n_o, ciout_oe;
+logic        cbreq_n_o, cbreq_oe;
+logic        refill_n_o, status_n_o;
 logic        ipend_n_o;
 logic        bg_n_o;
 logic        reset_n_o, reset_n_oe;
-logic        halt_n_o, halt_n_oe;
 
 // The asynchronous inputs, driven rather than tied, so a testbench can raise an
 // interrupt or answer an acknowledge cycle. Everything that does not care gets
@@ -45,8 +48,10 @@ logic        halt_n_o, halt_n_oe;
 logic  [2:0] ipl_n_i;
 logic        avec_n_i;
 logic        cdis_n_i;
+logic        mmudis_n_i;
 initial begin
   cdis_n_i = 1'b1;
+  mmudis_n_i = 1'b1;
   ipl_n_i  = 3'b111;
   avec_n_i = 1'b1;
 end
@@ -127,19 +132,28 @@ rd68031_top #(.ICACHE_ENTRIES (`TB_ICACHE_ENTRIES),
     .rmc_n_o (rmc_n_o), .rmc_oe (rmc_oe),
     .as_n_o (as_n_o), .as_oe (as_oe),
     .ds_n_o (ds_n_o), .ds_oe (ds_oe),
-    .dben_o (dben_o), .dben_oe (dben_oe),
-    .dsack_n_i (dsack_n_i),
+    .dben_n_o (dben_n_o), .dben_oe (dben_oe),
+    .dsack_n_i (dsack_n_i), .sterm_n_i (sterm_n_i),
+    .ciin_n_i (ciin_n_i), .ciout_n_o (ciout_n_o), .ciout_oe (ciout_oe),
+    .cbreq_n_o (cbreq_n_o), .cbreq_oe (cbreq_oe), .cback_n_i (cback_n_i),
     .ipl_n_i (ipl_n_i), .ipend_n_o (ipend_n_o), .avec_n_i (avec_n_i),
     .br_n_i (1'b1), .bg_n_o (bg_n_o), .bgack_n_i (1'b1),
     .berr_n_i (berr_n_i),
     .reset_n_i (1'b1), .reset_n_o (reset_n_o), .reset_n_oe (reset_n_oe),
-    .halt_n_i (1'b1), .halt_n_o (halt_n_o), .halt_n_oe (halt_n_oe),
-    .cdis_n_i (cdis_n_i)
+    .halt_n_i (1'b1),
+    .cdis_n_i (cdis_n_i), .mmudis_n_i (mmudis_n_i),
+    .refill_n_o (refill_n_o), .status_n_o (status_n_o)
 );
 
 logic [1:0] dsack32, dsack16, dsack8;
 wire [31:0] d32, d16, d8;
 logic       oe32, oe16, oe8;
+logic       sterm32, sterm16, sterm8;
+logic       cback32, cback16, cback8;
+logic       ciin32, ciin16, ciin8;
+assign sterm_n_i = sterm32 & sterm16 & sterm8;
+assign cback_n_i = cback32 & cback16 & cback8;
+assign ciin_n_i  = ciin32  & ciin16  & ciin8;
 
 // One more device, for a testbench to wire in whatever the three memories are
 // not. The interrupt acknowledge is the reason: its address is SYNTHESISED in
@@ -175,20 +189,26 @@ assign dsack_n_i = dsack32 & dsack16 & dsack8 & dsack_ext & dsack_cp;
 rd68031_slave #(.PORT_BYTES (4), .WAITS (0), .BASE (32'h0000_0000),
                 .MASK (32'hF000_0000), .ABITS (16)) s32 (
     .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
-    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .d_i (dbus), .wr_inhibit_i (wr_protect && !berr_n_i),
-    .d_o (d32), .d_oe (oe32), .dsack_n_o (dsack32));
+    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),
+    .d_i (dbus), .wr_inhibit_i (wr_protect && !berr_n_i),
+    .d_o (d32), .d_oe (oe32), .dsack_n_o (dsack32), .sterm_n_o (sterm32),
+    .cback_n_o (cback32), .ciin_n_o (ciin32));
 
 rd68031_slave #(.PORT_BYTES (2), .WAITS (0), .BASE (32'h1000_0000),
                 .MASK (32'hF000_0000), .ABITS (16)) s16 (
     .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
-    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .d_i (dbus), .wr_inhibit_i (wr_protect && !berr_n_i),
-    .d_o (d16), .d_oe (oe16), .dsack_n_o (dsack16));
+    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),
+    .d_i (dbus), .wr_inhibit_i (wr_protect && !berr_n_i),
+    .d_o (d16), .d_oe (oe16), .dsack_n_o (dsack16), .sterm_n_o (sterm16),
+    .cback_n_o (cback16), .ciin_n_o (ciin16));
 
 rd68031_slave #(.PORT_BYTES (1), .WAITS (0), .BASE (32'h2000_0000),
                 .MASK (32'hF000_0000), .ABITS (16)) s8 (
     .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
-    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .d_i (dbus), .wr_inhibit_i (wr_protect && !berr_n_i),
-    .d_o (d8), .d_oe (oe8), .dsack_n_o (dsack8));
+    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),
+    .d_i (dbus), .wr_inhibit_i (wr_protect && !berr_n_i),
+    .d_o (d8), .d_oe (oe8), .dsack_n_o (dsack8), .sterm_n_o (sterm8),
+    .cback_n_o (cback8), .ciin_n_o (ciin8));
 
 initial begin
   clk = 1'b0;

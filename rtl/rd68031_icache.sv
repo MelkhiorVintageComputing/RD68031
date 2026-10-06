@@ -4,11 +4,11 @@
 
 // RD68031 - SystemVerilog MC68020
 //
-// The on-chip instruction cache -- UM section 4.
+// The on-chip instruction cache -- UM20 section 4.
 //
 // "A direct-mapped cache of 64 long-word entries. Each cache entry consists of a
 // tag field (A31-A8 and FC2), one valid bit, and 32 bits (two words) of
-// instruction data" (UM 4.1). The index is A7-A2, and A1 picks the word, which is
+// instruction data" (UM20 4.1). The index is A7-A2, and A1 picks the word, which is
 // the cache holding register's business rather than this module's: a lookup here
 // answers with the whole long word.
 //
@@ -21,7 +21,7 @@
 // Reset. The array is a RAM and is NOT reset -- no flop in it, and nothing reads
 // it unqualified. The valid bits are 64 ordinary flip-flops with an asynchronous
 // reset, and they are the whole of "during processor reset, the cache is cleared
-// by resetting all of the valid bits" (UM 4.2). A lookup of an entry whose valid
+// by resetting all of the valid bits" (UM20 4.2). A lookup of an entry whose valid
 // bit is clear never looks at the tag or the data, so what the RAM powered up
 // holding is unobservable.
 //
@@ -43,14 +43,14 @@ module rd68031_icache #(
     output logic        hit,
     output logic [31:0] rdata,
 
-    // Fill after a miss -- UM 4.1, "this new instruction is automatically written
+    // Fill after a miss -- UM20 4.1, "this new instruction is automatically written
     // into the cache entry, and the valid bit is set".
     input  logic        fill,
     input  logic [29:0] fa,
     input  logic        ffc2,
     input  logic [31:0] fdata,
 
-    // Invalidation -- UM 4.3.1, CACR's C and CE bits. `inv_one` clears the entry
+    // Invalidation -- UM20 4.3.1, CACR's C and CE bits. `inv_one` clears the entry
     // `inv_la` names, which is CAAR's index field.
     input  logic        inv_all,
     input  logic        inv_one,
@@ -103,7 +103,7 @@ module rd68031_icache #(
     else              valid_q <= (valid_q | set_m) & ~clr_m;
   end
 
-  // CAAR is a whole address, and only its index field names an entry (UM 4.3.2).
+  // CAAR is a whole address, and only its index field names an entry (UM20 4.3.2).
   logic unused_icache;
   assign unused_icache = &{1'b1, inv_la[29:IW]};
 

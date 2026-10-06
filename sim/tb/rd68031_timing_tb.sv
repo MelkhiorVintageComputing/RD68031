@@ -94,8 +94,9 @@ module rd68031_timing_tb;
         else      emit("rw.low");
       end
 
-      if ( dben_o && !p_dben) emit("dben.assert");
-      if (!dben_o &&  p_dben) emit("dben.negate");
+      // DBEN is active low on the pin (UM Table 5-2).
+      if (!dben_n_o &&  p_dben) emit("dben.assert");
+      if ( dben_n_o && !p_dben) emit("dben.negate");
 
       if (!bg_n_o &&  p_bg) emit("bg.assert");
       if ( bg_n_o && !p_bg) emit("bg.negate");
@@ -107,7 +108,7 @@ module rd68031_timing_tb;
     p_a = a_o; p_fc = fc_o; p_siz = siz_o; p_rmc = rmc_n_o; p_aoe = a_oe;
     p_d = d_o; p_doe = d_oe;
     p_ecs = ecs_n_o; p_ocs = ocs_n_o; p_as = as_n_o; p_ds = ds_n_o;
-    p_rw = rw_o; p_dben = dben_o; p_bg = bg_n_o; p_asoe = as_oe;
+    p_rw = rw_o; p_dben = dben_n_o; p_bg = bg_n_o; p_asoe = as_oe;
     primed = 1'b1;
   endtask
 

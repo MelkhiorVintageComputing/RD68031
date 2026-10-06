@@ -4,14 +4,19 @@
 
 // RD68031 -- the bus-level test harness.
 //
-// Drives rd68031_biu on its own, against four slaves of different port widths, on
-// a REAL three-state data bus: a stuck output enable shows up as an X rather than
-// being quietly ignored by a multiplexer.
+// Drives rd68031_biu on its own, against six slaves of different port widths and
+// kinds, on a REAL three-state data bus: a stuck output enable shows up as an X
+// rather than being quietly ignored by a multiplexer.
 //
-//   $0000_0000  32-bit port, no wait states
-//   $1000_0000  16-bit port, no wait states
-//   $2000_0000   8-bit port, no wait states
-//   $3000_0000  32-bit port, three wait states
+//   $0000_0000  32-bit port, asynchronous (DSACK), no wait states
+//   $1000_0000  16-bit port, asynchronous, no wait states
+//   $2000_0000   8-bit port, asynchronous, no wait states
+//   $3000_0000  32-bit port, asynchronous, three wait states
+//   $4000_0000  32-bit port, synchronous (STERM), burst capable (CBACK)
+//   $5000_0000  32-bit port, synchronous, no burst
+//
+// Every slave's wait states, burst length and CIIN are variables a testbench may
+// change between operands -- sim/models/rd68031_slave.sv.
 //
 // THE STATE RULER. Every observation is indexed by half-clock tick from the rising
 // edge that enters S0, because that is the ruler the manual uses: one bus state per
@@ -19,14 +24,14 @@
 // nanoseconds after each edge, late enough that the edge has settled and early
 // enough that nothing else has happened.
 //
-// CLK_PERIOD is 60 ns -- 16.67 MHz, the slowest speed grade in the manual's own
-// clock table, and the one this design has to meet.
+// CLK_PERIOD is 60 ns by default -- 16.67 MHz, the slowest MC68020 grade, which
+// the AC solver judges against until M3 retargets it to the MC68030EC tables.
 //
 // This file is included inside a module, so it carries no `timescale of its own:
 // the directive is not allowed there, and the including testbench sets it.
 
 // The clock period, in nanoseconds. 60 ns -- 16.67 MHz -- is the slowest speed
-// grade in the manual's own clock table and the default here, but the AC analysis
+// grade in the MC68020's clock table and the default here, but the AC analysis
 // needs one run per grade: the separations it measures are in clock edges, so a
 // 16.67 MHz recording is evidence about 16.67 MHz and nothing else.
 real CLK_PERIOD;
@@ -48,6 +53,9 @@ logic [39:0] req_wdata;
 logic        req_rmc;
 logic  [3:0] req_cpuspace;
 logic  [7:0] req_cpuaddr;
+logic        req_burst;
+logic        req_ciout;
+logic        req_ciin;
 logic        req_ack;
 logic        req_last;
 logic [39:0] req_rdata;
@@ -71,10 +79,24 @@ logic [31:0] flt_dob, flt_dib;
 logic        fetch_pending;
 logic [31:0] fetch_addr;
 logic  [2:0] fetch_fc;
+logic        fetch_burst;
+logic        fetch_ciout;
 logic        fetch_ack;
 logic        fetch_last;
 logic [31:0] fetch_rdata;
 logic        fetch_fault;
+logic        fetch_ciin;
+
+// Every read beat, as the bus unit reports it for a cache to fill from.
+logic        beat_valid, beat_err, beat_ciin, beat_fetch;
+logic [31:0] beat_data, beat_addr;
+logic  [1:0] beat_num, beat_port;
+
+// The microsequencer status the STATUS and REFILL pins encode, driven here by
+// the test -- UM 12.7.1.
+logic        sts_bound_drv, sts_pend_drv, sts_exc_drv, sts_refill_drv;
+logic        mmudis_drv;
+logic        mmudis_sync_n;
 
 // The fetch port has the same contract as the data port: the operand completes at
 // the rising edge that ends S5, and fetch_last says so throughout S5. Holding
@@ -96,21 +118,24 @@ logic        rw_o, rw_oe;
 logic        rmc_n_o, rmc_oe;
 logic        as_n_o, as_oe;
 logic        ds_n_o, ds_oe;
-logic        dben_o, dben_oe;
+logic        dben_n_o, dben_oe;
 logic  [1:0] dsack_n_i;
+logic        sterm_n_i, cback_n_i, ciin_n_i;
+logic        ciout_n_o, ciout_oe;
+logic        cbreq_n_o, cbreq_oe;
+logic        refill_n_o, status_n_o;
 logic        bg_n_o;
 logic        reset_n_o, reset_n_oe;
-logic        halt_n_o, halt_n_oe;
 logic  [2:0] ipl_sync_n;
 logic        reset_sync_n, halt_sync_n, cdis_sync_n;
 logic        bus_idle, bus_granted, reset_busy;
 
-// Bus exception and arbitration inputs, driven by the test. UM 5.5 asks for BERR,
-// HALT and DSACK to be "asserted and negated with the rising edge of the
-// MC68020/EC020 clock ... this ensures that when two signals are asserted
-// simultaneously, the required setup time (#47A) and hold time (#47B) for both of
-// them is met for the same falling edge of the processor clock", so every task
-// below drives them from a rising edge.
+// Bus exception and arbitration inputs, driven by the test. UM 7.5 asks for BERR,
+// HALT and DSACK to be "asserted and negated with the rising edge of the MC68030
+// clock. This assures that when two signals are asserted simultaneously, the
+// required setup time (#47A) and hold time (#47B) for both of them is met for the
+// same falling edge of the processor clock", so every task below drives them from
+// a rising edge.
 logic berr_drv;   // active high here; inverted onto the pin
 logic avec_drv;   // likewise. Held on across ordinary cycles to prove it is ignored.
 logic halt_drv;
@@ -129,25 +154,36 @@ wire  [2:0] fc_pin  = fc_oe  ? fc_o  : 3'bz;
 wire        as_pin  = as_oe  ? as_n_o : 1'bz;
 wire        ds_pin  = ds_oe  ? ds_n_o : 1'bz;
 wire        rw_pin  = rw_oe  ? rw_o   : 1'bz;
+wire        cbreq_pin = cbreq_oe ? cbreq_n_o : 1'bz;
 
 rd68031_biu dut (
     .clk (clk), .rst_n (rst_n),
     .req_valid (req_valid), .req_kind (req_kind), .req_fc (req_fc),
     .req_addr (req_addr), .req_bytes (req_bytes), .req_wdata (req_wdata),
     .req_rmc (req_rmc), .req_cpuspace (req_cpuspace), .req_cpuaddr (req_cpuaddr),
-    .req_ack (req_ack), .req_last (req_last), .req_rdata (req_rdata),
+    .req_cpfault (1'b0), .req_burst (req_burst), .req_ciout (req_ciout),
+    .req_post (1'b0), .req_taken (), .post_busy (), .req_fault_post (),
+    .req_ack (req_ack), .req_last (req_last), .req_early (), .req_rdata (req_rdata),
     .req_end (req_end), .req_fault (req_fault), .req_fault_wr (req_fault_wr),
-    .req_dsack (req_dsack),
+    .req_dsack (req_dsack), .req_ciin (req_ciin),
     .flt_addr (flt_addr), .flt_bytes (flt_bytes), .flt_fc (flt_fc),
     .flt_rw (flt_rw), .flt_rmc (flt_rmc), .flt_dob (flt_dob), .flt_dib (flt_dib),
-    .rst_op_valid (1'b0), .rst_addr (32'd0), .rst_bytes (3'd0), .rst_fc (3'd0),
+    .rst_op_valid (1'b0), .rst_cancel (1'b0), .rst_post (1'b0),
+    .rst_addr (32'd0), .rst_bytes (3'd0), .rst_fc (3'd0),
     .rst_rw (1'b1), .rst_rmc (1'b0), .rst_dob (32'd0),
     .fetch_valid (fetch_valid), .fetch_addr (fetch_addr), .fetch_fc (fetch_fc),
+    .fetch_burst (fetch_burst), .fetch_ciout (fetch_ciout),
     .fetch_ack (fetch_ack), .fetch_last (fetch_last), .fetch_rdata (fetch_rdata),
-    .fetch_fault (fetch_fault), .bus_abort (1'b0),
+    .fetch_fault (fetch_fault), .fetch_ciin (fetch_ciin), .bus_abort (1'b0),
+    .beat_valid (beat_valid), .beat_err (beat_err), .beat_data (beat_data),
+    .beat_addr (beat_addr), .beat_num (beat_num), .beat_port (beat_port),
+    .beat_ciin (beat_ciin), .beat_fetch (beat_fetch),
     .reset_req (1'b0), .reset_busy (reset_busy), .dbf (dbf_drv),
+    .sts_bound (sts_bound_drv), .sts_pend (sts_pend_drv), .sts_exc (sts_exc_drv),
+    .sts_refill (sts_refill_drv),
     .ipl_sync_n (ipl_sync_n), .reset_sync_n (reset_sync_n),
     .halt_sync_n (halt_sync_n), .cdis_sync_n (cdis_sync_n),
+    .mmudis_sync_n (mmudis_sync_n),
     .bus_idle (bus_idle), .bus_granted (bus_granted),
     .fc_o (fc_o), .fc_oe (fc_oe),
     .a_o (a_o), .a_oe (a_oe),
@@ -158,53 +194,94 @@ rd68031_biu dut (
     .rmc_n_o (rmc_n_o), .rmc_oe (rmc_oe),
     .as_n_o (as_n_o), .as_oe (as_oe),
     .ds_n_o (ds_n_o), .ds_oe (ds_oe),
-    .dben_o (dben_o), .dben_oe (dben_oe),
-    .dsack_n_i (dsack_n_i),
+    .dben_n_o (dben_n_o), .dben_oe (dben_oe),
+    .dsack_n_i (dsack_n_i), .sterm_n_i (sterm_n_i),
+    .ciin_n_i (ciin_n_i), .ciout_n_o (ciout_n_o), .ciout_oe (ciout_oe),
+    .cbreq_n_o (cbreq_n_o), .cbreq_oe (cbreq_oe), .cback_n_i (cback_n_i),
     .ipl_n_i (3'b111), .avec_n_i (~avec_drv),
     .br_n_i (~br_drv), .bg_n_o (bg_n_o), .bgack_n_i (~bgack_drv),
     .berr_n_i (~berr_drv),
     .reset_n_i (1'b1), .reset_n_o (reset_n_o), .reset_n_oe (reset_n_oe),
-    .halt_n_i (~halt_drv), .halt_n_o (halt_n_o), .halt_n_oe (halt_n_oe),
-    .cdis_n_i (1'b1)
+    .halt_n_i (~halt_drv),
+    .cdis_n_i (1'b1), .mmudis_n_i (~mmudis_drv),
+    .refill_n_o (refill_n_o), .status_n_o (status_n_o)
 );
 
 // ---------------------------------------------------------------------------
 // Slaves
 // ---------------------------------------------------------------------------
-logic [1:0] dsack32, dsack16, dsack8, dsackw;
-wire [31:0] d32, d16, d8, dw;
-logic       oe32, oe16, oe8, oew;
+logic [1:0] dsack32, dsack16, dsack8, dsackw, dsackss, dsacksn;
+wire [31:0] d32, d16, d8, dw, dss, dsn;
+logic       oe32, oe16, oe8, oew, oess, oesn;
+logic       sterm32, sterm16, sterm8, stermw, stermss, stermsn;
+logic       cback32, cback16, cback8, cbackw, cbackss, cbacksn;
+logic       ciin32, ciin16, ciin8, ciinw, ciinss, ciinsn;
 
 assign dbus = oe32 ? d32 : 32'bz;
 assign dbus = oe16 ? d16 : 32'bz;
 assign dbus = oe8  ? d8  : 32'bz;
 assign dbus = oew  ? dw  : 32'bz;
+assign dbus = oess ? dss : 32'bz;
+assign dbus = oesn ? dsn : 32'bz;
 
-assign dsack_n_i = dsack32 & dsack16 & dsack8 & dsackw;
+assign dsack_n_i = dsack32 & dsack16 & dsack8 & dsackw & dsackss & dsacksn;
+// Two of the synchronous inputs can also be forced by the test, from a rising
+// edge as UM 7.1 asks of a synchronous input, to show what the processor ignores.
+logic sterm_force;
+logic cback_force;
+assign sterm_n_i = sterm32 & sterm16 & sterm8 & stermw & stermss & stermsn
+                 & ~sterm_force;
+assign cback_n_i = cback32 & cback16 & cback8 & cbackw & cbackss & cbacksn
+                 & ~cback_force;
+assign ciin_n_i  = ciin32  & ciin16  & ciin8  & ciinw  & ciinss  & ciinsn;
 
 rd68031_slave #(.PORT_BYTES (4), .WAITS (0), .BASE (32'h0000_0000),
                 .MASK (32'hF000_0000)) s32 (
     .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
-    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .d_i (dbus), .wr_inhibit_i (1'b0),
-    .d_o (d32), .d_oe (oe32), .dsack_n_o (dsack32));
+    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),
+    .d_i (dbus), .wr_inhibit_i (1'b0),
+    .d_o (d32), .d_oe (oe32), .dsack_n_o (dsack32), .sterm_n_o (sterm32),
+    .cback_n_o (cback32), .ciin_n_o (ciin32));
 
 rd68031_slave #(.PORT_BYTES (2), .WAITS (0), .BASE (32'h1000_0000),
                 .MASK (32'hF000_0000)) s16 (
     .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
-    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .d_i (dbus), .wr_inhibit_i (1'b0),
-    .d_o (d16), .d_oe (oe16), .dsack_n_o (dsack16));
+    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),
+    .d_i (dbus), .wr_inhibit_i (1'b0),
+    .d_o (d16), .d_oe (oe16), .dsack_n_o (dsack16), .sterm_n_o (sterm16),
+    .cback_n_o (cback16), .ciin_n_o (ciin16));
 
 rd68031_slave #(.PORT_BYTES (1), .WAITS (0), .BASE (32'h2000_0000),
                 .MASK (32'hF000_0000)) s8 (
     .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
-    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .d_i (dbus), .wr_inhibit_i (1'b0),
-    .d_o (d8), .d_oe (oe8), .dsack_n_o (dsack8));
+    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),
+    .d_i (dbus), .wr_inhibit_i (1'b0),
+    .d_o (d8), .d_oe (oe8), .dsack_n_o (dsack8), .sterm_n_o (sterm8),
+    .cback_n_o (cback8), .ciin_n_o (ciin8));
 
 rd68031_slave #(.PORT_BYTES (4), .WAITS (3), .BASE (32'h3000_0000),
                 .MASK (32'hF000_0000)) sw (
     .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
-    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .d_i (dbus), .wr_inhibit_i (1'b0),
-    .d_o (dw), .d_oe (oew), .dsack_n_o (dsackw));
+    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),
+    .d_i (dbus), .wr_inhibit_i (1'b0),
+    .d_o (dw), .d_oe (oew), .dsack_n_o (dsackw), .sterm_n_o (stermw),
+    .cback_n_o (cbackw), .ciin_n_o (ciinw));
+
+rd68031_slave #(.PORT_BYTES (4), .WAITS (0), .SYNC (1'b1), .BURST (1'b1),
+                .BASE (32'h4000_0000), .MASK (32'hF000_0000)) ss (
+    .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
+    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),
+    .d_i (dbus), .wr_inhibit_i (1'b0),
+    .d_o (dss), .d_oe (oess), .dsack_n_o (dsackss), .sterm_n_o (stermss),
+    .cback_n_o (cbackss), .ciin_n_o (ciinss));
+
+rd68031_slave #(.PORT_BYTES (4), .WAITS (0), .SYNC (1'b1), .BURST (1'b0),
+                .BASE (32'h5000_0000), .MASK (32'hF000_0000)) sn (
+    .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
+    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),
+    .d_i (dbus), .wr_inhibit_i (1'b0),
+    .d_o (dsn), .d_oe (oesn), .dsack_n_o (dsacksn), .sterm_n_o (stermsn),
+    .cback_n_o (cbacksn), .ciin_n_o (ciinsn));
 
 // ---------------------------------------------------------------------------
 // Clock, reset, bookkeeping
@@ -242,6 +319,17 @@ task automatic reset_dut();
   req_rmc      = 1'b0;
   req_cpuspace = 4'd0;
   req_cpuaddr  = 8'd0;
+  req_burst    = 1'b0;
+  req_ciout    = 1'b0;
+  fetch_burst  = 1'b0;
+  fetch_ciout  = 1'b0;
+  sts_bound_drv  = 1'b0;
+  sts_pend_drv   = 1'b0;
+  sts_exc_drv    = 1'b0;
+  sts_refill_drv = 1'b0;
+  mmudis_drv   = 1'b0;
+  sterm_force  = 1'b0;
+  cback_force  = 1'b0;
   fetch_pending = 1'b0;
   berr_drv     = 1'b0;
   avec_drv     = 1'b0;
@@ -317,7 +405,7 @@ endtask
 // ---------------------------------------------------------------------------
 // Bus exception injection
 //
-// Table 5-8 indexes its two samples by "the number of the current even bus
+// Table 7-8 indexes its two samples by "the number of the current even bus
 // state": n is S2, whose rising edge is one clock after AS asserts, and n+2 is
 // S4. These two tasks put a signal exactly there.
 // ---------------------------------------------------------------------------

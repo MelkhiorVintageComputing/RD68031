@@ -4,7 +4,7 @@
 
 // RD68031 -- the bus cycle on the manual's own ruler.
 //
-// UM 5.3 measures a bus cycle in states, one per CLK half period, and figures 10-3
+// UM 7.3 measures a bus cycle in states, one per CLK half period, and UM20 figures 10-3
 // and 10-4 draw every pin against them. This testbench indexes its observations the
 // same way: tick 0 is the rising edge that enters S0, tick 1 the falling edge that
 // enters S1, and so on to tick 6, the rising edge that ends S5. Pins are sampled
@@ -13,11 +13,11 @@
 // Two kinds of check, and the second is the one that would catch a design that got
 // the pattern right and the timing wrong:
 //
-//   1. The pattern, tick by tick, against the state descriptions in UM 5.3.1 and
+//   1. The pattern, tick by tick, against the state descriptions in UM 7.3.1 and
 //      5.3.2 -- which say exactly which signal moves in which state.
 //
 //   2. The widths and separations the pattern implies, in nanoseconds, against the
-//      minima Section 10 prints for the 16.67 MHz grade. A half clock is 30 ns
+//      minima UM20 Section 10 prints for the 16.67 MHz grade. A half clock is 30 ns
 //      there, so every one of these is a real number and not a tautology.
 //
 // This is not the AC-timing conformance analysis, which is a different thing: an
@@ -57,7 +57,7 @@ module bus_ruler_tb;
       ocs_r[NTICK-1-t]  = ocs_n_o;
       as_r[NTICK-1-t]   = as_n_o;
       ds_r[NTICK-1-t]   = ds_n_o;
-      dben_r[NTICK-1-t] = dben_o;
+      dben_r[NTICK-1-t] = dben_n_o;
       rw_r[NTICK-1-t]   = rw_o;
       aoe_r[NTICK-1-t]  = a_oe;
       doe_r[NTICK-1-t]  = d_oe;
@@ -78,8 +78,8 @@ module bus_ruler_tb;
   always @(posedge ds_n_o)   t_ds_hi   = $realtime;
   always @(negedge ecs_n_o)  t_ecs_lo  = $realtime;
   always @(posedge ecs_n_o)  t_ecs_hi  = $realtime;
-  always @(posedge dben_o)   t_dben_lo = $realtime;
-  always @(negedge dben_o)   t_dben_hi = $realtime;
+  always @(negedge dben_n_o) t_dben_lo = $realtime;
+  always @(posedge dben_n_o) t_dben_hi = $realtime;
   always @(rw_o)             t_rw      = $realtime;
   always @(posedge d_oe)     t_dout    = $realtime;
 
@@ -91,12 +91,12 @@ module bus_ruler_tb;
   endtask
 
   initial begin
-    $display("bus_ruler_tb: the bus cycle against UM 5.3 and figures 10-3, 10-4");
+    $display("bus_ruler_tb: the bus cycle against UM 7.3 and UM20 figures 10-3, 10-4");
     reset_dut();
     for (t = 0; t < 4096; t = t + 1) s32.mem[t] = 8'h10 + t[7:0];
 
     // ---------------------------------------------------------------------
-    // Read, 32-bit port, no wait states. UM 5.3.1.
+    // Read, 32-bit port, no wait states. UM 7.3.1.
     //
     //   S0  ECS and OCS asserted; address, FC, SIZ valid; R/W high; DBEN negated
     //   S1  AS asserted, DS asserted, ECS and OCS negated
@@ -119,7 +119,7 @@ module bus_ruler_tb;
     expect_pattern("read OCS", ocs_r, 7'b0111111);
     expect_pattern("read AS", as_r, 7'b1000011);
     expect_pattern("read DS", ds_r, 7'b1000011);
-    expect_pattern("read DBEN", dben_r, 7'b0011100);
+    expect_pattern("read DBEN", dben_r, 7'b1100011);
     expect_pattern("read R/W", rw_r, 7'b1111111);
     expect_pattern("read A_OE", aoe_r, 7'b1111110);
     expect_pattern("read D_OE", doe_r, 7'b0000000);
@@ -137,7 +137,7 @@ module bus_ruler_tb;
               t_as_lo - t_ecs_lo, 15.0);
 
     // ---------------------------------------------------------------------
-    // Write, 32-bit port, no wait states. UM 5.3.2.
+    // Write, 32-bit port, no wait states. UM 7.3.2.
     //
     //   S0  ECS and OCS asserted; address, FC, SIZ valid; R/W driven low
     //   S1  AS asserted, DBEN asserted, ECS and OCS negated
@@ -161,7 +161,7 @@ module bus_ruler_tb;
     expect_pattern("write OCS", ocs_r, 7'b0111111);
     expect_pattern("write AS", as_r, 7'b1000011);
     expect_pattern("write DS", ds_r, 7'b1110011);
-    expect_pattern("write DBEN", dben_r, 7'b0111110);
+    expect_pattern("write DBEN", dben_r, 7'b1000001);
     expect_pattern("write R/W", rw_r, 7'b0000000);
     expect_pattern("write A_OE", aoe_r, 7'b1111110);
     expect_pattern("write D_OE", doe_r, 7'b0011110);
@@ -212,7 +212,7 @@ module bus_ruler_tb;
       //                                     tick  0123456
       expect_pattern("waited read ECS", ecs_r, 7'b0111111);
       expect_pattern("waited read AS", as_r, 7'b1000000);  // still asserted
-      expect_pattern("waited read DBEN", dben_r, 7'b0011111);
+      expect_pattern("waited read DBEN", dben_r, 7'b1100000);
       expect_ge("waited read, AS width asserted",
                 t_as_hi - t_as_lo, 100.0);
     end

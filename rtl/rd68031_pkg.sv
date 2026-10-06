@@ -2,11 +2,12 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 - SystemVerilog MC68020
+// RD68031 - SystemVerilog MC68030
 //
 // Architectural constants, transcribed from the manual. Nothing here is a design
-// decision; everything is a number the MC68020 already has, with the citation that
-// fixes it.
+// decision; everything is a number the part already has, with the citation that
+// fixes it. The bus constants have been checked against the MC68030 manual (UM);
+// the rest are still the MC68020's (UM20) until the milestone that revisits them.
 //
 // Referred to with full scope everywhere -- rd68031_pkg::FC_CPU -- because yosys 0.52
 // supports no form of `import`. See doc/coding-standard.md.
@@ -17,7 +18,7 @@
 package rd68031_pkg;
 
   // ==========================================================================
-  // Address spaces -- UM Table 2-1
+  // Address spaces -- UM20 Table 2-1
   // ==========================================================================
   localparam logic [2:0] FC_RESERVED_0  = 3'b000;  // undefined, reserved
   localparam logic [2:0] FC_USER_DATA   = 3'b001;
@@ -32,7 +33,7 @@ package rd68031_pkg;
   // the three reserved ones -- can appear on the pins.
 
   // ==========================================================================
-  // CPU space types -- UM Figure 5-31, encoded on A19-A16 when FC = FC_CPU
+  // CPU space types -- UM figure 7-42, encoded on A19-A16 when FC = FC_CPU
   // ==========================================================================
   // Which field of the instruction pipe RTE is putting back -- doc/checkpoint.md
   // and rd68031_ifu. CK_FLAGS carries {D valid, RB, RC} in its low three bits,
@@ -43,7 +44,7 @@ package rd68031_pkg;
   localparam logic [2:0] CK_PC_D  = 3'd3;
   localparam logic [2:0] CK_FILL  = 3'd4;
   localparam logic [2:0] CK_FLAGS = 3'd5;
-  // Not a restore: the coprocessor writing the scanPC -- UM 7.4.17. The queue
+  // Not a restore: the coprocessor writing the scanPC -- UM20 7.4.17. The queue
   // behind stage D is emptied and refilled from the address, and stage D and
   // the program counter stay: they are the coprocessor instruction's own.
   localparam logic [2:0] CK_SCAN  = 3'd6;
@@ -54,9 +55,9 @@ package rd68031_pkg;
   localparam logic [3:0] CPUS_IACK      = 4'hF;  // interrupt acknowledge
 
   // ==========================================================================
-  // Transfer size -- UM Table 5-2
+  // Transfer size -- UM Table 7-2
   //
-  // SIZ1/SIZ0 are the number of bytes REMAINING to be transferred (UM 5.1.1), not
+  // SIZ1/SIZ0 are the number of bytes REMAINING to be transferred (UM 7.2.1), not
   // the size of the original operand, so a multi-cycle transfer changes them as it
   // goes. The encoding is simply the count modulo four.
   // ==========================================================================
@@ -74,12 +75,12 @@ package rd68031_pkg;
   typedef enum logic [1:0] { SZ_BYTE, SZ_WORD, SZ_LONG, SZ_3BYTE } opsize_e;
 
   // ==========================================================================
-  // Port size reported by DSACK1/DSACK0 -- UM Table 5-1
+  // Port size reported by DSACK1/DSACK0 -- UM Table 7-1
   //
   // The pins are active low. These are the values of {dsack_n_i[1], dsack_n_i[0]}
   // sampled at the falling edge entering S3; both must be captured by the same flop
   // pair on the same edge and decoded afterwards, because specification 31A allows
-  // 15 ns of skew between them at 16.67 MHz.
+  // skew between them. A cycle STERM ends is a 32-bit port and reports DSACK_32.
   // ==========================================================================
   localparam logic [1:0] DSACK_WAIT = 2'b11;  // neither asserted: insert wait states
   localparam logic [1:0] DSACK_8    = 2'b10;  // DSACK0 only: 8-bit port
@@ -89,30 +90,36 @@ package rd68031_pkg;
   typedef enum logic [1:0] { PORT_8, PORT_16, PORT_32 } port_size_e;
 
   // ==========================================================================
-  // Bus states -- UM 5.3, one state per CLK half period
+  // Bus states -- UM 7.3, one state per CLK half period
   //
-  // Even states begin on a rising edge, odd states on a falling edge, so a bus cycle
-  // with no wait states is three clocks. ST_WH/ST_WL are the wait pair inserted
-  // between S3 and S4; the rest are not the manual's states but this design's, and
-  // are named so.
+  // Even states begin on a rising edge, odd states on a falling edge, so an
+  // asynchronous bus cycle with no wait states is three clocks and a synchronous
+  // one two. ST_WH/ST_WL are the wait pair inserted between S3 and S4 (or, for a
+  // synchronous cycle, after S2); the rest are not the manual's states but this
+  // design's, and are named so. ST_S5 is the half clock a cycle ends in, which
+  // for a synchronous cycle is the manual's S3 (rd68031_biu).
   // ==========================================================================
   typedef enum logic [3:0] {
     ST_S0, ST_S1, ST_S2, ST_S3, ST_S4, ST_S5,
-    ST_WH, ST_WL,          // wait: one whole clock, re-sampling at ST_WL
+    ST_WH, ST_WL,          // wait: one whole clock, re-sampling at ST_WL and ST_WH
     ST_IDLE,               // no cycle in progress
     ST_HALT,               // HALT asserted: no new cycle until it negates
-    ST_RETRY               // BERR+HALT: wait for both to negate, then rerun
+    ST_RETRY,              // BERR+HALT: wait for both to negate, then rerun
+    ST_BL,                 // burst: a long word latched, AS held (UM 7.3.7 S3/S5/S7)
+    ST_BH,                 // burst: STERM tested for the next long word (S4/S6/S8)
+    ST_BW                  // burst: a wait state between two long words
   } bus_state_e;
 
   // ==========================================================================
-  // Bus arbitration -- UM Figure 5-44 and 5.7.1.4
+  // Bus arbitration -- UM figure 7-61 and 7.7.4
   //
   // The figure's seven states carry their G and T outputs as overbarred labels,
   // and the overbars do not survive the manual's text layer, so states 5 and 6
-  // cannot be read from it. What 5.7.1.4's prose states completely is the normal
+  // cannot be read from it. What 7.7.4's prose states completely is the normal
   // sequence 0-1-2-3-4-0, and that is what these five states are; the re-grant
-  // arc is 5.7.1.3's requirement rather than a state read off the diagram. See
-  // doc/divergences.md.
+  // arc is 7.7.3's requirement rather than a state read off the diagram. See
+  // RD68021's doc/divergences.md; the MC68030's figure 7-61 extracts
+  // no better.
   // ==========================================================================
   typedef enum logic [2:0] {
     ARB_IDLE,    // state 0: G and T negated, the processor is bus master
@@ -134,7 +141,7 @@ package rd68031_pkg;
     CT_CPU       // other CPU-space access: coprocessor ($2), access level ($1)
   } cycle_kind_e;
 
-  // There is no CT_RMW. UM 5.5.2 retries each read and each write of a
+  // There is no CT_RMW. UM 7.5.2 retries each read and each write of a
   // read-modify-write separately with RMC held throughout, so RMC is a qualifier
   // across a run of ordinary cycles rather than one indivisible cycle -- which is
   // also the only way CAS2's four transfers are expressible.
@@ -145,11 +152,12 @@ package rd68031_pkg;
     CE_BERR,     // bus error
     CE_RETRY,    // BERR + HALT
     CE_AVEC,     // autovector, interrupt acknowledge only
-    CE_HALT      // HALT at or before DSACK: cycle completed, then halted
+    CE_HALT,     // HALT at or before DSACK or STERM: cycle completed, then halted
+    CE_STERM     // normal synchronous termination -- UM 7.1.7
   } cycle_end_e;
 
   // ==========================================================================
-  // Status register -- UM Figure 1-4
+  // Status register -- UM20 Figure 1-4
   // ==========================================================================
   localparam int SR_C  = 0;
   localparam int SR_V  = 1;
@@ -166,11 +174,11 @@ package rd68031_pkg;
   localparam logic [15:0] SR_IMPLEMENTED = 16'b1111_0111_0001_1111;
 
   // Reset leaves the processor in the interrupt mode of the supervisor level with the
-  // mask at 7 (UM 2.1.1: "the processor is in this mode after a reset operation").
+  // mask at 7 (UM20 2.1.1: "the processor is in this mode after a reset operation").
   localparam logic [15:0] SR_RESET = 16'h2700;
 
   // ==========================================================================
-  // Exception stack frames -- UM Table 6-5
+  // Exception stack frames -- UM20 Table 6-5
   // ==========================================================================
   localparam logic [3:0] FMT_SHORT     = 4'h0;  // four words
   localparam logic [3:0] FMT_THROWAWAY = 4'h1;  // four words, interrupt stack switch
@@ -186,7 +194,7 @@ package rd68031_pkg;
   localparam int FRAME_WORDS_FAULT_S   = 16;
   localparam int FRAME_WORDS_FAULT_L   = 46;
 
-  // UM 6.1.12: RTE compares the version number in bits 15-12 of the word at SP+$36 of
+  // UM20 6.1.12: RTE compares the version number in bits 15-12 of the word at SP+$36 of
   // a long frame against its own, and takes a format error if they differ. That is
   // what makes this design's private encoding of the internal words legitimate, and
   // it is also why format $A -- which has no version field -- may carry no private
@@ -195,7 +203,7 @@ package rd68031_pkg;
   localparam logic [3:0] FRAME_VERSION     = 4'h1;
 
   // ==========================================================================
-  // Special status word -- UM Figure 6-8, at offset $0A of both fault frames
+  // Special status word -- UM20 Figure 6-8, at offset $0A of both fault frames
   // ==========================================================================
   localparam int SSW_FC   = 15;  // fault on stage C
   localparam int SSW_FB   = 14;  // fault on stage B
@@ -207,7 +215,7 @@ package rd68031_pkg;
   localparam int SSW_SIZE = 4;   // SIZE is bits 5:4
   // Bits 2:0 are the function code of the data cycle; bits 11:9 and 3 are reserved.
 
-  // UM 6.2.2: "The only bits in the SSW that may be modified are DF, RB, and RC."
+  // UM20 6.2.2: "The only bits in the SSW that may be modified are DF, RB, and RC."
   localparam logic [15:0] SSW_HANDLER_MASK = (16'b1 << SSW_DF)
                                            | (16'b1 << SSW_RB)
                                            | (16'b1 << SSW_RC);
@@ -235,7 +243,7 @@ package rd68031_pkg;
   localparam logic [7:0] VEC_TRAP_0       = 8'd32;  // TRAP #n is 32 + n
 
   // ==========================================================================
-  // Instruction cache -- UM 4.1
+  // Instruction cache -- UM20 4.1
   //
   // 64 direct-mapped long-word entries. The tag is A31-A8 plus FC2, so a supervisor
   // and a user fetch of the same address are different entries; A7-A2 index; A1
@@ -244,7 +252,7 @@ package rd68031_pkg;
   localparam int ICACHE_INDEX_W = 6;
   localparam int ICACHE_TAG_W   = 25;  // A31-A8 and FC2
 
-  // CACR -- UM Figure 4-2. Bits 31-4 read as zero and are ignored when written.
+  // CACR -- UM20 Figure 4-2. Bits 31-4 read as zero and are ignored when written.
   localparam int CACR_E  = 0;  // enable
   localparam int CACR_F  = 1;  // freeze: a miss does not replace
   localparam int CACR_CE = 2;  // clear the entry CAAR names; always reads zero
@@ -252,7 +260,7 @@ package rd68031_pkg;
   localparam logic [31:0] CACR_IMPLEMENTED = 32'h0000_0003;  // only E and F are stored
 
   // ==========================================================================
-  // RESET -- UM 5.8
+  // RESET -- UM 7.8
   // ==========================================================================
   localparam int RESET_INSN_CLKS = 512;  // the RESET instruction drives the pin this long
 

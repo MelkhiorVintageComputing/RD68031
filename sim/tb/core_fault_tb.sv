@@ -783,7 +783,10 @@ module core_fault_tb;
     poke_w(CODE + 8, 16'h60FE);
     reset_dut();
     run_cycles(600);
-    check(halt_n_oe === 1'b1, "double fault: HALT is asserted");
+    // UM 7.5.4: the MC68030 shows the halted state on STATUS, continuously.
+    check(status_n_o === 1'b0, "double fault: STATUS is asserted");
+    repeat (8) @(negedge clk);
+    check(status_n_o === 1'b0, "double fault: STATUS stays asserted");
     check(dut.u_seq.dbf_q === 1'b1, "double fault: and it is latched");
 
     // ======================================================================

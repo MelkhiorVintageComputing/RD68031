@@ -2,7 +2,7 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 -- bus arbitration: UM 5.7.1 and the state machine of 5.7.1.4.
+// RD68031 -- bus arbitration: UM 7.7 and the state machine of 7.7.4.
 //
 // The protocol, in the manual's own three steps:
 //
@@ -15,7 +15,7 @@
 // and the two rules that are easy to get wrong:
 //
 //   - "The BG output will not be asserted while RMC is asserted" (the note under
-//     figure 5-44). For the duration of a read-modify-write the BR input is
+//     figure 7-61). For the duration of a read-modify-write the BR input is
 //     ignored entirely.
 //   - "If T is true, the address, data, and control buses are placed in the
 //     high-impedance state after the next rising edge following the negation of
@@ -40,7 +40,7 @@ module bus_arb_tb;
   bit          rmc_watch;
 
   initial begin
-    $display("bus_arb_tb: UM 5.7.1 bus arbitration");
+    $display("bus_arb_tb: UM 7.7 bus arbitration");
     saw_bg_during_rmc = 1'b0;
     saw_rmc           = 1'b0;
     rmc_watch         = 1'b1;
@@ -146,7 +146,7 @@ module bus_arb_tb;
     // input."
     //
     // A locked sequence is a run of ordinary cycles with req_rmc raised on each
-    // of them -- there is no RMW cycle kind on this part (UM 5.5.2).
+    // of them -- there is no RMW cycle kind on this part (UM 7.5.2).
     // -------------------------------------------------------------------
     begin
       fork
@@ -167,7 +167,7 @@ module bus_arb_tb;
           op_read (32'h0000_0140, 4, got, cycles);
           op_write(32'h0000_0140, 4, 40'h00_CAFEF00D, cycles);
           req_rmc = 1'b0;
-          // One more, unlocked, so RMC negates at the start of it -- UM 5.1.1,
+          // One more, unlocked, so RMC negates at the start of it -- UM 7.1.1,
           // "RMC is guaranteed to be negated before the end of state 0 for a bus
           // cycle following a read-modify-write operation".
           op_read (32'h0000_0150, 4, got, cycles);
@@ -197,7 +197,7 @@ module bus_arb_tb;
     end
 
     // -------------------------------------------------------------------
-    // Relinquish and retry: BERR, HALT and BR together. UM 5.5.2.
+    // Relinquish and retry: BERR, HALT and BR together. UM 7.5.2.
     // -------------------------------------------------------------------
     begin
       a0 = as_count;
@@ -262,15 +262,35 @@ module bus_arb_tb;
     end
 
     // -------------------------------------------------------------------
-    // Double bus fault: UM 5.5.4, "the processor halts and asserts HALT".
+    // Double bus fault. The MC68020 drove HALT; the MC68030 has HALT as an
+    // input only (UM Table 5-2) and "indicates that a double bus fault
+    // condition has occurred by continuously asserting the STATUS signal until
+    // the processor is reset" (UM 7.5.4). Arbitration still works while it is
+    // halted -- "bus arbitration can still occur" -- which the BR checks above
+    // do not depend on, so it is checked here with the fault standing.
     // -------------------------------------------------------------------
-    check(halt_n_oe === 1'b0, "no double bus fault: HALT is not driven");
+    check(status_n_o === 1'b1, "no double bus fault: STATUS is negated");
     @(posedge clk);
     dbf_drv = 1'b1;
     @(posedge clk);
-    check(halt_n_oe === 1'b1, "double bus fault: HALT is driven");
-    check(halt_n_o  === 1'b0, "double bus fault: HALT is open drain, pulled low");
-    @(posedge clk);
+    begin
+      bit held;
+      held = 1'b1;
+      repeat (20) begin
+        @(negedge clk); #(SNAP);
+        if (status_n_o !== 1'b0) held = 1'b0;
+      end
+      check(held, "double bus fault: STATUS is asserted continuously (UM 7.5.4)");
+      br_drv = 1'b1;
+      waited = 0;
+      while (bg_n_o !== 1'b0 && waited < 20) begin
+        @(posedge clk);
+        waited = waited + 1;
+      end
+      check(bg_n_o === 1'b0, "double bus fault: arbitration still grants the bus (UM 7.5.4)");
+      br_drv = 1'b0;
+      repeat (6) @(posedge clk);
+    end
     dbf_drv = 1'b0;
 
     $display("bus_arb_tb: %0d checks, %0d failures, %0d drive violations",

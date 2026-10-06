@@ -2,11 +2,11 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 - SystemVerilog MC68020
+// RD68031 - SystemVerilog MC68030
 //
-// Top level. Pin list per doc/pinout.md: every three-state or bidirectional pin of
-// the original is split into _i / _o / _oe, with _oe active high meaning the core
-// drives.
+// Top level. Pin list per doc/pinout.md, which is UM section 5's: every three-state
+// or bidirectional pin of the original is split into _i / _o / _oe, with _oe active
+// high meaning the core drives.
 //
 // The processor is three units: rd68031_seq runs the microcode and holds the
 // datapath, rd68031_ifu holds the instruction pipe and the cache, and rd68031_biu
@@ -17,43 +17,43 @@
 // doc/coding-standard.md.
 
 module rd68031_top #(
-    // Number of instruction cache entries: 64 is the MC68020 (UM 4.1), and any
-    // other power of two from 2 up is a smaller cache with a wider tag. Zero
-    // removes the cache entirely, which is still fully software compatible -- UM
-    // 4.1 caches instructions only, so the cache is architecturally invisible --
-    // and `make cache` holds the two to that. CACR, CAAR and CDIS exist and
-    // behave either way.
+    // Number of instruction cache entries: 64 is the MC68020 cache this was forked
+    // with (UM20 4.1), and any other power of two from 2 up is a smaller cache with
+    // a wider tag. Zero removes the cache entirely, which is still fully software
+    // compatible -- the cache is architecturally invisible -- and `make cache`
+    // holds the two to that. CACR, CAAR and CDIS exist and behave either way. The
+    // MC68030's caches are M10.
     parameter int ICACHE_ENTRIES = 64,
     // Whether the coprocessor interface is built. Zero takes an F-line exception on
     // every coprocessor opcode, which is also the right behaviour for a machine with
     // no coprocessor attached.
     parameter bit COPROCESSOR = 1'b0,
-    // Whether the address group is released between bus cycles. The MC68020 does
+    // Whether the address group is released between bus cycles. The part does
     // (specification 7); a board that needs it held can clear this.
     parameter bit ADDR_HIZ_BETWEEN_CYCLES = 1'b1
 ) (
     // Clock and hardware reset -----------------------------------------------
-    input  logic        clk,      // free-running, both edges used
-    input  logic        rst_n,    // not an MC68020 pin: async init, see doc/pinout.md
+    input  logic        clk,      // free-running, both edges used (UM 5.12)
+    input  logic        rst_n,    // not an MC68030 pin: async init, see doc/pinout.md
 
-    // Function codes (UM 3.2) ------------------------------------------------
+    // Function codes (UM 5.2) ------------------------------------------------
     output logic  [2:0] fc_o,
     output logic        fc_oe,
 
-    // Address bus (UM 3.3) ---------------------------------------------------
+    // Address bus (UM 5.3) ---------------------------------------------------
     output logic [31:0] a_o,      // A1 and A0 are real pins
     output logic        a_oe,
 
-    // Data bus (UM 3.4) ------------------------------------------------------
+    // Data bus (UM 5.4) ------------------------------------------------------
     input  logic [31:0] d_i,
-    output logic [31:0] d_o,      // all 32 bits driven on every write (UM 5.2.4)
+    output logic [31:0] d_o,      // all 32 bits driven on every write (UM 7.2.4)
     output logic        d_oe,
 
-    // Transfer size (UM 3.5) -------------------------------------------------
-    output logic  [1:0] siz_o,    // bytes REMAINING, not operand size (UM 5.1.1)
+    // Transfer size (UM 5.5) -------------------------------------------------
+    output logic  [1:0] siz_o,    // bytes REMAINING, not operand size (UM 7.2.1)
     output logic        siz_oe,
 
-    // Asynchronous bus control (UM 3.6) --------------------------------------
+    // Bus control (UM 5.6) ---------------------------------------------------
     output logic        ecs_n_o,  // one half clock, every bus cycle; never three-stated
     output logic        ocs_n_o,  // ... but only the first cycle of an operand
     output logic        rw_o,     // high = read, low = write
@@ -62,33 +62,43 @@ module rd68031_top #(
     output logic        rmc_oe,
     output logic        as_n_o,
     output logic        as_oe,
-    output logic        ds_n_o,
+    output logic        ds_n_o,   // not asserted in a two-clock synchronous write
     output logic        ds_oe,
-    output logic        dben_o,
+    output logic        dben_n_o, // active low (Table 5-2)
     output logic        dben_oe,
     input  logic  [1:0] dsack_n_i,  // [1] is DSACK1; sample both on the same edge
+    input  logic        sterm_n_i,  // synchronous: sampled on the rising edge
 
-    // Interrupt control (UM 3.7) ---------------------------------------------
+    // Cache control (UM 5.7) -------------------------------------------------
+    input  logic        ciin_n_i,   // synchronous; ignored on writes
+    output logic        ciout_n_o,
+    output logic        ciout_oe,
+    output logic        cbreq_n_o,
+    output logic        cbreq_oe,
+    input  logic        cback_n_i,  // synchronous
+
+    // Interrupt control (UM 5.8) ---------------------------------------------
     input  logic  [2:0] ipl_n_i,
     output logic        ipend_n_o,  // never three-stated
     input  logic        avec_n_i,
 
-    // Bus arbitration (UM 3.8) -----------------------------------------------
+    // Bus arbitration (UM 5.9) -----------------------------------------------
     input  logic        br_n_i,
     output logic        bg_n_o,     // never three-stated
     input  logic        bgack_n_i,
 
-    // Bus exception control (UM 3.9) -----------------------------------------
+    // Bus exception control (UM 5.10) ----------------------------------------
     input  logic        berr_n_i,
     input  logic        reset_n_i,
     output logic        reset_n_o,  // open drain: constant 0
     output logic        reset_n_oe, // the RESET instruction holds it 512 clocks
-    input  logic        halt_n_i,
-    output logic        halt_n_o,   // open drain: constant 0
-    output logic        halt_n_oe,
+    input  logic        halt_n_i,   // input only on the MC68030 (Table 5-2)
 
-    // Emulator support (UM 3.10) ---------------------------------------------
-    input  logic        cdis_n_i
+    // Emulator support (UM 5.11) ---------------------------------------------
+    input  logic        cdis_n_i,
+    input  logic        mmudis_n_i,
+    output logic        refill_n_o, // never three-stated
+    output logic        status_n_o  // never three-stated
 );
 
   // ==========================================================================
@@ -97,7 +107,7 @@ module rd68031_top #(
   // The bus unit owns the split into one to four cycles, the SIZ encoding, the
   // byte lanes of Table 5-7 and the assembly of the result, so the microcode
   // issues exactly one request whatever the alignment and whatever port answers.
-  // That is also what lets OCS be driven from this handshake (UM 5.1.1).
+  // That is also what lets OCS be driven from this handshake (UM 7.1.1).
   // ==========================================================================
   logic        req_valid;
   logic  [2:0] req_kind;
@@ -172,13 +182,13 @@ module rd68031_top #(
   // Instruction fetch unit to bus unit
   // ==========================================================================
   logic        fetch_valid;
-  logic [31:0] fetch_addr;     // always long-word aligned (UM Table 5-6 note)
+  logic [31:0] fetch_addr;     // always long-word aligned (UM Table 7-6 note)
   logic  [2:0] fetch_fc;
   logic        fetch_ack;
   logic        fetch_last;
   logic [31:0] fetch_rdata;
   logic        fetch_fault;
-  logic        bus_abort;      // combinational, valid during S0 (UM 5.2.5)
+  logic        bus_abort;      // combinational, valid during S0 (UM20 5.2.5)
 
   // ==========================================================================
   // Cache control, which exists whether or not the cache does
@@ -199,6 +209,25 @@ module rd68031_top #(
   logic        reset_req;
   logic        reset_busy;
   logic        dbf;            // double bus fault
+  logic        sts_bound, sts_pend, sts_exc, sts_refill;   // UM 12.7.1
+  logic        mmudis_sync_n;
+
+  // ==========================================================================
+  // What the MC68030's bus offers that no requester here asks for yet. A line
+  // fill (CBREQ) is the caches' to request, at M10; CIOUT is the MMU's to say,
+  // at M11. Until then both requesters tie them off, and what the bus unit
+  // reports back -- CIIN with each operand, and every read beat -- goes to the
+  // sink below.
+  // ==========================================================================
+  logic        req_burst, req_ciout, fetch_burst, fetch_ciout;
+  assign req_burst   = 1'b0;
+  assign req_ciout   = 1'b0;
+  assign fetch_burst = 1'b0;
+  assign fetch_ciout = 1'b0;
+  logic        req_ciin, fetch_ciin;
+  logic        beat_valid, beat_err, beat_ciin, beat_fetch;
+  logic [31:0] beat_data, beat_addr;
+  logic  [1:0] beat_num, beat_port;
   // Posted writes -- doc/checkpoint.md rule 9.
   logic        req_post, req_taken, post_busy, req_fault_post, rst_post;
 
@@ -281,7 +310,11 @@ module rd68031_top #(
       .reset_req      (reset_req),
       .reset_busy     (reset_busy),
       .dbf            (dbf),
-      .ipend_n_o      (ipend_n_o)
+      .ipend_n_o      (ipend_n_o),
+      .sts_bound      (sts_bound),
+      .sts_pend       (sts_pend),
+      .sts_exc        (sts_exc),
+      .sts_refill     (sts_refill)
   );
 
   rd68031_ifu #(.ICACHE_ENTRIES (ICACHE_ENTRIES)) u_ifu (
@@ -340,6 +373,8 @@ module rd68031_top #(
       .req_cpuspace   (req_cpuspace),
       .req_cpuaddr    (req_cpuaddr),
       .req_cpfault    (req_cpfault),
+      .req_burst      (req_burst),
+      .req_ciout      (req_ciout),
       .req_ack        (req_ack),
       .req_last       (req_last),
       .req_early      (req_early),
@@ -352,6 +387,7 @@ module rd68031_top #(
       .post_busy      (post_busy),
       .req_fault_post (req_fault_post),
       .req_dsack      (req_dsack),
+      .req_ciin       (req_ciin),
 
       .flt_addr       (flt_addr),
       .flt_bytes      (flt_bytes),
@@ -373,19 +409,36 @@ module rd68031_top #(
       .fetch_valid    (fetch_valid),
       .fetch_addr     (fetch_addr),
       .fetch_fc       (fetch_fc),
+      .fetch_burst    (fetch_burst),
+      .fetch_ciout    (fetch_ciout),
       .fetch_ack      (fetch_ack),
       .fetch_last     (fetch_last),
       .fetch_rdata    (fetch_rdata),
       .fetch_fault    (fetch_fault),
+      .fetch_ciin     (fetch_ciin),
       .bus_abort      (bus_abort),
+
+      .beat_valid     (beat_valid),
+      .beat_err       (beat_err),
+      .beat_data      (beat_data),
+      .beat_addr      (beat_addr),
+      .beat_num       (beat_num),
+      .beat_port      (beat_port),
+      .beat_ciin      (beat_ciin),
+      .beat_fetch     (beat_fetch),
 
       .reset_req      (reset_req),
       .reset_busy     (reset_busy),
       .dbf            (dbf),
+      .sts_bound      (sts_bound),
+      .sts_pend       (sts_pend),
+      .sts_exc        (sts_exc),
+      .sts_refill     (sts_refill),
       .ipl_sync_n     (ipl_sync_n),
       .reset_sync_n   (reset_sync_n),
       .halt_sync_n    (halt_sync_n),
       .cdis_sync_n    (cdis_sync_n),
+      .mmudis_sync_n  (mmudis_sync_n),
       .bus_idle       (bus_idle),
       .bus_granted    (bus_granted),
 
@@ -398,14 +451,28 @@ module rd68031_top #(
       .rmc_n_o        (rmc_n_o),     .rmc_oe     (rmc_oe),
       .as_n_o         (as_n_o),      .as_oe      (as_oe),
       .ds_n_o         (ds_n_o),      .ds_oe      (ds_oe),
-      .dben_o         (dben_o),      .dben_oe    (dben_oe),
-      .dsack_n_i      (dsack_n_i),
+      .dben_n_o       (dben_n_o),    .dben_oe    (dben_oe),
+      .dsack_n_i      (dsack_n_i),   .sterm_n_i  (sterm_n_i),
+      .ciin_n_i       (ciin_n_i),
+      .ciout_n_o      (ciout_n_o),   .ciout_oe   (ciout_oe),
+      .cbreq_n_o      (cbreq_n_o),   .cbreq_oe   (cbreq_oe),
+      .cback_n_i      (cback_n_i),
       .ipl_n_i        (ipl_n_i),     .avec_n_i   (avec_n_i),
       .br_n_i         (br_n_i),      .bg_n_o     (bg_n_o),    .bgack_n_i (bgack_n_i),
       .berr_n_i       (berr_n_i),
       .reset_n_i      (reset_n_i),   .reset_n_o  (reset_n_o), .reset_n_oe (reset_n_oe),
-      .halt_n_i       (halt_n_i),    .halt_n_o   (halt_n_o),  .halt_n_oe  (halt_n_oe),
-      .cdis_n_i       (cdis_n_i)
+      .halt_n_i       (halt_n_i),
+      .cdis_n_i       (cdis_n_i),    .mmudis_n_i (mmudis_n_i),
+      .refill_n_o     (refill_n_o),  .status_n_o (status_n_o)
   );
+
+  // ==========================================================================
+  // What the units offer that nothing consumes yet: MMUDIS is the MMU's (M11),
+  // and CIIN and the read beats are the caches' (M10).
+  // ==========================================================================
+  logic unused_top;
+  assign unused_top = &{1'b1, mmudis_sync_n, req_ciin, fetch_ciin,
+                        beat_valid, beat_err, beat_data, beat_addr, beat_num,
+                        beat_port, beat_ciin, beat_fetch};
 
 endmodule

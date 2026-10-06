@@ -7,7 +7,7 @@
 // Instruction fetch unit: the cache holding register, the three-stage instruction
 // pipe, and the instruction cache.
 //
-// UM 1.6 and figure 1-5: "instruction words (instruction operation words and all
+// UM20 1.6 and figure 1-5: "instruction words (instruction operation words and all
 // extension words) enter the pipe at stage B and proceed to stages C and D. An
 // instruction word is completely decoded when it reaches stage D of the pipe."
 // So stage D is the instruction register -- it holds the opcode for the whole
@@ -21,13 +21,13 @@
 //   FLUSH     everything is emptied and refilled from the address on `pf_addr`.
 //
 // pc_d is the address of stage D and stg_b_addr the address of stage B, both
-// carried as real registers because CONSUME moves one and not the other. UM 6.2
+// carried as real registers because CONSUME moves one and not the other. UM20 6.2
 // makes that observable: at an instruction boundary the pipe is sequential and
 // the short fault frame derives the stage addresses from the PC, but
 // mid-instruction it is not, which is exactly why the long frame carries stage
 // B's address at SP+$24.
 //
-// The queue refills by itself. UM 5.5.1 is what makes that safe: "if a bus error
+// The queue refills by itself. UM20 5.5.1 is what makes that safe: "if a bus error
 // occurs on an instruction fetch, the processor does not take the exception until
 // it attempts to use that instruction word" -- so a faulted prefetch is recorded
 // in the stage's fault bit and becomes an exception only when the sequencer
@@ -61,7 +61,7 @@ module rd68031_ifu #(
     output logic        stg_b_rerun,
     // The pipe cannot produce a stage D word and never will: either the word
     // at the front of the queue came from a prefetch that faulted, or the
-    // address it would fetch from is odd. UM 6.1.2 and 6.1.3.
+    // address it would fetch from is odd. UM20 6.1.2 and 6.1.3.
     output logic        pf_stuck,
     output logic        pf_odd,
     output logic [31:0] pc_d,
@@ -115,7 +115,7 @@ module rd68031_ifu #(
   logic        fetch_pend_q;   // a fetch has been asked for and not yet answered
   logic        discard_q;      // the word in flight is for a stream that is gone
 
-  // ... and the space: the cache tag carries FC2 (UM 4.1), and the fill has to be
+  // ... and the space: the cache tag carries FC2 (UM20 4.1), and the fill has to be
   // tagged with the space the long word was READ from, which a flush that changed
   // the privilege level while the fetch was in flight has already moved on from.
   logic        fetch_fc2_q;
@@ -130,7 +130,7 @@ module rd68031_ifu #(
   // Until the first FLUSH the pipe has no address. Reset leaves fill_q at zero,
   // which is the exception vector table, and a pipe that started fetching there
   // would both race the reset vector reads for the bus and fill itself with the
-  // vectors. UM 6.1.1 gives it an address; nothing before that does.
+  // vectors. UM20 6.1.1 gives it an address; nothing before that does.
   logic        primed_q;
 
   // ==========================================================================
@@ -145,7 +145,7 @@ module rd68031_ifu #(
   assign chr_hit  = chr_v_q && (chr_addr_q == fill_q[31:2]);
   assign chr_word = fill_q[1] ? chr_q[15:0] : chr_q[31:16];
 
-  // UM 6.1.3: "an address error exception occurs when the processor attempts to
+  // UM20 6.1.3: "an address error exception occurs when the processor attempts to
   // prefetch an instruction from an odd address ... a bus cycle is not
   // executed". So no cycle is issued, the queue never fills, and the sequencer
   // is left waiting for a word that will never come -- which is where the
@@ -215,27 +215,27 @@ module rd68031_ifu #(
                                 : rd68031_pkg::FC_USER_PROG;
 
   // A hit in the instruction cache never starts an external cycle, so there is
-  // nothing to abort. UM 5.2.5 says the part MAY start the cycle in parallel with
+  // nothing to abort. UM20 5.2.5 says the part MAY start the cycle in parallel with
   // the lookup and abort it before AS, which shows as an ECS with no AS after it;
   // here the lookup is combinational and decides before the bus unit is asked, so
   // it never does. doc/divergences.md.
   assign bus_abort = 1'b0;
 
   // ==========================================================================
-  // The instruction cache -- UM section 4
+  // The instruction cache -- UM20 section 4
   //
   // Consulted at exactly one point: where the queue wants a long word that the
   // cache holding register does not have, which is where the bus would otherwise
   // be asked for it. A hit loads the holding register from the cache, and the
   // queue then drains it exactly as it drains a long word from the bus -- the
   // pipe cannot tell the two apart, which is what makes the cache architecturally
-  // invisible (UM 4.1: data accesses are never cached, so nothing but the
+  // invisible (UM20 4.1: data accesses are never cached, so nothing but the
   // instruction stream could see it anyway).
   //
   // Enabled by CACR's E bit, and disabled regardless of it while CDIS is asserted
-  // (UM 4.3). Disabled means neither looked up nor filled; it does NOT mean
+  // (UM20 4.3). Disabled means neither looked up nor filled; it does NOT mean
   // emptied -- "if the cache is reenabled, the previously valid entries remain
-  // valid and may be used" (UM 4.3.1).
+  // valid and may be used" (UM20 4.3.1).
   // ==========================================================================
   logic        cache_on;
   logic        cache_hit;
@@ -245,7 +245,7 @@ module rd68031_ifu #(
 
   assign cache_on = cacr[rd68031_pkg::CACR_E] && cdis_sync_n;
 
-  // UM 4.1: the entry is written "unless the F-bit in the CACR is set". And a
+  // UM20 4.1: the entry is written "unless the F-bit in the CACR is set". And a
   // long word whose cycle ended in a bus error is not an instruction at all: the
   // pipe carries it with its fault bit, and it must not outlive that in the cache.
   // A word for a stream a flush abandoned is still the right word for its own
@@ -255,7 +255,7 @@ module rd68031_ifu #(
                    && cache_on && !cacr[rd68031_pkg::CACR_F];
 
   // CACR's C and CE, pulsed by the MOVEC that sets them. CE clears "regardless of
-  // the states of the E and F bits" (UM 4.3.1), and so does C.
+  // the states of the E and F bits" (UM20 4.3.1), and so does C.
   assign inv_all = (cach_op == 2'b01);
   assign inv_one = (cach_op == 2'b10);
 
@@ -300,7 +300,7 @@ module rd68031_ifu #(
   // that would is the one waiting for it. So an empty stage D takes the front of
   // the queue by itself, which is the same motion as ADV and is written as one.
   // ... and it does not take a word that came from a prefetch that faulted.
-  // UM 6.2.1's FC bit is "the processor attempted to use stage C and found it
+  // UM20 6.2.1's FC bit is "the processor attempted to use stage C and found it
   // to be marked invalid", so the check belongs at stage C and stage D never
   // holds a faulted word at all -- which is why the manual has no bit for one.
   // Nor while RTE is putting the pipe back: stage D may come back empty, and
@@ -375,7 +375,7 @@ module rd68031_ifu #(
       end
 
       // ------------------------------------------------------------------
-      // RTE putting the pipe back -- UM 6.2.1 and 6.2.3
+      // RTE putting the pipe back -- UM20 6.2.1 and 6.2.3
       //
       // The queue DEPTH is not in the frame; the rerun bits are, and they say
       // which stages RTE still owes a word. Restoring the depth from them is
@@ -398,7 +398,7 @@ module rd68031_ifu #(
           rd68031_pkg::CK_FILL:
             fill_q <= ckpt_data - 32'd2 + {29'd0, cnt_q, 1'b0};
           rd68031_pkg::CK_SCAN: begin
-            // UM 7.4.17: "the MC68020 discards any instruction words that have
+            // UM20 7.4.17: "the MC68020 discards any instruction words that have
             // been prefetched beyond the current scanPC location ... then
             // refills the instruction pipe from the scanPC address". A flush
             // that leaves stage D alone, and a prefetch in flight is thrown
@@ -412,7 +412,7 @@ module rd68031_ifu #(
             if (fetch_pend_q && !fetch_ack) discard_q <= 1'b1;
           end
           default: begin                       // CK_FLAGS
-            // Only the rerun bits. UM 6.2.1 makes FC and FB a RECORD of what
+            // Only the rerun bits. UM20 6.2.1 makes FC and FB a RECORD of what
             // went wrong, for the handler to read, and RC and RB the statement
             // of what is still to be done -- "if the RC bit is clear, the words
             // on the stack for stage C of the pipe are accepted as valid",
@@ -482,7 +482,7 @@ module rd68031_ifu #(
           d_q    <= c_q;
           d_v_q  <= 1'b1;
           // The new stage D is the word stage C held, which sits two bytes
-          // before stage B -- UM 6.2, "the address of the stage C word is the
+          // before stage B -- UM20 6.2, "the address of the stage C word is the
           // address of the stage B word minus two".
           pc_d_q <= stg_b_addr - 32'd2;
         end
@@ -543,7 +543,7 @@ module rd68031_ifu #(
   // round: a frame with RC clear and RB set describes a queue one word deep.
   //
   // This queue fills stage C before stage B, so RC set implies RB set and the
-  // pairing UM 6.2.1 mentions -- "either RB and RC are set, or only RC is set"
+  // pairing UM20 6.2.1 mentions -- "either RB and RC are set, or only RC is set"
   // -- comes out the other way round here. doc/divergences.md records it. A
   // handler does what the same paragraph tells it to and recognises any
   // combination.

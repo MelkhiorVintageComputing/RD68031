@@ -44,8 +44,8 @@ manual is worth something.
 - Asynchronous active-low reset in the sensitivity list
 - A **posedge flop and a negedge flop combined with XOR** to make an output that changes
   on both edges (`rd68031_dedge_ff`). Only one side can change at any instant, so the
-  result is glitch-free, and every tool infers it correctly. `ECS` and `OCS`, which are
-  asserted for exactly one half clock, are built from it.
+  result is glitch-free, and every tool infers it correctly. `DBEN`, which asserts on
+  one edge and negates on the other, is built from it.
 
 ### Forbidden — project rules rather than tool limits
 
@@ -60,6 +60,7 @@ manual is worth something.
 | No user types on module **ports** | keeps yosys and cross-tool elaboration happy; use plain `logic [N:0]` and convert inside |
 | No inline `lint_off` pragmas | waivers go in `rtl/rd68031.vlt` with a reason |
 | **No function that reads module state, called from a continuous assignment** | see below — the tools disagree about when it is re-evaluated |
+| **No pin decoded from a multi-bit state register** | a decode glitches on any edge that changes two of the state's bits through a code it is true of; a pin is a flop, or `rd68031_dedge_ff` if it moves on both edges (`doc/bugs-found.md`, M1) |
 
 Testbenches under `sim/` are not bound by these: they only ever run under iverilog or
 Verilator, and may use `initial`, `$display`, tasks, `realtime` and the rest.
@@ -78,7 +79,7 @@ always_ff @(posedge clk or negedge rst_n) begin
 end
 ```
 
-`rst_n` is **not** an MC68020 pin. It is the hardware/simulation initialisation input that
+`rst_n` is **not** an MC68030 pin. It is the hardware/simulation initialisation input that
 gives every flop a defined value; the architectural reset behaviour (RESET asserted, the
 ISP fetched from $0 and the PC from $4) is a separate sequence driven by `reset_n_i`. Do
 not conflate them.
@@ -111,13 +112,14 @@ Cite the source. A line of RTL that implements something from the manual says wh
 section it came from:
 
 ```systemverilog
-// UM 5.1.1: SIZ1/SIZ0 indicate the number of bytes REMAINING to be transferred,
+// UM 7.2.1: SIZ1/SIZ0 indicate the number of bytes REMAINING to be transferred,
 // not the size of the original operand. Specification 6 measures them from CLK
 // high, so they live in the positive-edge domain.
 ```
 
-`UM` is `MC68020UM_split`, `PRM` is `M68000PRM_split`. Specification numbers refer to
-`ac-electrical-specifications.csv`. This is not decoration: when a behaviour is later
+`UM` is `MC68030UM_split`, `PRM` is `M68000PRM_split`, and a comment inherited from
+RD68021 that cites the MC68020 manual says `UM20`. Specification numbers refer to
+`MC68030EC_split/ac-electrical-specifications.csv`. This is not decoration: when a behaviour is later
 questioned, the citation is what settles it.
 
 ## Lint waivers
@@ -211,6 +213,9 @@ A function whose result depends only on its arguments is still fine anywhere.
 | yosys | returns 0 on a warning, and two of its warnings are defects: "multiple conflicting drivers" (a register written from two processes — which is what a register written from both edge domains looks like) and an inferred latch | grep the log; the exit code will not tell you. Measured: `op_addr` was driven from both the posedge and the negedge block and `make lint` said PASS |
 | Vivado | `[Synth 8-3332]` reads like an implicit-declaration message and is not — it is "sequential element … is unused and will be removed", ordinary optimisation, and the normal state of a design whose upper units are still stubs | do **not** promote it. Promoting it failed a perfectly good synthesis run. `[Synth 8-6901]`, used-before-declaration, is the one worth promoting, and it has already earned its keep |
 | all of them | a testbench that samples an instruction boundary just after the rising edge misses the end of a bus-cycle microword, because the bus unit's output stage is negedge-clocked and the acknowledge only settles in the second half of the clock | sample instruction boundaries on the *falling* edge |
+| iverilog | an `always_comb` computing a counter's next value from a state's next value -- `beat_nxt` from `st_n_nxt` in `rd68031_biu` -- crashes the compiler: `ivl_nexus_ptrs: Assertion 'net' failed`, core dumped, no line number | the same expression as a continuous assignment of nested ternaries. Found by bisection; Verilator and yosys accepted both |
+| iverilog | an OR of several `==` comparisons of one multi-bit variable is evaluated term by term, so it goes false for zero time when the variable moves between two codes it is true of | a simulation symptom of a real hazard: make the output a flop (see the project rules above) |
+| iverilog | an input port left out of an instantiation floats to z and becomes x in every expression, silently -- `@(posedge x)` even fires on it | connect every port by name in testbenches; Verilator's `PINMISSING` catches it in `rtl/` |
 | all of them | a testbench that *releases reset* on a rising edge races the design, because every register takes its reset value on that same edge and both are non-blocking assignments at the same time step. The tell is that adding a `$display` to the harness changes the result | a testbench changes an input the design samples on a rising edge only on a **falling** edge. Measured here: the first vector of a sweep behaved differently from the same vector replayed later |
 | Quartus | a macro expanding to a **package-scoped part-select** (`` `UF(EAPC) `` → `pkg::U_EAPC_LSB +: pkg::U_EAPC_W`) is fine in a procedural block and **not** in a port connection: Quartus reads both scoped names as undeclared identifiers, creates implicit nets and builds a netlist that does not match the source, exit code 0 | bind it to a named signal and pass that. Measured here on `u_eadec.pc_base`; iverilog, Verilator, yosys, Vivado and Questa all accepted it |
 | yosys | a variable **declared inside an `always_ff`** and assigned with `=` reads like a temporary and is not one: yosys gives it storage, and the flip-flops it makes have no reset because nothing in the reset branch mentions them | declare it outside and drive it with a continuous assignment. Measured here on a four-bit register select inside MOVEM's destination arm: `make lint` passed and `make audit` reported four flip-flops initialising outside reset |
