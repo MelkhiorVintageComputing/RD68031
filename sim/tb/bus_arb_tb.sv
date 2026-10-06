@@ -232,7 +232,7 @@ module bus_arb_tb;
     // BR at every phase of a multi-cycle operand.
     //
     // This is the one that catches the MC68010 project's arbitration bug. A
-    // four-byte read on an 8-bit port is four bus cycles (Table 5-6), so a bus
+    // four-byte read on an 8-bit port is four bus cycles (UM Table 7-6), so a bus
     // request arriving part-way through has to be granted at the end of a cycle
     // and the rest of the operand resumed afterwards. If the decision to start a
     // cycle is taken from the arbiter's current state while the bus release

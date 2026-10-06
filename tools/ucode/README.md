@@ -19,7 +19,7 @@ and the microcode store arrive in M5.
 Some properties cannot be stated in RTL, so they are stated here and fail the
 build instead. `frames.py`'s checks are:
 
-1. Every frame is contiguous, gapless, and exactly as many words as UM Table 6-5
+1. Every frame is contiguous, gapless, and exactly as many words as UM Table 8-6
    says.
 2. The version word is at `SP+$36` and only the long frame has one.
 3. No two checkpointed registers share a bit, and none sits on the version nibble.

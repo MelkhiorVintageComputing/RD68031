@@ -394,3 +394,61 @@ not the total, though PASS and FAIL were still decided on all of them.
 
 **Stops it coming back:** nothing but reading the log; the counts in
 `doc/checkpoint.md` are taken from it.
+
+---
+
+## M5 · CALLM and RTM ran
+
+**What:** the decoder sent `$06C0`-`$06FF` to the MC68020's module-call
+microcode, with its access-level cycles in CPU space type 1. Neither instruction
+exists on the MC68030 (PRM 4 heads both "(MC68020)"; `instructions-by-cpu.csv`),
+and UM 8.1.5 makes a first word that is no MC68030 instruction's an illegal
+instruction; UM figure 7-42 implements no CPU space type 1.
+
+**Found by:** the M5 comparison of the MC68020 and MC68030 columns of
+`instructions-by-cpu.csv`, which the plan had already named.
+
+**Fixed by:** both encodings decode to `exc_illegal`; the microcode, the seven
+conditions, the two ALU operations, the `RTM_XW` source and the `ACCESS` CPU
+space that only they used are gone, from `tools/ucode/isa.py` and from the RTL.
+
+**Stops it coming back:** `core_insn_tb` and `core_m030_tb` take CALLM and RTM
+as illegal instructions, in both modes, and check the four-word frame.
+
+---
+
+## M5 · A CpID-0 word in user mode took an F-line exception
+
+**What:** every F-line word with CpID 0 went to the F-line exception -- through
+the decode table with the coprocessor interface built, and through the
+decoder's F-line short cut without it. On the MC68030 CpID 0 is the MMU's: UM
+9.8 and 8.1.5 make every CpID-0 word a privilege violation in user mode, and
+the four MMU instructions are privileged (UM 8.1.6), so a user program that
+tried one was told it was unimplemented rather than privileged.
+
+**Found by:** reading UM 9.8, 8.1.5 and 10.1 for the CpID-0 change M5 calls for.
+
+**Fixed by:** CpID 0 goes to the decode table whatever `COPROCESSOR` is, and to
+`mmu_op` or `cp0_unimp`, both of which test the S bit before anything else
+(`doc/coprocessor.md`).
+
+**Stops it coming back:** `core_m030_tb` runs CpID-0 words of each kind in user
+and supervisor mode, with and without the interface built (`make sim
+COPROCESSOR=1`), and counts the CPU-space cycles addressed to CpID 0: none.
+
+---
+
+## M5 · CACR kept two bits
+
+**What:** MOVEC to CACR stored E and F of the MC68020's layout (UM20 figure 4-2)
+and dropped the rest. The MC68030's CACR also keeps WA, DBE, FD, ED and IBE (UM
+6.3.1, figure 6-14), so a MOVEC from CACR read back zero where the part reads
+what was written.
+
+**Found by:** comparing UM figure 6-14 with `rd68031_pkg`'s CACR constants.
+
+**Fixed by:** `CACR_IMPLEMENTED` is `$3313` and the bits have the MC68030's
+names; the instruction cache's are where they were.
+
+**Stops it coming back:** `core_m030_tb`'s three CACR round trips.
+

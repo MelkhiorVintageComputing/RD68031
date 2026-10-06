@@ -105,7 +105,7 @@ module rd68031_top #(
   // Sequencer to bus unit: one request per OPERAND, not per bus cycle.
   //
   // The bus unit owns the split into one to four cycles, the SIZ encoding, the
-  // byte lanes of Table 5-7 and the assembly of the result, so the microcode
+  // byte lanes of UM Tables 7-4 and 7-5 and the assembly of the result, so the microcode
   // issues exactly one request whatever the alignment and whatever port answers.
   // That is also what lets OCS be driven from this handshake (UM 7.1.1).
   // ==========================================================================

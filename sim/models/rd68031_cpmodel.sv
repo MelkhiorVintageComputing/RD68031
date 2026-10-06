@@ -4,9 +4,9 @@
 
 // RD68031 -- a scripted coprocessor, for the coprocessor interface: M13.
 //
-// The other side of UM section 7, written from the protocol and not from any
+// The other side of UM section 10, written from the protocol and not from any
 // real coprocessor: it answers CPU-space type $2 cycles for one CpID (UM figure
-// 7-3), holds a queue of what each readable interface register will return, and
+// 10-3), holds a queue of what each readable interface register will return, and
 // logs every access the processor makes. A testbench scripts the conversation --
 // "the response CIR will say this, then this" -- and checks the log: which
 // registers were touched, in what order, with what data. That is enough to
@@ -17,7 +17,7 @@
 // sixteen-bit registers the way the MC68881 does: "with DSACK1 only, on D31-D16,
 // regardless of the value of A1" (MC68881 UM 7.2), which is a sixteen-bit port
 // as far as the processor can tell, and so exercises dynamic bus sizing on the
-// interface registers. The register map is UM figure 7-5:
+// interface registers. The register map is UM figure 10-5:
 //
 //   $00 response (read)     $02 control (write)
 //   $04 save (read)         $06 restore (read and write)
@@ -98,7 +98,7 @@ module rd68031_cpmodel #(
   task automatic push_oadr(input logic [31:0] v); oadr_q[oadr_n] = v; oadr_n++; endtask
 
   // ---- Decoding a cycle ----------------------------------------------------
-  // UM figure 7-3: FC 111, A19-A16 = 0010, A15-A13 = the CpID, A4-A0 the
+  // UM figure 10-3: FC 111, A19-A16 = 0010, A15-A13 = the CpID, A4-A0 the
   // register, and every other address bit zero.
   logic selected;
   assign selected = !as_n_i && (fc_i == 3'b111) && (a_i[19:16] == 4'h2)
@@ -147,11 +147,11 @@ module rd68031_cpmodel #(
     if (port16 && word_reg && a_i[1]) d_o = {d_o[15:0], 16'h0000};
   end
   assign d_oe      = selected && rw_i;
-  // UM table 5-1: DSACK1 alone is a sixteen-bit port, both a thirty-two-bit one.
+  // UM table 7-1: DSACK1 alone is a sixteen-bit port, both a thirty-two-bit one.
   assign dsack_n_o = !selected ? 2'b11 : (port16 && word_reg) ? 2'b01 : 2'b00;
 
   // The bytes a write carried, right justified: a 32-bit port puts byte k of an
-  // access at lane (A1A0 + k) -- UM table 5-7.
+  // access at lane (A1A0 + k) -- UM20 table 5-7.
   function automatic logic [31:0] wr_value(input logic [31:0] d,
                                            input logic [1:0] a10,
                                            input int unsigned n);

@@ -1043,7 +1043,7 @@ module core_fault_tb;
     check(dut.u_seq.dreg[3] === 32'h3333_4444, "posted, queued: the read saw the second write");
 
     // The handler completes the posted write itself and clears DF -- UM
-    // 6.2.2 -- so RTE runs nothing, and only resumes.
+    // 8.2.2 -- so RTE runs nothing, and only resumes.
     base_setup();
     poke_w(CODE + 0,  16'h207C);
     poke_l(CODE + 2,  GONE);

@@ -2,7 +2,7 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 - SystemVerilog MC68020
+// RD68031 - SystemVerilog MC68030
 //
 // Instruction fetch unit: the cache holding register, the three-stage instruction
 // pipe, and the instruction cache.
@@ -119,7 +119,7 @@ module rd68031_ifu #(
   logic        fetch_pend_q;   // a fetch has been asked for and not yet answered
   logic        discard_q;      // the word in flight is for a stream that is gone
 
-  // ... and the space: the cache tag carries FC2 (UM20 4.1), and the fill has to be
+  // ... and the space: the cache tag carries FC2 (UM 6.1.1), and the fill has to be
   // tagged with the space the long word was READ from, which a flush that changed
   // the privilege level while the fetch was in flight has already moved on from.
   logic        fetch_fc2_q;
@@ -233,13 +233,16 @@ module rd68031_ifu #(
   // be asked for it. A hit loads the holding register from the cache, and the
   // queue then drains it exactly as it drains a long word from the bus -- the
   // pipe cannot tell the two apart, which is what makes the cache architecturally
-  // invisible (UM20 4.1: data accesses are never cached, so nothing but the
-  // instruction stream could see it anyway).
+  // invisible (UM 6.1.1: the instruction cache holds instruction prefetches
+  // only, so nothing but the instruction stream could see it anyway).
   //
-  // Enabled by CACR's E bit, and disabled regardless of it while CDIS is asserted
-  // (UM20 4.3). Disabled means neither looked up nor filled; it does NOT mean
-  // emptied -- "if the cache is reenabled, the previously valid entries remain
-  // valid and may be used" (UM20 4.3.1).
+  // Enabled by CACR's EI bit, and disabled regardless of it while CDIS is
+  // asserted ("the assertion of CDIS disables the caches, regardless of the
+  // state of the enable bits in CACR" -- UM 6.1). Disabled means neither
+  // looked up nor filled; it does NOT mean emptied -- "if it is enabled again,
+  // the previously valid entries remain valid and may be used" (UM 6.3.1.11).
+  // The organisation is still the MC68020's, 64 long words; the MC68030's 16
+  // lines of four, with IBE's burst fill, are M10.
   // ==========================================================================
   logic        cache_on;
   logic        cache_hit;
@@ -247,19 +250,21 @@ module rd68031_ifu #(
   logic        cache_fill;
   logic        inv_all, inv_one;
 
-  assign cache_on = cacr[rd68031_pkg::CACR_E] && cdis_sync_n;
+  assign cache_on = cacr[rd68031_pkg::CACR_EI] && cdis_sync_n;
 
-  // UM20 4.1: the entry is written "unless the F-bit in the CACR is set". And a
+  // UM 6.3.1.10: "when the FI bit is set and a miss occurs in the instruction
+  // cache, the entry (or line) is not replaced". And a
   // long word whose cycle ended in a bus error is not an instruction at all: the
   // pipe carries it with its fault bit, and it must not outlive that in the cache.
   // A word for a stream a flush abandoned is still the right word for its own
   // address, but it is not taken into the holding register either, and filling
   // the cache with it would be the only trace it left -- so it is dropped whole.
   assign cache_fill = fetch_ack && !discard_q && !fetch_fault
-                   && cache_on && !cacr[rd68031_pkg::CACR_F];
+                   && cache_on && !cacr[rd68031_pkg::CACR_FI];
 
-  // CACR's C and CE, pulsed by the MOVEC that sets them. CE clears "regardless of
-  // the states of the E and F bits" (UM20 4.3.1), and so does C.
+  // CACR's CI and CEI, pulsed by the MOVEC that sets them. CEI clears
+  // "regardless of the states of the EI and FI bits" (UM 6.3.1.9), and so does
+  // CI (UM 6.3.1.8).
   assign inv_all = (cach_op == 2'b01);
   assign inv_one = (cach_op == 2'b10);
 

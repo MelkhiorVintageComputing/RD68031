@@ -200,7 +200,7 @@ module core_vec_tb;
         dut.u_seq.usp_q = uspv;
         dut.u_seq.isp_q = ispv;
         dut.u_seq.sr_q  = srv[15:0];
-        // UM 6.1.1 does not say what reset leaves in these, so the test says.
+        // UM 8.1.1 does not say what reset leaves in these, so the test says.
         dut.u_seq.msp_q  = mspv;
         dut.u_seq.sfc_q  = sfcv[2:0];
         dut.u_seq.dfc_q  = dfcv[2:0];

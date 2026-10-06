@@ -68,10 +68,10 @@ end
 // The region is switched off by a bit of its own rather than by an address no
 // cycle can use, because there is no such address: the first attempt parked it
 // at $FFFF_FFFF, which is exactly where a level 7 interrupt acknowledge goes --
-// UM figure 5-31 puts the level on A3-A1 with every bit above them set.
+// UM figure 7-42 puts the level on A3-A1 with every bit above them set.
 //
 //   `berr_late`   the region answers with DSACK and THEN a bus error, after the
-//                 bus unit's first sample -- UM Table 5-8 case 4, which only the
+//                 bus unit's first sample -- UM Table 7-8 case 4, which only the
 //                 second sample, entering S5, sees. That is the one fault an
 //                 early retire has to see coming.
 logic        berr_n_i;
@@ -433,7 +433,7 @@ logic [31:0] acc_data [0:MAXACC-1];
 // access. An interpreter has no notion of either, and what it reports is the
 // operand.
 //
-// UM 5.1.1 names exactly this distinction in hardware -- ECS marks every bus
+// UM 7.1.1 names exactly this distinction in hardware -- ECS marks every bus
 // cycle, OCS only the first cycle of an operand -- so the recorder triggers on
 // OCS and nothing has to be inferred from the addresses.
 //

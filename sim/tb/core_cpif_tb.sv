@@ -4,7 +4,7 @@
 
 // RD68031 -- the coprocessor interface: M13.
 //
-// UM section 7 against a scripted coprocessor (sim/models/rd68031_cpmodel.sv).
+// UM section 10 against a scripted coprocessor (sim/models/rd68031_cpmodel.sv).
 // Every test states what the coprocessor will say -- the primitives it puts in
 // the response CIR, the operands and registers it hands over -- runs a
 // coprocessor instruction, and checks two things: what the processor did to
@@ -490,7 +490,7 @@ module core_cpif_tb;
     expect_end("cpSAVE invalid");
 
     // A restore whose length in memory is not a multiple of four -- UM
-    // 7.5.2.7: written, read back, and only then aborted.
+    // 10.5.2.7: written, read back, and only then aborted.
     base_setup();
     poke_l(32'h0000_0038, HAND);
     poke_w(CODE + 0, 16'hF350);            // cpRESTORE (A0)
@@ -1321,7 +1321,7 @@ module core_cpif_tb;
     expect_cir(1'b1, R_RESP, 2, 32'h0802, "busy, interrupted");
     expect_end("busy, interrupted");
 
-    // MOVEC with a control register code the MC68020 does not have is an
+    // MOVEC with a control register code the MC68030 does not have is an
     // illegal instruction -- UM 8.1.5.
     base_setup();
     poke_l(32'h0000_0010, HAND);           // vector 4

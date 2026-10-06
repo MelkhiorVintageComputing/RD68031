@@ -2,7 +2,7 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 - SystemVerilog MC68020
+// RD68031 - SystemVerilog MC68030
 //
 // The on-chip instruction cache -- UM20 section 4.
 //

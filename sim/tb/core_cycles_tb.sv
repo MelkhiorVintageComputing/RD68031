@@ -17,7 +17,7 @@
 //
 // and the count is from the instruction boundary at which X begins to the next
 // one, on each pass: the first with the cache empty, the second with every word
-// of the loop in it. That is how UM section 8 counts: an instruction's time is
+// of the loop in it. That is how UM section 11 counts: an instruction's time is
 // from the start of its execution to the start of the next one's.
 
 `timescale 1ns / 1ps

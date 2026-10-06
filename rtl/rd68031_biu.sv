@@ -1047,13 +1047,6 @@ module rd68031_biu #(
         // The breakpoint number on A4-A2 -- UM 7.4.2.
         cpu_space_addr = {12'h000, rd68031_pkg::CPUS_BKPT, 11'h000,
                           req_cpuaddr[2:0], 2'b00};
-      rd68031_pkg::CPUS_ACCESS:
-        // UM20 figure 9-13: the access-level control registers are at byte
-        // offsets $00 to $5C, which is A7-A0 -- not the A15-A8 the other types
-        // put their field on. The MC68030 has no access-level type (figure
-        // 7-42 implements three); CALLM goes at M5.
-        cpu_space_addr = {12'h000, rd68031_pkg::CPUS_ACCESS, 8'h00,
-                          req_cpuaddr};
       rd68031_pkg::CPUS_COPROC:
         // UM 7.4.3: the CpID on A13-A15 and the interface register on A0-A4,
         // and figure 7-42 shows every other address line zero.

@@ -5,10 +5,25 @@
 > MC68030 at M12 (`doc/plan.md`).
 
 UM section 7, as built in M13. `COPROCESSOR = 1` on `rd68031_top` builds it; with
-`COPROCESSOR = 0` every F-line word is an F-line exception, which is also what a
-machine with no coprocessor wants (UM 7.5.2.2). The microcode is the same either
-way: the parameter only chooses what the opcode decoder hands the sequencer for an
-F-line word.
+`COPROCESSOR = 0` every F-line word with a CpID other than zero is an F-line
+exception, which is also what a machine with no coprocessor wants (UM 7.5.2.2).
+The microcode is the same either way: the parameter only chooses what the opcode
+decoder hands the sequencer for an F-line word.
+
+> **Changed at M5, for the MC68030: CpID 0 is never the coprocessor interface's.**
+> MC68030 UM 10.1: "F-line operation words, in which the CpID is zero, are not
+> coprocessor instructions for the MC68030 ... The MC68030 never generates
+> coprocessor interface bus cycles with the CpID equal to zero." CpID 0 is the
+> on-chip MMU's, and goes to the opcode decoder whatever `COPROCESSOR` is: the
+> four MMU instructions' first words (type 000, an effective address field of
+> zero or control alterable) to `mmu_op`, every other CpID-0 word to
+> `cp0_unimp` (`tools/ucode/program.py`). Both take a privilege violation in
+> user mode before reading any extension word (MC68030 UM 9.8, 8.1.5, 8.1.6),
+> and an F-line exception in supervisor mode -- for `cp0_unimp` finally, for
+> `mmu_op` until M11 implements PMOVE, PTEST, PLOAD and PFLUSH there
+> (`doc/divergences.md`). The interface itself, for CpIDs 1 to 7, is unchanged
+> and is rewritten for the MC68030 at M12. `core_m030_tb` checks that no
+> CPU-space cycle ever names CpID 0, with the interface built and without.
 
 `make cpif` runs it against a scripted coprocessor, 297 checks.
 
@@ -125,8 +140,9 @@ Other lengths use the general loop.
 | cpSAVE | `1111 ccc 100 eeeeee` | control alterable, -(An) | a read of the save CIR |
 | cpRESTORE | `1111 ccc 101 eeeeee` | control, (An)+, #&lt;frame&gt; | the format word to the restore CIR |
 
-A CpID of 000, a type of 110 or 111, and an effective address the form does not
-allow are all F-line exceptions with no CIR access. cpSAVE and cpRESTORE are
+A type of 110 or 111 and an effective address the form does not allow are F-line
+exceptions with no CIR access. A CpID of 000 has no CIR access either, and is not
+a coprocessor instruction at all on the MC68030 (the M5 note at the top). cpSAVE and cpRESTORE are
 privileged, and that is checked before any CIR is touched.
 
 A conditional instruction's dialogue ends with a null primitive with CA clear.

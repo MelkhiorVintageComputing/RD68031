@@ -22,7 +22,7 @@ MEMORY
 SECTIONS
 {
   /* The two long words the processor reads before it fetches anything --
-     UM 6.1.1, and supervisor PROGRAM space, which is why the core reads them
+     UM 8.1.1, and supervisor PROGRAM space, which is why the core reads them
      with FC = 110. */
   .vectors 0x00000000 : { KEEP(*(.vectors)) } > ram
 

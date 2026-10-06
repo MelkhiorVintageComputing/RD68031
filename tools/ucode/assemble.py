@@ -440,7 +440,7 @@ def ucode_rom():
 // It is reset-EQUIVALENT instead. While reset is asserted the address is forced
 // to the reset entry point, so the register holds the reset word from the first
 // clock edge inside reset -- and the clock runs during reset by requirement: UM
-// 5.8 has RESET asserted for at least 520 clocks at power-up. The sequencer's
+// 7.8 has RESET asserted for at least 520 clocks at power-up. The sequencer's
 // micro-PC comes out of reset at the same entry point, so the two agree on the
 // first edge after reset whichever side of it reset is released.
 
@@ -601,12 +601,12 @@ endmodule""")
 
 def cpdec_rom():
     """The response primitive decoder: a coprocessor's request in, a
-    micro-address out -- UM 7.4.
+    micro-address out -- UM 10.4.
 
     The same trick as the extension-word decoder. A primitive read from the
     response CIR decides which interface register is read next, which way an
     operand moves, whether the effective address is evaluated, and whether the
-    request is refused outright as a protocol violation (UM table 7-6); resolving
+    request is refused outright as a protocol violation (UM table 10-6); resolving
     that once, in hardware, keeps every one of those decisions out of the bus
     request's fan-in.
     """
@@ -617,17 +617,17 @@ def cpdec_rom():
         raise SystemExit('assemble: the disjoint primitive table does not agree '
                          'with the ordered one:\n  ' + '\n  '.join(bad))
     out = [BANNER]
-    out.append("""// The coprocessor response primitive decoder -- UM 7.4 and table 7-6.
+    out.append("""// The coprocessor response primitive decoder -- UM 10.4 and table 10-6.
 //
 // Twenty-two bits in: the instruction's category (1 for a conditional one,
 // whose dialogue allows less), the sixteen-bit primitive read from the response
 // CIR, and the instruction's effective address as the primitives that take one
-// need it -- whether it is in the class the primitive names (UM table 7-4),
-// whether it suits a transfer of multiple coprocessor registers (UM 7.4.16),
+// need it -- whether it is in the class the primitive names (UM table 10-4),
+// whether it suits a transfer of multiple coprocessor registers (UM 10.4.16),
 // and which of Dn, An, #imm, (An)+, -(An) or the other memory modes it is. A
 // micro-address out. Every encoding the manual leaves undefined, and every one
 // it forbids in a conditional instruction, lands on the protocol violation --
-// UM 7.5.2.1.
+// UM 10.5.2.1.
 //
 // %d ordered patterns became %d disjoint ones.
 
@@ -750,8 +750,6 @@ COND_READS = {
     'VERBAD': 'XW',
     'XW10': 'XW', 'XW11': 'XW', 'XW15': 'XW',
     'EMPTY': 'T0', 'NOTEMPTY': 'T0',
-    'MODBAD': 'T0', 'MODTYPE1': 'T0', 'MODOPT4': 'T0',
-    'ASTAT_BAD': 'T2', 'ASTAT_STACK': 'T2', 'T3ZERO': 'T3',
     'USER': 'SR', 'MASTER': 'SR',
     'CPCA': 'CPRIM', 'CPPC': 'CPRIM', 'CPDR': 'CPRIM', 'CPB8': 'CPRIM',
     'CPPF': 'CPRIM', 'CPTF': 'CPRIM', 'CPEAOK': 'CPRIM', 'CPMEAOK': 'CPRIM',
@@ -1059,7 +1057,7 @@ def check_shift_src():
 # A forward scan from every return point: a read of one of the three before a
 # write to it, on any path to the end of the instruction, is the bug.
 EA_SCRATCH = ('T2', 'T3', 'XW')
-XW_SOURCES = ('XW', 'XW_HI', 'DREG_XQ', 'DREG_XR', 'DREG_XU', 'RTM_XW', 'XREG',
+XW_SOURCES = ('XW', 'XW_HI', 'DREG_XQ', 'DREG_XR', 'DREG_XU', 'XREG',
               'XWDISP8', 'INDEX')
 XW_DESTS = ('XREG', 'XREG_SZ', 'DREG_XR', 'DREG_XQ', 'DREG_XU')
 
@@ -1211,12 +1209,12 @@ def mark_sync():
 
 
 def mark_posted():
-    """Every plain write in a data space is posted -- UM 8.1.3.
+    """Every plain write in a data space is posted -- UM 11.2.5.
 
     Not a read-modify-write, which is indivisible; not CPU space, whose bus
     errors are answers the microcode reads -- except a coprocessor interface
     register past the first access, whose bus error is an ordinary one (UM
-    7.5.2.8); not RTE's rerun or RESET. A microword that waits for posted
+    10.5.2.8); not RTE's rerun or RESET. A microword that waits for posted
     writes only because it takes an earlier read's data is posted too: it has
     its data by the time the bus unit takes it.
     """

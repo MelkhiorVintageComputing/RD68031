@@ -225,3 +225,67 @@ rerun, as UM 8.2.3 says.
 
 **How it is checked:** it is not, yet. Found by reading the microcode against UM
 8.2.2 at M4: no microword tests `RM`, and RESUME is unconditional.
+
+---
+
+## The MMU instructions take an F-line exception in supervisor mode (until M11)
+
+**UM 9.8 and PRM 6:** PMOVE, PTEST, PLOAD and PFLUSH (with PFLUSHA) are
+privileged instructions that move MMU registers, search and load the address
+translation cache, and flush it. UM 8.1.5: "Instructions that have word patterns
+with bits [15:12] equal to $F, bits [11:9] equal to $0, and defined word patterns
+for subsequent words are legal MMU instructions."
+
+**What this design does:** the decoder sends their first words -- CpID 0, type
+000, an effective address field of zero or control alterable -- to `mmu_op` in
+`tools/ucode/program.py`. In user mode that is a privilege violation, vector 8,
+as the part does (UM 8.1.6, 9.8). In supervisor mode it is an F-line exception,
+vector 11, with the instruction's own address in a four-word frame: what the
+part does for a CpID-0 word whose command word it does not define, applied to
+every one, because there is no MMU yet to execute them. M11 builds the MMU and
+replaces the stub with the instructions. Every other CpID-0 word is final
+already: a privilege violation in user mode and an F-line exception in
+supervisor mode (`cp0_unimp`).
+
+**Why it is allowed:** it is not; it is provisional. An operating system that
+runs with translation disabled and never executes an MMU instruction sees no
+difference; one that does gets an F-line exception, which a handler can
+recognise and emulate. M11's gate (`core_mmu_tb`, `make cosim-mmu`) retires
+this entry.
+
+**How it is checked:** `core_m030_tb` runs every MMU instruction form the
+assembler produces for `-mcpu=68030` -- PMOVE to and from TC, CRP, MMUSR and TT0,
+PFLUSHA, PFLUSH by function code and by address, PTESTR, PTESTW with an address
+register, PLOADR and PLOADW -- in supervisor mode and three of them in user
+mode, and checks the vector, the stacked program counter and the stacked S bit
+of each.
+
+---
+
+## CACR's data-cache and burst bits are stored and do nothing (until M10)
+
+**UM 6.3.1 and figure 6-14:** WA selects write allocation, DBE and IBE enable
+burst filling of the data and instruction caches, ED and FD enable and freeze
+the data cache, and CD and CED clear all of it or the entry CAAR names.
+
+**What this design does:** a MOVEC to CACR keeps WA, DBE, FD, ED, IBE, FI and EI
+and reads them back, and reads every reserved bit and the four clear bits as
+zero, as the figure says. EI, FI, CI and CEI act on the instruction cache, with
+the meanings the MC68020's E, F, C and CE had in the same bit positions (UM20
+figure 4-2) -- CEI clears the one long word CAAR's index names, which is the
+MC68030's granularity too (UM 6.3.1.9). The other seven do nothing yet: there is
+no data cache, and neither cache asks for a burst (`req_burst` and `fetch_burst`
+are tied off in `rd68031_top`), so CBREQ is never asserted by a running program.
+The instruction cache is still the MC68020's 64 long words rather than the
+MC68030's 16 lines of four. M10 builds the data cache, reorganises the
+instruction cache and connects the burst requests.
+
+**Why it is allowed:** a disabled or absent data cache is architecturally a
+cache that never hits, and the part's caches are allowed to be disabled; a
+program that set ED or DBE runs correctly and only more slowly. What a handler
+can observe -- the value MOVEC reads back -- is the part's.
+
+**How it is checked:** `core_m030_tb` writes all ones, a mixture, and zero to
+CACR and checks `$3313`, `$2211` and zero back, and CAAR's thirty-two bits;
+`core_cache_tb` checks EI, FI, CI and CEI against the cache; `core_m030_tb`
+reports the burst requests a program made on a burst-capable port, today none.

@@ -54,6 +54,7 @@ VLT  := rtl/rd68031.vlt
 
 IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$(ICACHE_ENTRIES)
 
+.PHONY: sim-progs
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl paths audit ucode ucode-check sim sim-bus \
         timing timing-verbose timing-build ea cache cycles cpif check clean
@@ -214,7 +215,23 @@ $(COW).hex: sim/programs/cow.S sim/programs/flat.ld
 	    $(COW).o 2> $(COW).link.log || { cat $(COW).link.log; exit 1; }
 	@$(CROSS)objcopy -O verilog --verilog-data-width=1 $(COW).elf $@
 
-sim: dirs $(COW).hex
+# core_m030_tb runs three images on two buses: the MC68030 smoke program, which
+# owns its vectors like cow.S and is assembled for the MC68030 so that the MMU
+# instructions are the assembler's own encodings, and two of the programs
+# `cosim` uses. Fixed paths, for the same reason as COW.
+M030 := build/programs/m030
+$(M030).hex: sim/programs/m030.S sim/programs/flat.ld
+	@mkdir -p build/programs
+	@$(CROSS)gcc -mcpu=68030 -c -o $(M030).o sim/programs/m030.S
+	@$(CROSS)gcc -nostdlib -nostartfiles -T sim/programs/flat.ld -o $(M030).elf \
+	    $(M030).o 2> $(M030).link.log || { cat $(M030).link.log; exit 1; }
+	@$(CROSS)objcopy -O verilog --verilog-data-width=1 $(M030).elf $@
+
+sim-progs:
+	@$(MAKE) --no-print-directory BUILD=build build/programs/arith.hex \
+	    build/programs/corners.hex
+
+sim: dirs $(COW).hex $(M030).hex sim-progs
 	@ok=1; for tb in $(TBS); do \
 	  iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/$$tb.vvp -s $$tb \
 	      $(RTL) sim/models/*.sv sim/tb/$$tb.sv > $(BUILD)/$$tb.build.log 2>&1 \

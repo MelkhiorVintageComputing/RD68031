@@ -50,7 +50,6 @@ package rd68031_pkg;
   localparam logic [2:0] CK_SCAN  = 3'd6;
 
   localparam logic [3:0] CPUS_BKPT      = 4'h0;  // breakpoint acknowledge
-  localparam logic [3:0] CPUS_ACCESS    = 4'h1;  // access level control (CALLM/RTM)
   localparam logic [3:0] CPUS_COPROC    = 4'h2;  // coprocessor communication
   localparam logic [3:0] CPUS_IACK      = 4'hF;  // interrupt acknowledge
 
@@ -251,12 +250,27 @@ package rd68031_pkg;
   localparam int ICACHE_INDEX_W = 6;
   localparam int ICACHE_TAG_W   = 25;  // A31-A8 and FC2
 
-  // CACR -- UM20 Figure 4-2. Bits 31-4 read as zero and are ignored when written.
-  localparam int CACR_E  = 0;  // enable
-  localparam int CACR_F  = 1;  // freeze: a miss does not replace
-  localparam int CACR_CE = 2;  // clear the entry CAAR names; always reads zero
-  localparam int CACR_C  = 3;  // clear all entries; always reads zero
-  localparam logic [31:0] CACR_IMPLEMENTED = 32'h0000_0003;  // only E and F are stored
+  // CACR -- UM 6.3.1 and figure 6-14. "Bits 31-14 and 7-5 are reserved ...
+  // They are currently read as zeros and are ignored when written", and the
+  // four clear bits are orders that are "always read as a zero". The low four
+  // bits are where the MC68020's E, F, CE and C were (UM20 figure 4-2), with
+  // the same meanings for the instruction cache.
+  localparam int CACR_EI  = 0;   // enable the instruction cache
+  localparam int CACR_FI  = 1;   // freeze it: a miss does not replace
+  localparam int CACR_CEI = 2;   // clear the entry CAAR names; reads zero
+  localparam int CACR_CI  = 3;   // clear all of it; reads zero
+  localparam int CACR_IBE = 4;   // instruction burst enable
+  localparam int CACR_ED  = 8;   // enable the data cache
+  localparam int CACR_FD  = 9;   // freeze it
+  localparam int CACR_CED = 10;  // clear the data-cache entry CAAR names; reads zero
+  localparam int CACR_CD  = 11;  // clear all of the data cache; reads zero
+  localparam int CACR_DBE = 12;  // data burst enable
+  localparam int CACR_WA  = 13;  // write allocate
+  // What a MOVEC to CACR keeps: WA, DBE, FD, ED, IBE, FI and EI. Only EI and
+  // FI act yet. The burst enables and the data-cache bits are stored and read
+  // back, and act when the burst fill and the data cache arrive at M10 --
+  // doc/divergences.md.
+  localparam logic [31:0] CACR_IMPLEMENTED = 32'h0000_3313;
 
   // ==========================================================================
   // RESET -- UM 7.8

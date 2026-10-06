@@ -11,7 +11,7 @@ This is the single definition. `rtl/gen/rd68031_ucode_pkg.sv` is generated from
 it, so the RTL and the microcode cannot drift apart: a field the microcode writes
 and the RTL does not read is a build failure, not a debugging session.
 
-THE DATAPATH, as of M5.
+THE DATAPATH.
 
     A source ─┐
               ├─► ALU ─► y[31:0] ─► destination
@@ -22,7 +22,7 @@ with a bus request costs the whole bus cycle, because the sequencer stalls on
 req_ack and does not count clocks. Instruction cycle counts fall out of that
 structure rather than being designed.
 
-THE PIPE. UM 1.6: instruction words enter at stage B and proceed to C and D, and
+THE PIPE. UM 11.2.2: instruction words enter at stage B and proceed to C and D, and
 "an instruction word is completely decoded when it reaches stage D". So stage D is
 the instruction register: it holds the opcode for the whole instruction and is not
 disturbed by reading extension words, which come from stage C.
@@ -32,7 +32,7 @@ disturbed by reading extension words, which come from stage C.
     FLUSH     the pipe is emptied and refilled from the ALU result.
 
 `pc_d` is the address of stage D and `stg_b_addr` the address of stage B, both
-carried as real registers because CONSUME moves one and not the other. UM 6.2 is
+carried as real registers because CONSUME moves one and not the other. UM 8.2 is
 what makes that observable: at an instruction boundary the pipe is sequential and
 the short frame derives the stage addresses from the PC, but mid-instruction it is
 not, which is exactly why the long frame carries stage B's address at SP+$24.
@@ -74,7 +74,7 @@ SEQ = enc(
                  # microword that faulted: doc/checkpoint.md rule 2 makes it
                  # re-executable, so resuming is a jump and nothing else
     # The coprocessor's response primitive decoder supplies the address -- UM
-    # 7.4. A primitive read from the response CIR says what the processor does
+    # 10.4. A primitive read from the response CIR says what the processor does
     # next, and most of what it says steers the bus: which register it reads,
     # which way an operand goes, whether an effective address is evaluated.
     # Resolving it in hardware into a micro-address, as the extension-word
@@ -83,9 +83,6 @@ SEQ = enc(
     'CPDEC',
 )
 
-# Conditions the COND arm can test. M5 needs none of them yet; the field exists
-# because the sequencer's shape depends on it and adding it later would change
-# every microword.
 # What seq = COND tests. It branches to `next` when the condition holds and
 # falls through when it does not, so no microword needs its two successors to be
 # adjacent and the assembler has no alignment rule to enforce.
@@ -119,30 +116,16 @@ COND = enc(
     # contained in the frame at memory location SP+54 (SP+$36)". The word is in
     # xw, and this holds when its top nibble is not rd68031_frame_pkg's.
     'VERBAD',
-    # UM 6.2.2: the three bits of the special status word a handler is allowed
+    # UM 8.2.2: the three bits of the special status word a handler is allowed
     # to have changed, plus the two that say what the faulted access was, which
     # RTE needs to know which buffer to rerun it from.
     'SSW_DF', 'SSW_RB', 'SSW_RC', 'SSW_RW', 'SSW_RM',
     'MASTER',    # the M bit is set, so the active supervisor stack is the
-                 # master one and an interrupt owes a throwaway frame -- UM 6.1.9
+                 # master one and an interrupt owes a throwaway frame -- UM 8.1.9
     'USER',      # the S bit is clear: a privileged instruction may not run
     'DIVZERO',   # the divisor was zero. PRM 4: "division by zero causes a
                  # trap", which is a different thing from an overflow -- the
                  # overflow arm returns and this one does not
-    # UM 9.7: a module descriptor's first long word, or a module frame's first
-    # word moved to the same place, held in T0 -- options in 31:29 and type in
-    # 28:24. The processor "recognizes only the options of 000 and 100" and
-    # "only descriptors of type $00 and $01; all others cause a format
-    # exception".
-    'MODBAD',    # anything else: a format error
-    'MODTYPE1',  # type $01, which changes the access level
-    'MODOPT4',   # option 100: the arguments are reached through a pointer
-    # UM table 9-6, the access status register, read into T2. Zero is a refusal
-    # and anything above seven is undefined; both are a format error. Four to
-    # seven say the stack changes as well.
-    'ASTAT_BAD',
-    'ASTAT_STACK',
-    'T3ZERO',    # T3 has counted down to nothing: the argument copy is done
     'ZSET',      # the zero flag, which is how CAS and CAS2 say the compare
                  # matched -- PRM 4, "if Z, update operand -> destination"
     'CSET',      # the carry flag, which is where CMP2 leaves its verdict
@@ -150,15 +133,15 @@ COND = enc(
                  # field reads as NE, so it cannot use the cc evaluation
     'AVEC',      # the last cycle ended with AVEC: use the autovector
     'BERR',      # ... or with a bus error. On an interrupt acknowledge that is
-                 # a spurious interrupt, UM 6.1.9, and not a bus fault
+                 # a spurious interrupt, UM 8.1.9, and not a bus fault
     'RESNEG',    # the ALU result is negative at the effective size
     'GTZ',       # ... and the signed comparison just made came out greater
-    # ---- The coprocessor interface, UM section 7 --------------------------
-    # The response primitive held in cprim, UM figure 7-22: come again, pass
+    # ---- The coprocessor interface, UM section 10 --------------------------
+    # The response primitive held in cprim, UM figure 10-22: come again, pass
     # the program counter, direction, and the three bits individual primitives
     # give their own names to -- IA or SP in bit 8, PF in bit 1, TF in bit 0.
     'CPCA', 'CPPC', 'CPDR', 'CPB8', 'CPPF', 'CPTF',
-    # Which coprocessor instruction stage D holds -- UM figures 7-6 to 7-13.
+    # Which coprocessor instruction stage D holds -- UM figures 10-6 to 10-13.
     # The category decides how a dialogue ends: a general instruction is over
     # when the coprocessor lets it go, a conditional one when it has a verdict.
     'CPGEN',     # bits 8:6 = 000, cpGEN
@@ -170,31 +153,31 @@ COND = enc(
     # moves one to four bytes per request and the count is fixed in the
     # microword, so the tail of an odd-length operand is a branch.
     'T1GE4', 'T1B1', 'T1B0', 'T1ZERO',
-    # A trace will be taken when this instruction ends -- UM 7.5.2.5 keeps the
+    # A trace will be taken when this instruction ends -- UM 10.5.2.5 keeps the
     # dialogue going until the coprocessor has finished, so that it is.
     'TRACEPEND',
-    # Come again: CA set, or a trace pending (UM 7.5.2.5), which holds a
+    # Come again: CA set, or a trace pending (UM 10.5.2.5), which holds a
     # dialogue open until the coprocessor says it has finished. The one
     # question at the end of every primitive -- program.py, u().
     'CPAGAIN',
-    # An interrupt the mask admits is waiting -- UM 7.5.2.6: a null primitive
+    # An interrupt the mask admits is waiting -- UM 10.5.2.6: a null primitive
     # with CA and IA set services it in the middle of the instruction.
     'IRQPEND',
     # The addressing mode in stage D's effective-address field, for the
-    # primitives that evaluate it -- UM 7.4.9 and 7.4.16.
+    # primitives that evaluate it -- UM 10.4.9 and 10.4.16.
     'EADN', 'EAAN', 'EAPOST', 'EAPRE', 'EAIMM',
     'EAUNALT',   # program-counter relative or immediate: not alterable
-    'CPEAOK',    # in the class the primitive's valid-EA field names, table 7-4
-    'EACTLALT',  # control alterable, UM 7.4.8
-    'CPMEAOK',   # what UM 7.4.16 allows for the primitive's direction
+    'CPEAOK',    # in the class the primitive's valid-EA field names, UM table 10-4
+    'EACTLALT',  # control alterable, UM 10.4.8
+    'CPMEAOK',   # what UM 10.4.16 allows for the primitive's direction
     'CPLEN124',  # the primitive's length is one, two or four bytes
-    # A coprocessor format word, read into T0 -- UM table 7-2.
+    # A coprocessor format word, read into T0 -- UM table 10-2.
     'FWNOTRDY',  # $01, not ready, come again
     'FWEMPTY',   # $00, empty or reset
     'FWBAD',     # $02, invalid, or $03-$0F, which the processor takes as it
     'FWLEN',     # a valid format whose length is not a multiple of four
     # A control register select code the processor does not have -- UM table
-    # 7-5 for the coprocessor, and UM 6.1.5 for MOVEC, where it is an illegal
+    # 10-5 for the coprocessor, and UM 8.1.5 for MOVEC, where it is an illegal
     # instruction.
     'CREGBAD',
     'CREGBADC',  # ... the same code, read from stage C before it is latched
@@ -234,7 +217,7 @@ ASEL = enc(
     'AREG_PRE',
 )
 
-# Which address space. UM Table 2-1.
+# Which address space. UM Table 4-1.
 FC = enc(
     'PROG',      # program space at the current privilege level
     'DATA',      # data space likewise
@@ -338,17 +321,13 @@ ASRC = enc(
     'BF_MERGED',   # a data register with the field replaced
     'FLTVEC',    # the vector offset this bus fault takes: 8 or 12
     'FLTFMT',    # ... and the same, packed with the frame format code
-    # RTM's register, from bits 3:0 of the opcode, put in the place the
-    # extension-word register sources read it from -- D/A in bit 15 and the
-    # number in 14:12, which is also where CALLM's module entry word has it.
-    'RTM_XW',
     'SSW',       # assembled from the pipe's half and the bus unit's
     'DFA',       # the data fault address: frame +$10
     'DOB',       # the data output buffer: frame +$18
     'DIB',       # the data input buffer: long frame +$2C
     # Stage C as a frame FIELD and not as an extension word. The distinction is
     # load-bearing: reading stage C to use it is what takes a prefetch fault --
-    # UM 6.2.1's "the processor attempted to use stage C" -- and reading it to
+    # UM 8.2.1's "the processor attempted to use stage C" -- and reading it to
     # write it into a frame is the opposite of that. Sharing one encoding made
     # the frame builder fault on the very word it was saving, which is a double
     # bus fault and a halted processor.
@@ -367,15 +346,15 @@ ASRC = enc(
     'CPLEN',     # the primitive's length field, bits 7:0
     'CPRIM',     # ... and the whole primitive, for the long fault frame's +$4A
     'CPVEC',     # ... read as a vector number, times four: the take-exception
-                 # primitives -- UM 7.4.18 to 7.4.20
+                 # primitives -- UM 10.4.18 to 10.4.20
     'CPREG',     # the general register a transfer-single-register primitive
-                 # names: D/A in bit 3 and the number in 2:0 -- UM figure 7-33
+                 # names: D/A in bit 3 and the number in 2:0 -- UM figure 10-33
     'CPINT',     # the midinstruction frame's internal word at +$0C
     'FWLONG',    # a format word from T0 with its reserved word, as the long word
-                 # stored at the head of a coprocessor state frame -- UM 7-14
+                 # stored at the head of a coprocessor state frame -- UM 10-14
     'FWLEN',     # ... and its length field alone
     'PC_C_RAW',  # the scanPC as a frame field: the address of stage C, read
-                 # without using the word there -- UM 7.4.1
+                 # without using the word there -- UM 10.4.1
     'UBOUND',    # the micro-address of rte_boundary, an instruction boundary:
                  # where RTE resumes out of a short bus fault frame, which
                  # carries no micro-address of its own -- doc/checkpoint.md
@@ -428,8 +407,8 @@ BSRC = enc(
     'DIVQ',      # the quotient, for assembling the word divide's result
     'IRQLEVEL',  # the level of the interrupt being taken, for the mask
     'THREE',     # the tail of an operand three bytes long
-    'PCBIT',     # $4000: the PC bit of a coprocessor primitive -- UM figure 7-22
-    # UM 7.4.9: an (An)+ or -(An) operand steps the register by its length,
+    'PCBIT',     # $4000: the PC bit of a coprocessor primitive -- UM figure 10-22
+    # UM 10.4.9: an (An)+ or -(An) operand steps the register by its length,
     # and by two for a single byte through A7, "to maintain a word-aligned
     # stack".
     'CPSTEP',
@@ -457,17 +436,17 @@ ALU = enc(
     'EXTW',      # bits 7:0 of A, sign extended to 16
     'EXTL',      # bits 15:0 of A, sign extended to 32
     'EXTB',      # bits 7:0 of A, sign extended to 32 -- EXTB.L, new on the 020
-    # UM 6.1 step one: "the processor makes an internal copy of the SR, then
+    # UM 8.1 step one: "the processor makes an internal copy of the SR, then
     # sets the S-bit ... next, the processor inhibits tracing of the exception
     # handler by clearing the T1 and T0 bits". One operation, because the two
     # halves must not be separable: between them the processor would be in
     # supervisor mode with tracing still on.
     'EXCSR',
-    # UM 6.1: "for the reset and interrupt exceptions, the processor also
+    # UM 8.1: "for the reset and interrupt exceptions, the processor also
     # updates the interrupt priority mask". The level replaces I2-I0 and
     # nothing else in the status register moves.
     'SETMASK',
-    # UM 6.1.9: "if the M-bit in the SR is set, the processor clears the M-bit
+    # UM 8.1.9: "if the M-bit in the SR is set, the processor clears the M-bit
     # and creates a throwaway exception stack frame on top of the interrupt
     # stack". Clearing it is what moves the active stack from MSP to ISP.
     'CLRM',
@@ -491,11 +470,6 @@ ALU = enc(
     # into. The shift that gets UNPK's second byte back out is SHR8, which MOVEP
     # already had.
     'BYTEPAIR',
-    # B's low byte put in bits 23:16 of A: the caller's access level, read from
-    # the access-control hardware, replacing the called module's in the word
-    # that becomes the frame's first -- UM figure 9-12, "saved access level".
-    'SETB2',
-    'ZXB',       # A's low byte, zero extended: CALLM's argument count
     'SHIFT',     # whatever rd68031_shifter made of the A source
     'ANDNOT',    # A with the bits of B cleared, which is what BCLR does
     'LSR1',      # A shifted right one place, for walking MOVEM's mask
@@ -559,7 +533,7 @@ DST = enc(
     'CPRIM',     # the response primitive just read, held while it is served
     'CPREG',     # the general register a transfer-single-register primitive
                  # names, written whole
-    # UM 7.4.17: the scanPC, written by the coprocessor. The pipe behind stage
+    # UM 10.4.17: the scanPC, written by the coprocessor. The pipe behind stage
     # D is emptied and refilled from here; stage D and the program counter --
     # the coprocessor instruction's own -- stay where they are.
     'SCANPC',
@@ -572,7 +546,7 @@ DST = enc(
     # rule 1.
     'SSWA',
     # The address register the effective-address field names, written as a
-    # VALUE: sign extended from the operand size -- UM 7.4.9.
+    # VALUE: sign extended from the operand size -- UM 10.4.9.
     'AREG_R',
 )
 
@@ -611,7 +585,7 @@ SZSEL = enc(
                  # encodes its size that way -- PRM 8 gives it opmode 110 and
                  # 100, the second being the MC68020's addition.
     # The primitive's length field: one byte, two, or four -- the only lengths
-    # UM 7.4.9 allows for a register operand.
+    # UM 10.4.9 allows for a register operand.
     'CPLEN',
 )
 
@@ -672,22 +646,18 @@ PF = enc(
 # stalls on a bus cycle.
 MDOP = enc('NONE', 'MUL', 'DIV')
 
-# The CPU address spaces of UM figure 5-31. The breakpoint and the module call
-# arrive with M10, the coprocessor with M13.
+# The CPU address spaces of UM figure 7-42, which "on the MC68030" implements
+# three: the breakpoint acknowledge, the coprocessor and the interrupt
+# acknowledge. The MC68020's access-level space, type 1, went with CALLM.
 CPUSPACE = enc('NONE', 'IACK', 'BKPT', 'COPROC',
-               # UM 9.8: the access-level control hardware CALLM and RTM talk to
-               # for a type $01 module. The register offset comes out of the
-               # microword's `vec` field, which is otherwise the exception
-               # vector and is free on every microword that makes one of these.
-               'ACCESS',
-               # UM 7.5.2.8: the CIR access that STARTS a coprocessor
+               # UM 10.5.2.8: the CIR access that STARTS a coprocessor
                # instruction. A bus error on it means there is no coprocessor,
                # and the microcode takes an F-line exception off the end code;
                # on every other CIR access -- COPROC -- it is a bus error. The
                # CIR offset is in `vec` too, and the CpID comes from stage D.
                'CPINIT')
 
-# Which exception stack frame a microword is building. UM table 6-5 names the
+# Which exception stack frame a microword is building. UM table 8-6 names the
 # exceptions that take each; the code below is the value that goes in bits 15:12
 # of the format word at +$06.
 FRAME = enc('F0', 'F1', 'F2', 'F9', 'FA', 'FB')
@@ -757,21 +727,21 @@ FIELDS = OrderedDict([
     # of MULU, MULS, DIVU and DIVS carry both in the opcode; the long forms
     # carry them in the extension word -- PRM 8.
     ('mdext', (1,  None,  0)),
-    # The vector NUMBER an internally generated exception uses. UM 6.1: "for
+    # The vector NUMBER an internally generated exception uses. UM 8.1: "for
     # all other exceptions, internal logic provides the vector number". The
     # ASRC that reads it gives the OFFSET -- the number times four -- because
     # that is what both the format word and the vector address want.
     ('vec',   (8,  None,  0)),
     ('frame', (3,  FRAME, 'F0')),
-    # UM 6.1.7: "when tracing is enabled and the processor attempts to execute
+    # UM 8.1.7: "when tracing is enabled and the processor attempts to execute
     # an illegal or unimplemented instruction, that instruction does not cause
     # a trace exception since it is not executed". The four entry points for
     # instructions that were never executed set this, and nothing else does.
     ('notrace', (1, None,  0)),
-    # Which CPU address space a request goes to -- UM figure 5-31. Only the
+    # Which CPU address space a request goes to -- UM figure 7-42. Only the
     # interrupt acknowledge is used before M10.
     ('cpuspace', (3, CPUSPACE, 'NONE')),
-    # Hold RMC across the accesses of an indivisible read-modify-write. UM 5.5.2:
+    # Hold RMC across the accesses of an indivisible read-modify-write. UM 7.5.2:
     # on this part RMC is a qualifier across a run of ordinary bus cycles, each
     # retried separately, and not one long cycle.
     ('rmc',   (1,  None,  0)),
@@ -783,7 +753,7 @@ FIELDS = OrderedDict([
     # PRM 6 RESET: "asserts the RSTO signal for 512 clock periods". The bus unit
     # owns the pin and the counter; this bit asks for it and stalls until done.
     ('rsto',  (1,  None,  0)),
-    # UM 6.2.3: "the faulted data cycle is rerun by the RTE instruction". The
+    # UM 8.2.3: "the faulted data cycle is rerun by the RTE instruction". The
     # bus unit is handed the residual out of the frame and finishes the operand;
     # this bit is what hands it over, and the microword stalls on the
     # acknowledge like any other.
@@ -800,7 +770,7 @@ FIELDS = OrderedDict([
     # data itself: that is latched on the same edge. Set by assemble.py, never
     # by hand -- mark_early.
     ('early', (1,  None,  0)),
-    # A posted write -- UM 8.1.3, "the bus cycle is queued and the bus
+    # A posted write -- UM 11.2.5, "the bus cycle is queued and the bus
     # controller runs the cycle when the current cycle is complete". The
     # microword retires when the bus unit takes the operand, and the sequencer
     # goes on while the cycle runs. A fault on it is taken at whatever

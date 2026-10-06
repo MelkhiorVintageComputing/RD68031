@@ -11,7 +11,7 @@
 // thing that would break if the pipe and the bus contract disagreed.
 //
 // The exception vectors are always in the 32-bit port at $0, because that is
-// where UM 6.1.1 puts them: "the reset exception ... fetches the initial
+// where UM 8.1.1 puts them: "the reset exception ... fetches the initial
 // interrupt stack pointer from the first long word of the vector table and the
 // initial program counter from the second". So every run also crosses two port
 // widths, which is worth having by accident.
@@ -66,7 +66,7 @@ module core_fetch_tb;
       i0 = instructions;
 
       // -----------------------------------------------------------------
-      // Reset: UM 6.1.1. The stack pointer comes from $0 and the program
+      // Reset: UM 8.1.1. The stack pointer comes from $0 and the program
       // counter from $4, and execution starts there.
       // -----------------------------------------------------------------
       run_until(base + 32'h0414, 400, reached);

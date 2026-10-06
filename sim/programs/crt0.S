@@ -21,7 +21,7 @@
         .text
         .globl  _start
 _start:
-        | The condition codes after a reset are not defined by anything. UM 6.1.1
+        | The condition codes after a reset are not defined by anything. UM 8.1.1
         | sets the supervisor bit, clears the trace bits and puts the interrupt
         | mask at 7, and says nothing at all about the CCR -- so a program on a
         | bare machine may not depend on it, and this one establishes it before
@@ -31,7 +31,7 @@ _start:
 
         move.l  #STACK_TOP, %sp
 
-        | Turn the instruction cache on (UM 4.3.1, CACR's E bit). Every program
+        | Turn the instruction cache on (UM 6.3.1.11, CACR's EI bit). Every program
         | runs cached, which is what a real system does; `make cache` runs the
         | same programs on a core built with no cache at all and holds the two
         | to the same data cycles.

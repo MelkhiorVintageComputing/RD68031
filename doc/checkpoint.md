@@ -45,6 +45,7 @@ Less than its size suggests. Word for word:
 | caches | instruction cache | instruction and data caches, burst fills | not checkpointed -- below |
 | the instruction pipe | stages B, C, D and the cache holding register | the same (UM 11.2.2) | unchanged |
 | version number | | | `$3`, not RD68021's `$1` |
+| CALLM and RTM | module calls, UM20 9.7-9.8 | not implemented: illegal instructions (8.1.5) | removed at M5 -- below |
 
 Four things in the inherited design did not meet the manual, and M4 fixed them
 (`doc/bugs-found.md`):
@@ -62,6 +63,14 @@ Four things in the inherited design did not meet the manual, and M4 fixed them
   `+$08`, `+$14`, `+$16` -- as if this design had written them. It never writes a
   short frame, so the micro-address it resumed at was whatever the frame's
   `+$14` happened to hold.
+
+**CALLM and RTM, removed at M5, freed nothing.** The MC68020's module calls
+kept everything they carried between microwords in T0-T3 and the extension-word
+latch, which every instruction shares, and their own state -- the descriptor,
+the access level -- lived in memory and in the access-level hardware. No
+`INTERNAL` row and no `CHECKPOINT` row was theirs, so the budget below is the
+one M4 froze: 353 bits of 492, 64 reserved, four words spare. What the M4
+freeze already said of the special status word -- no CALLM state -- holds.
 
 ---
 

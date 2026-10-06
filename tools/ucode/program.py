@@ -16,9 +16,10 @@ Fall-through is the default: a microword with no `next` runs the one after it, s
 an unset field cannot silently mean micro-address zero. `seq` is what breaks the
 fall-through, and `u()` refuses a field name it does not know.
 
-As of M5 this is the walking skeleton -- reset, NOP, MOVEQ, MOVE.L Dn,Dn and both
-shapes of BRA. It exists to prove the engine, the pipe and the bus contract fit
-together; the instruction set arrives in M6 and M7.
+The instruction set is the MC68030's integer set: every instruction the
+MC68020 has but CALLM and RTM, which are illegal here, and the F-line words with
+CpID 0 going to the MMU's entry, which until M11 takes an F-line exception in
+supervisor mode and a privilege violation in user mode.
 """
 
 import sys
@@ -47,14 +48,14 @@ def u(comment='', **fields):
                              'list is in isa.py' % (len(WORDS), k))
     # The end of a coprocessor primitive -- doc/coprocessor.md. A primitive's
     # last microword asks the one question cp_next used to ask in two: come
-    # again (CA set, or a trace pending -- UM 7.5.2.5)? Yes goes straight back
+    # again (CA set, or a trace pending -- UM 10.5.2.5)? Yes goes straight back
     # to the response CIR; no falls into a release of its own, so the dialogue
     # ends a clock after the primitive's last access rather than three.
     if fields.get('next') == 'cp_next' and fields.get('seq', 'NEXT') == 'NEXT':
         fields = dict(fields, seq='COND', cond='CPAGAIN', next='cp_resp')
         WORDS.append((fields, comment))
         WORDS.append(({'pf': 'ADV', 'seq': 'DECODE'},
-                      'released: the scanPC is the next instruction -- UM 7.4.1'))
+                      'released: the scanPC is the next instruction -- UM 10.4.1'))
         return
     WORDS.append((dict(fields), comment))
 
@@ -90,10 +91,10 @@ def cpprim(pattern, target, what, ea='-----'):
     """A response primitive pattern, for the seq = CPDEC arm.
 
     Seventeen characters: the category bit (1 for a conditional instruction),
-    then bits 15 down to 0 of the primitive -- UM figure 7-22. And five more
+    then bits 15 down to 0 of the primitive -- UM figure 10-22. And five more
     about the instruction's effective address, `ea`: in the class the
-    primitive names (UM table 7-4), suitable for a transfer of multiple
-    coprocessor registers (UM 7.4.16), and three for which kind it is -- 000
+    primitive names (UM table 10-4), suitable for a transfer of multiple
+    coprocessor registers (UM 10.4.16), and three for which kind it is -- 000
     Dn, 001 An, 010 #imm, 011 (An)+, 100 -(An), 101 the other memory modes.
     """
     pattern = pattern + ea
@@ -115,16 +116,16 @@ def eamode(pattern, target, what):
 
 
 # ==========================================================================
-# Reset -- UM 6.1.1
+# Reset -- UM 8.1.1
 #
 # "The reset exception ... fetches the initial interrupt stack pointer from the
 # first long word of the vector table and the initial program counter from the
 # second." The vector base register is zero at reset, so both come from absolute
 # addresses, and the supervisor bit is already set: rd68031_seq resets SR to
-# $2700, which UM 2.1.1 calls the interrupt mode of the supervisor level.
+# $2700, which UM 4.1.1 calls the interrupt mode of the supervisor level.
 # ==========================================================================
 label('reset')
-# UM 2.1.2: "All exception vectors are located in supervisor data space, except
+# UM 4.3: "All exception vectors are located in supervisor data space, except
 # the reset vector, which is located in supervisor program space."
 u('the initial interrupt stack pointer, from $0',
   bus='READ', fc='PROG', asel='ZERO', bytes=4)
@@ -142,7 +143,7 @@ u('... then wait for the pipe and decode',
 # which a testbench can see and no test relies on.
 # ==========================================================================
 label('illegal')
-u('no pattern for this opcode -- UM 6.1.5, vector 4',
+u('no pattern for this opcode -- UM 8.1.5, vector 4',
   next='exc_illegal')
 
 # ==========================================================================
@@ -151,7 +152,7 @@ u('no pattern for this opcode -- UM 6.1.5, vector 4',
 label('nop')
 opcode('0100111001110001', 'nop', 'NOP')
 # PRM 4: "the processor's pipeline is synchronized prior to the NOP instruction
-# being executed", so that a write before it has reached the bus -- UM 8.1.4
+# being executed", so that a write before it has reached the bus -- UM20 8.1.4
 # relies on it to clear an interrupt before lowering the mask.
 u('nothing but the pipe, once the bus has caught up',
   pf='ADV', seq='DECODE', sync=1)
@@ -918,7 +919,7 @@ u('and the stack pointer is the four bytes past it',
   pf='ADV', seq='DECODE')
 
 # ==========================================================================
-# BKPT -- PRM 4 and UM 5.4.2
+# BKPT -- PRM 4 and UM 7.4.2
 #
 # "The breakpoint acknowledge cycle allows the external hardware to provide an
 # instruction word directly into the instruction pipeline as the program
@@ -938,7 +939,7 @@ u('and the stack pointer is the four bytes past it',
 label('bkpt')
 u('the breakpoint acknowledge: CPU space type 0, the number on A4-A2, a word',
   bus='READ', fc='CPU', bytes=2, cpuspace='BKPT')
-u('nobody had an instruction for it: an illegal instruction -- UM 5.4.2',
+u('nobody had an instruction for it: an illegal instruction -- UM 7.4.2',
   seq='COND', cond='BERR', next='exc_illegal')
 u('the word that came back replaces the breakpoint in stage D',
   asrc='RDATA', alu='A', dst='STG_D', size='WORD')
@@ -2007,7 +2008,7 @@ unary('nbcd', lambda src: u('zero minus the operand and the extend bit, in decim
       'BCD')
 
 # TAS. PRM 4: the operand's codes are taken BEFORE bit 7 is set, and the whole
-# thing is one indivisible read-modify-write -- UM 5.5.2, which is what rmc is
+# thing is one indivisible read-modify-write -- UM 7.5.2, which is what rmc is
 # for. It is the only instruction in the MC68010 set that holds RMC.
 label('tas_dn')
 u('the register, tested and then bit 7 set',
@@ -2135,7 +2136,7 @@ u('... and then N is CLEARED, because that is what the rule says and not what '
   'subtraction overflow and the two part company',
   ccr='CLRNZVC')
 label('chk_trap')
-u('a CHK exception -- UM table 6-1, vector 6, and a six-word frame',
+u('a CHK exception -- UM table 8-1, vector 6, and a six-word frame',
   next='exc_chk')
 
 for _opm, _n in (('110', 'W'), ('100', 'L')):
@@ -2468,7 +2469,7 @@ bitfield('bfins',  '1111', ins=('DREG_XQ', 'A'), ccr='BFINS')
 # "Both operations access memory using locked or read-modify-write transfer
 # sequences, providing a means of synchronizing several processors." RMC is
 # held across every cycle of the sequence and across the microwords between
-# them -- UM 5.5.2 makes it a qualifier over a run of ordinary cycles, and the
+# them -- UM 7.5.2 makes it a qualifier over a run of ordinary cycles, and the
 # bus unit drops it the moment a microword stops asking for it.
 #
 # CAS2 is the reason the sequencer has four temporaries and the reason the
@@ -2485,7 +2486,7 @@ u('the address',
   call=1, seq='EAMODE', szsel='CAS')
 u('... and now the extension word can come back',
   asrc='T0', alu='A', dst='XW', size='WORD')
-u('read the destination, and hold the bus from here -- UM 5.5.2',
+u('read the destination, and hold the bus from here -- UM 7.5.2',
   bus='READ', fc='DATA', asel='EA', szsel='CAS', rmc=1)
 u('... held',
   asrc='RDATA', alu='A', dst='T1', szsel='CAS', rmc=1)
@@ -2585,349 +2586,26 @@ opcode('0000111011------', 'cas',  'CAS.L')
 
 
 # ==========================================================================
-# CALLM and RTM -- PRM 4 and UM 9.7-9.8, the MC68020's module calls
+# CALLM and RTM -- not on the MC68030
 #
-# Motorola dropped them from the MC68030 and nothing emulates them, so these are
-# written from UM section 9 and nothing else, and checked by directed tests
-# only -- doc/divergences.md says exactly what that does and does not cover.
+# PRM 4 heads both "(MC68020)", and instructions-by-cpu.csv has neither in its
+# MC68030 column. UM 8.1.5: "an illegal instruction is an instruction that
+# contains any bit pattern in its first word that does not correspond to the
+# bit pattern of the first word of a valid MC68030 instruction", vector 4. The
+# two encodings -- PRM 8, $06C0-$06CF for RTM and the rest of $06C0-$06FF for
+# CALLM -- are ADDI's with the size field 11, which ADDI does not have either,
+# so nothing else on this part claims them. They are written out rather than
+# left to the decoder's default so that the decision is visible here and a
+# later pattern cannot take them by accident: assemble.py refuses a pattern
+# that is shadowed.
 #
-# A module descriptor (UM figure 9-10):
-#
-#   +$00  opt[31:29]  type[28:24]  access level[23:16]  reserved[15:0]
-#   +$04  module entry word pointer
-#   +$08  module data area pointer
-#
-# and the module stack frame CALLM builds and RTM takes apart (figure 9-12),
-# six long words from the stack pointer up:
-#
-#   +$00  opt[15:13]  type[12:8]  saved access level[7:0]
-#   +$02  the condition codes of the calling module
-#   +$04  the argument count
-#   +$06  reserved
-#   +$08  module descriptor pointer
-#   +$0C  saved program counter -- the instruction after the CALLM
-#   +$10  saved module data area pointer -- the old value of the register the
-#         entry word names
-#   +$14  saved stack pointer
-#
-# "The first word at the entry address specifies the register to be saved in
-# the module stack frame and then loaded with the module descriptor data area
-# pointer; the first instruction of the module starts with the next word." That
-# word has the register in exactly the layout an extension word does -- D/A in
-# bit 15, the number in 14:12 -- so it goes into `xw` and XREG does the rest.
-#
-# Both instructions check the options and the type BEFORE they change anything:
-# UM 9.8.1, on a refusal, "no visible processor registers are changed".
+# The MC68020 design this one was forked from implemented both, from UM20
+# section 9; that microcode, its seven sequencer conditions and two ALU
+# operations, and the access-level CPU space (type 1, which UM figure 7-42
+# does not implement) went with them at M5.
 # ==========================================================================
-label('callm')
-u('the argument count, which is the word after the opcode, in T1 because the '
-  'effective address may use T2 and T3',
-  asrc='STG_C', alu='A', dst='T1', size='WORD', pf='CONSUME')
-u('the address of the module descriptor',
-  call=1, seq='EAMODE', size='LONG')
-u('its first long word: the options, the type and the access level',
-  bus='READ', fc='DATA', asel='EA', bytes=4)
-u('... held, with the argument count put in the low half the manual reserves, '
-  'which is where the frame wants it',
-  asrc='RDATA', bsrc='T1', alu='ORLOW16', dst='T0', size='LONG')
-u('anything but options 000 and 100 and types $00 and $01 is a format error, '
-  'taken before anything has changed -- UM 9.7.1',
-  seq='COND', cond='MODBAD', next='exc_format')
-u('type $01 changes the access level -- UM 9.8.1',
-  seq='COND', cond='MODTYPE1', next='callm_type1')
-label('callm_ptrs')
-u('the module entry word pointer is at +$04',
-  asrc='EA', bsrc='FOUR', alu='ADD', dst='T1', size='LONG')
-u('read it',
-  bus='READ', fc='DATA', asel='T1', bytes=4)
-u('... held: it is where the module starts',
-  asrc='RDATA', alu='A', dst='T1', size='LONG')
-u('the module data area pointer is at +$08',
-  asrc='EA', bsrc='EIGHT', alu='ADD', dst='T2', size='LONG')
-u('read it',
-  bus='READ', fc='DATA', asel='T2', bytes=4)
-u('... held',
-  asrc='RDATA', alu='A', dst='T2', size='LONG')
-u('the module entry word, which names the register the data area pointer goes '
-  'into. It is the first word of the module code, so it is read as program',
-  bus='READ', fc='PROG', asel='T1', bytes=2)
-u('... into xw, where XREG reads a register name from',
-  asrc='RDATA', alu='A', dst='XW', size='WORD')
-
-label('callm_frame')
-# The frame is built top down from the stack pointer, with T3 walking. The
-# order is the frame's own, highest first, and it ends with T3 on the base.
-u('the frame is built down from the stack pointer',
-  asrc='SP', alu='A', dst='T3', size='LONG')
-# A type $01 call that moves the stack comes in here with T3 already at the top
-# of the new one, below the arguments it copied.
-label('callm_frame_at')
-u('+$14: the saved stack pointer -- the OLD one, since the register has not '
-  'been written yet',
-  asrc='T3', bsrc='FOUR', alu='SUB', dst='T3', size='LONG')
-u('... written',
-  bus='WRITE', fc='DATA', asel='T3', asrc='SP', alu='A', bytes=4)
-u('+$10: the old value of the register the entry word names',
-  asrc='T3', bsrc='FOUR', alu='SUB', dst='T3', size='LONG')
-u('... written',
-  bus='WRITE', fc='DATA', asel='T3', asrc='XREG', alu='A', bytes=4)
-u('+$0C: the instruction after the CALLM, which is where RTM goes back to',
-  asrc='T3', bsrc='FOUR', alu='SUB', dst='T3', size='LONG')
-u('... written',
-  bus='WRITE', fc='DATA', asel='T3', asrc='PC_C', alu='A', bytes=4)
-u('+$08: the module descriptor pointer',
-  asrc='T3', bsrc='FOUR', alu='SUB', dst='T3', size='LONG')
-u('... written',
-  bus='WRITE', fc='DATA', asel='T3', asrc='EA', alu='A', bytes=4)
-u('+$06: reserved',
-  asrc='T3', bsrc='TWO', alu='SUB', dst='T3', size='LONG')
-u('... written as zero',
-  bus='WRITE', fc='DATA', asel='T3', asrc='ZERO', alu='A', bytes=2)
-u('+$04: the argument count',
-  asrc='T3', bsrc='TWO', alu='SUB', dst='T3', size='LONG')
-u('... written: it is the low half of T0',
-  bus='WRITE', fc='DATA', asel='T3', asrc='T0', alu='A', bytes=2)
-u('+$02: the condition codes of the calling module',
-  asrc='T3', bsrc='TWO', alu='SUB', dst='T3', size='LONG')
-u('... written',
-  bus='WRITE', fc='DATA', asel='T3', asrc='CCRW', alu='A', bytes=2)
-u('+$00: the options, the type and the access level',
-  asrc='T3', bsrc='TWO', alu='SUB', dst='T3', size='LONG')
-u('... written: they are the high half of T0',
-  bus='WRITE', fc='DATA', asel='T3', asrc='T0', alu='SWAP', bytes=2)
-# UM 9.7.1: "if the called module does not wish the module data area pointer to
-# be loaded into a register, the module entry word can select register A7, and
-# the loaded value will be overwritten with the correct stack pointer value
-# after the module stack frame is created" -- so the register first and the
-# stack pointer second.
-u('the register the entry word names gets the module data area pointer',
-  asrc='T2', alu='A', dst='XREG', size='LONG')
-u('and the stack pointer is the frame, overwriting that if the register was A7',
-  asrc='T3', alu='A', dst='SP', size='LONG')
-u('the module starts at the word after its entry word',
-  asrc='T1', bsrc='TWO', alu='ADD', pf='FLUSH')
-u('... then wait for the pipe and decode',
-  seq='DECODE')
-
-label('rtm')
-u('the register to restore, from the opcode, put where XREG reads a name from',
-  asrc='RTM_XW', alu='A', dst='XW', size='WORD')
-u('the frame is at the top of the stack',
-  asrc='SP', alu='A', dst='T3', size='LONG')
-u('+$00: the options, the type and the access level',
-  bus='READ', fc='DATA', asel='T3', bytes=2)
-u('... moved up to where a descriptor has them, so that the same conditions '
-  'judge both',
-  asrc='RDATA', alu='SHL16', dst='T0', size='LONG')
-u('a frame RTM does not recognise is a format error, before anything changes '
-  '-- UM 9.7.2',
-  seq='COND', cond='MODBAD', next='exc_format')
-u('type $01 changes the access level back -- UM 9.8.2',
-  seq='COND', cond='MODTYPE1', next='rtm_type1')
-
-label('rtm_restore')
-u('+$04: the argument count',
-  asrc='T3', bsrc='FOUR', alu='ADD', dst='T1', size='LONG')
-u('read it',
-  bus='READ', fc='DATA', asel='T1', bytes=2)
-u('... which, with the frame, is how far the stack goes back',
-  asrc='RDATA', bsrc='T3', alu='ADD', dst='T1', size='LONG')
-u('... twelve bytes of it',
-  asrc='T1', bsrc='TWELVE', alu='ADD', dst='T1', size='LONG')
-u('... and twelve more: the frame is six long words',
-  asrc='T1', bsrc='TWELVE', alu='ADD', dst='T1', size='LONG')
-label('rtm_restore_rest')
-u('+$0C: the saved program counter',
-  asrc='T3', bsrc='TWELVE', alu='ADD', dst='T2', size='LONG')
-u('read it',
-  bus='READ', fc='DATA', asel='T2', bytes=4)
-u('... held',
-  asrc='RDATA', alu='A', dst='T2', size='LONG')
-u('+$02: the condition codes',
-  asrc='T3', bsrc='TWO', alu='ADD', dst='T0', size='LONG')
-u('read them',
-  bus='READ', fc='DATA', asel='T0', bytes=2)
-u('... held',
-  asrc='RDATA', alu='A', dst='T0', size='WORD')
-u('+$10: the saved module data area pointer',
-  asrc='T3', bsrc='EIGHT', alu='ADD', dst='T3', size='LONG')
-u('... eight more',
-  asrc='T3', bsrc='EIGHT', alu='ADD', dst='T3', size='LONG')
-u('read it',
-  bus='READ', fc='DATA', asel='T3', bytes=4)
-# "Condition Codes: set according to the content of the word on the stack."
-u('it goes back into the register the opcode names',
-  asrc='RDATA', alu='A', dst='XREG', size='LONG')
-u('the condition codes come back',
-  asrc='T0', alu='A', dst='CCR', size='WORD')
-# PRM 4: "If the register specified is A7 (SP), the updated value of the
-# register reflects the stack pointer operations, and the saved module data
-# area pointer is lost" -- so the stack pointer is written after it.
-u('the stack goes back past the frame and the arguments',
-  asrc='T1', alu='A', dst='SP', size='LONG')
-u('and the calling module carries on after its CALLM',
-  asrc='T2', alu='A', pf='FLUSH')
-u('... then wait for the pipe and decode',
-  seq='DECODE')
-
-# --------------------------------------------------------------------------
-# Type $01: a change of access level -- UM 9.8
-#
-# The processor does not interpret access levels; it carries them between the
-# descriptor, the frame, and external hardware at the registers of UM figure
-# 9-13, in CPU space type 1, and does what the access status register tells it.
-# "If the processor receives a bus error on any of these CPU space accesses
-# during the execution of a CALLM or RTM instruction, the processor will take a
-# format error exception" -- so every one of them is followed by that test.
-# --------------------------------------------------------------------------
-label('callm_type1')
-# UM 9.8.1, in the manual's own order: "the processor must first obtain the
-# current access level from external hardware. It also verifies that the
-# calling module has the right to read from the area pointed to by the current
-# value of the stack pointer by reading from that address. It passes the
-# descriptor address and increase access level to external hardware for
-# validation and then reads the access status."
-u('the current access level: CAL, CPU space type 1 at $00',
-  bus='READ', fc='CPU', bytes=1, cpuspace='ACCESS', vec=0x00)
-u('a bus error on any of these is a format error -- UM 9.8',
-  seq='COND', cond='BERR', next='exc_format')
-u('... held: it goes in the frame',
-  asrc='RDATA', alu='A', dst='T1', size='LONG')
-u('the caller has to be able to read its own stack: read it',
-  bus='READ', fc='DATA', asel='SP', bytes=2)
-u('the descriptor address, to the register for the space it was read from',
-  seq='COND', cond='USER', next='callm_t1_user')
-u('... supervisor data, function code 5, is $54',
-  bus='WRITE', fc='CPU', bytes=4, cpuspace='ACCESS', vec=0x54,
-  asrc='EA', alu='A', next='callm_t1_ial')
-label('callm_t1_user')
-u('... user data, function code 1, is $44',
-  bus='WRITE', fc='CPU', bytes=4, cpuspace='ACCESS', vec=0x44,
-  asrc='EA', alu='A')
-label('callm_t1_ial')
-u('... and refused with a bus error, a format error',
-  seq='COND', cond='BERR', next='exc_format')
-u('the access level the descriptor asks for, to IAL at $08. It is bits 23:16 '
-  'of T0, which SWAP brings down to the byte that goes out',
-  bus='WRITE', fc='CPU', bytes=1, cpuspace='ACCESS', vec=0x08,
-  asrc='T0', alu='SWAP')
-u('... refused with a bus error',
-  seq='COND', cond='BERR', next='exc_format')
-u('the verdict: the access status register at $04',
-  bus='READ', fc='CPU', bytes=1, cpuspace='ACCESS', vec=0x04)
-u('... refused with a bus error',
-  seq='COND', cond='BERR', next='exc_format')
-u('... held',
-  asrc='RDATA', alu='A', dst='T2', size='LONG')
-u('zero is a refusal and above seven is undefined: a format error, and '
-  'nothing visible has changed -- UM 9.8.1',
-  seq='COND', cond='ASTAT_BAD', next='exc_format')
-u('the frame keeps the CALLER\'s access level, in place of the one asked for',
-  asrc='T0', bsrc='T1', alu='SETB2', dst='T0', size='LONG')
-u('a new stack as well? -- UM table 9-6, four to seven',
-  seq='COND', cond='ASTAT_STACK', next='callm_t1_stack')
-u('no: from here it is a type $00 call',
-  next='callm_ptrs')
-
-label('callm_t1_stack')
-# "If the access status register indicates that a change in the stack pointer
-# is required, the stack pointer is saved internally, a new value is loaded from
-# the module descriptor, and arguments are copied from the calling stack to the
-# new stack." Saved internally means: not written yet. The register keeps the
-# old value until the frame has been built, which is what puts it at +$14.
-u('the new stack pointer, from the descriptor at +$0C',
-  asrc='EA', bsrc='TWELVE', alu='ADD', dst='T1', size='LONG')
-u('read it',
-  bus='READ', fc='DATA', asel='T1', bytes=4)
-u('... held',
-  asrc='RDATA', alu='A', dst='T1', size='LONG')
-u('option 100 reaches the arguments through the saved stack pointer and '
-  'copies nothing -- UM 9.7.1',
-  seq='COND', cond='MODOPT4', next='callm_t1_placed')
-u('option 000 copies them: this many bytes',
-  asrc='T0', alu='ZXB', dst='T3', size='LONG')
-u('... from the top end of them on the old stack',
-  asrc='SP', bsrc='T3', alu='ADD', dst='T2', size='LONG')
-label('callm_t1_copy')
-u('all copied?',
-  seq='COND', cond='T3ZERO', next='callm_t1_placed')
-u('back one on the old stack',
-  asrc='T2', bsrc='ONE', alu='SUB', dst='T2', size='LONG')
-u('back one on the new',
-  asrc='T1', bsrc='ONE', alu='SUB', dst='T1', size='LONG')
-u('a byte from the old',
-  bus='READ', fc='DATA', asel='T2', bytes=1)
-u('... to the new',
-  bus='WRITE', fc='DATA', asel='T1', asrc='RDATA', alu='A', bytes=1)
-u('one fewer to go',
-  asrc='T3', bsrc='ONE', alu='SUB', dst='T3', size='LONG',
-  next='callm_t1_copy')
-
-label('callm_t1_placed')
-u('the frame goes on the new stack, below whatever arguments came with it',
-  asrc='T1', alu='A', dst='T3', size='LONG')
-u('the module entry word pointer is at +$04',
-  asrc='EA', bsrc='FOUR', alu='ADD', dst='T1', size='LONG')
-u('read it',
-  bus='READ', fc='DATA', asel='T1', bytes=4)
-u('... held',
-  asrc='RDATA', alu='A', dst='T1', size='LONG')
-u('the module data area pointer is at +$08',
-  asrc='EA', bsrc='EIGHT', alu='ADD', dst='T2', size='LONG')
-u('read it',
-  bus='READ', fc='DATA', asel='T2', bytes=4)
-u('... held',
-  asrc='RDATA', alu='A', dst='T2', size='LONG')
-u('the module entry word',
-  bus='READ', fc='PROG', asel='T1', bytes=2)
-u('... into xw',
-  asrc='RDATA', alu='A', dst='XW', size='WORD', next='callm_frame_at')
-
-label('rtm_type1')
-# UM 9.8.2: "the processor reads the access level, condition codes, PC, saved
-# module data area pointer, and saved stack pointer from the module stack frame.
-# The access level is written to the DAL for validation by external hardware;
-# the processor then reads the access status to check the validation. If ... the
-# access status is zero, ... the processor takes a format error exception. No
-# visible processor registers are changed."
-u('the saved access level, to DAL at $0C. The frame\'s word was moved up by '
-  'sixteen, so it is bits 23:16 of T0 and SWAP brings it down',
-  bus='WRITE', fc='CPU', bytes=1, cpuspace='ACCESS', vec=0x0C,
-  asrc='T0', alu='SWAP')
-u('a bus error is a format error',
-  seq='COND', cond='BERR', next='exc_format')
-u('the access status at $04',
-  bus='READ', fc='CPU', bytes=1, cpuspace='ACCESS', vec=0x04)
-u('... refused with a bus error',
-  seq='COND', cond='BERR', next='exc_format')
-u('... held',
-  asrc='RDATA', alu='A', dst='T2', size='LONG')
-u('refused: a format error, and nothing has changed',
-  seq='COND', cond='ASTAT_BAD', next='exc_format')
-# The stack comes back from the frame's +$14 and not from the frame base: a
-# type $01 call may have moved it, and "the argument count is added to the new
-# stack pointer value".
-u('+$04: the argument count',
-  asrc='T3', bsrc='FOUR', alu='ADD', dst='T1', size='LONG')
-u('read it',
-  bus='READ', fc='DATA', asel='T1', bytes=2)
-u('... held',
-  asrc='RDATA', alu='A', dst='T1', size='LONG')
-u('+$14: the saved stack pointer',
-  asrc='T3', bsrc='TWELVE', alu='ADD', dst='T2', size='LONG')
-u('... eight more',
-  asrc='T2', bsrc='EIGHT', alu='ADD', dst='T2', size='LONG')
-u('read it',
-  bus='READ', fc='DATA', asel='T2', bytes=4)
-u('... plus the arguments is where the stack goes back to',
-  asrc='RDATA', bsrc='T1', alu='ADD', dst='T1', size='LONG',
-  next='rtm_restore_rest')
-
-
-# RTM is CALLM's encoding with a data or address register as the effective
-# address, which CALLM cannot use, so it is claimed first -- PRM 8.
-opcode('000001101100----', 'rtm',   'RTM Rn')
-opcode('0000011011------', 'callm', 'CALLM #n,<ea>')
+opcode('000001101100----', 'exc_illegal', 'RTM Rn -- MC68020 only')
+opcode('0000011011------', 'exc_illegal', 'CALLM #n,<ea> -- MC68020 only')
 
 # ==========================================================================
 # MOVEC -- PRM 6
@@ -2936,16 +2614,21 @@ opcode('0000011011------', 'callm', 'CALLM #n,<ea>')
 # implemented with fewer bits." The direction is bit 0 of the opcode and
 # everything else is in the extension word.
 #
-# MOVEC is privileged, and a control register code the MC68020 does not have is
-# an illegal instruction -- UM 6.1.5, "a MOVEC instruction with an undefined
+# MOVEC is privileged, and a control register code the MC68030 does not have is
+# an illegal instruction -- UM 8.1.5, "a MOVEC instruction with an undefined
 # register specification field in the first extension word". The check reads
 # stage C on the microword that latches it into XW, so it costs no clock.
+#
+# The MC68030's codes are the MC68020's: SFC $000, DFC $001, CACR $002, USP
+# $800, VBR $801, CAAR $802, MSP $803 and ISP $804 (PRM 6, MOVEC). Its MMU
+# registers are not control registers; PMOVE reaches them (UM 9.7, 9.8). What
+# changed is CACR's layout -- UM figure 6-14, rd68031_pkg.
 # ==========================================================================
 label('movec_to_gen')
 u('MOVEC is privileged -- PRM 6, "if supervisor state then ... else TRAP"',
   seq='COND', cond='USER', next='exc_priv')
 u('the extension word names both registers -- and one this part does not '
-  'have is an illegal instruction, UM 6.1.5, tested on stage C as it is taken',
+  'have is an illegal instruction, UM 8.1.5, tested on stage C as it is taken',
   asrc='STG_C', alu='A', dst='XW', size='WORD', pf='CONSUME',
   seq='COND', cond='CREGBADC', next='exc_illegal')
 u('the control register into the general one',
@@ -2955,7 +2638,7 @@ label('movec_to_ctl')
 u('MOVEC is privileged -- PRM 6, "if supervisor state then ... else TRAP"',
   seq='COND', cond='USER', next='exc_priv')
 u('the extension word names both registers -- and one this part does not '
-  'have is an illegal instruction, UM 6.1.5, tested on stage C as it is taken',
+  'have is an illegal instruction, UM 8.1.5, tested on stage C as it is taken',
   asrc='STG_C', alu='A', dst='XW', size='WORD', pf='CONSUME',
   seq='COND', cond='CREGBADC', next='exc_illegal')
 u('the general register into the control one',
@@ -3866,7 +3549,7 @@ def fault_frame(stem, long_frame):
 # takes a short frame apart. doc/divergences.md.
 fault_frame('exc_fault_long', True)
 # ==========================================================================
-# THE COPROCESSOR INTERFACE -- UM section 7, M13
+# THE COPROCESSOR INTERFACE -- UM section 10, M13
 #
 # A coprocessor instruction is a conversation. The processor starts it by
 # writing to one of the coprocessor's interface registers (a CIR) in CPU space
@@ -3876,24 +3559,24 @@ fault_frame('exc_fault_long', True)
 # protocol as built; this is the microcode of it.
 #
 # Four things hold the conversation's state, and they are the four the
-# midinstruction frame of UM figure 7-43 saves, which is what lets an interrupt
+# midinstruction frame of UM figure 10-43 saves, which is what lets an interrupt
 # be taken in the middle of it:
 #
 #   the program counter    pc_d. Stage D is the F-line operation word for the
 #                          whole instruction and nothing advances it.
 #   the scanPC             the address of stage C. Every word the instruction
 #                          reads from the stream is CONSUMEd, which moves it on,
-#                          and UM 7.4.17 writes it by refilling the queue.
+#                          and UM 10.4.17 writes it by refilling the queue.
 #   the effective address  EA, for the write-to-previously-evaluated-EA
 #                          primitive.
 #   the operation word     stage D.
 #
 # Nothing else lives across two primitives. Within one, T0-T3 are scratch, and
 # the primitive itself is in cprim, which the long fault frame carries: a bus
-# error on a CIR access or on an operand is an ordinary bus error (UM 7.5.2.8).
+# error on a CIR access or on an operand is an ordinary bus error (UM 10.5.2.8).
 # ==========================================================================
 
-# The interface registers -- UM figure 7-5.
+# The interface registers -- UM figure 10-5.
 CIR_RESPONSE, CIR_CONTROL, CIR_SAVE, CIR_RESTORE = 0x00, 0x02, 0x04, 0x06
 CIR_OPWORD, CIR_COMMAND, CIR_CONDITION = 0x08, 0x0A, 0x0E
 CIR_OPERAND, CIR_REGSEL, CIR_IADDR, CIR_OADDR = 0x10, 0x14, 0x18, 0x1C
@@ -3911,15 +3594,61 @@ def cir_write(comment, off, nbytes, init=False, **kw):
 
 
 # --------------------------------------------------------------------------
-# The opcode patterns -- UM figures 7-6 to 7-17 and PRM 8.
+# CpID 0: the MMU's, and never the coprocessor interface's
 #
-# Bits 11:9 are the CpID and bits 8:6 the type. A CpID of zero is never a
-# coprocessor (UM 7.1.3), types 110 and 111 never are (UM 7.5.2.2), and an
+# UM 10.1: "F-line operation words, in which the CpID is zero, are not
+# coprocessor instructions for the MC68030. If the CpID (bits 9-11) and the
+# type field (bits 6-8) contain zeros, the instruction accesses the on-chip
+# memory management unit of the MC68030. Instructions with a CpID of zero and a
+# nonzero type field are unimplemented instructions ... The MC68030 never
+# generates coprocessor interface bus cycles with the CpID equal to zero."
+#
+# UM 9.8, and 8.1.5 in nearly the same words: "All F-line instructions with
+# CpID=0 (including MC68851 instructions) that the MC68030 does not support
+# automatically cause F-line unimplemented instruction exceptions when their
+# execution is attempted in the supervisor mode. If execution of a[n]
+# unimplemented F-line instruction with CpID = 0 is attempted in the user mode,
+# the MC68030 takes a privilege violation exception." The four MMU instructions
+# are privileged (UM 8.1.6), so in user mode EVERY CpID-0 word is a privilege
+# violation, and the test needs nothing but the operation word: it is made
+# before any extension word is read.
+#
+# mmu_op is where the MMU instructions start: type 000, and an effective
+# address field that is either zero -- PFLUSHA and PFLUSH FC,MASK name none --
+# or control alterable, the only modes PRM 6 gives PMOVE, PTEST, PLOAD and
+# PFLUSH FC,MASK,<ea> on this part. M11 decodes the command word there. Until
+# it does, the stub takes the F-line exception a supervisor gets for a command
+# word the part does not define (doc/divergences.md). cp0_unimp is every other
+# CpID-0 word, and is final.
+# --------------------------------------------------------------------------
+label('mmu_op')
+u('an MMU instruction is privileged -- UM 8.1.6, PRM 6 "else TRAP"',
+  seq='COND', cond='USER', next='exc_priv')
+u('M11 reads the command word here; until then every one is taken as a '
+  'command word this part does not define -- UM 8.1.5, an F-line exception',
+  next='exc_line_f')
+
+label('cp0_unimp')
+u('a CpID-0 word that is no MMU instruction: in user mode a privilege '
+  'violation -- UM 9.8, 8.1.5',
+  seq='COND', cond='USER', next='exc_priv')
+u('... and in supervisor mode an F-line exception', next='exc_line_f')
+
+# --------------------------------------------------------------------------
+# The opcode patterns -- UM figures 10-6 to 10-17 and PRM 8.
+#
+# Bits 11:9 are the CpID and bits 8:6 the type. A CpID of zero is the MMU's
+# (above), types 110 and 111 are never a coprocessor's (UM 10.5.2.2), and an
 # effective address a form does not allow is an F-line exception with no CIR
 # access -- "an operation word ... that does not map to one of the valid
-# coprocessor instructions". All of those are the catch-all at the end.
+# coprocessor instructions". The last two are the catch-all at the end.
 # --------------------------------------------------------------------------
-opcode('1111000---------', 'exc_line_f', 'F-line, CpID 0')
+opcode('1111000000000000', 'mmu_op',     'PFLUSHA, PFLUSH FC,MASK')
+opcode('1111000000010---', 'mmu_op',     'MMU instruction, (An)')
+opcode('1111000000101---', 'mmu_op',     'MMU instruction, (d16,An)')
+opcode('1111000000110---', 'mmu_op',     'MMU instruction, (d8,An,Xn) and the full forms')
+opcode('111100000011100-', 'mmu_op',     'MMU instruction, (xxx).W and (xxx).L')
+opcode('1111000---------', 'cp0_unimp',  'CpID 0, no MMU instruction')
 opcode('1111---000------', 'cp_gen',     'cpGEN')
 opcode('1111---001001---', 'cp_dbcc',    'cpDBcc')
 opcode('1111---001111010', 'cp_trapcc',  'cpTRAPcc.W')
@@ -3931,10 +3660,10 @@ opcode('1111---001111101', 'exc_line_f', 'cpScc, not data alterable')
 opcode('1111---00111111-', 'exc_line_f', 'cpScc, not data alterable')
 opcode('1111---001------', 'cp_scc',     'cpScc')
 opcode('1111---01-------', 'cp_bcc',     'cpBcc')
-# UM 7.2.3.3.1: cpSAVE takes the control alterable modes and -(An).
+# UM 10.2.3.3.1: cpSAVE takes the control alterable modes and -(An).
 for _m in ('010---', '100---', '101---', '110---', '11100-'):
     opcode('1111---100' + _m, 'cp_save', 'cpSAVE')
-# UM 7.2.3.4.1: "all memory addressing modes except the predecrement". PRM 6's
+# UM 10.2.3.4.1: "all memory addressing modes except the predecrement". PRM 6's
 # text says "only postincrement or control", and its table then lists the
 # immediate as well -- doc/manual-contradictions.md. Two of the three allow it:
 # the state frame is then in the instruction stream.
@@ -3945,18 +3674,18 @@ opcode('1111------------', 'exc_line_f', 'an F-line instruction')
 
 
 # --------------------------------------------------------------------------
-# The dialogue -- UM 7.2.1.2, 7.2.2 and 7.4
+# The dialogue -- UM 10.2.1.2, 10.2.2 and 10.4
 # --------------------------------------------------------------------------
 label('cp_resp')
-cir_read('read the response CIR -- UM 7.3.1 -- and hold the primitive while it '
+cir_read('read the response CIR -- UM 10.3.1 -- and hold the primitive while it '
          'is served', CIR_RESPONSE, 2,
          asrc='RDATA', alu='A', dst='CPRIM', size='WORD')
 label('cp_dispatch')
-u('what the primitive asks for -- the decoder, UM 7.4 and table 7-6. A '
+u('what the primitive asks for -- the decoder, UM 10.4 and table 10-6. A '
   'primitive with PC set goes to cp_passpc first',
   seq='CPDEC')
 
-# UM 7.4.2: the program counter goes to the instruction address CIR "as the
+# UM 10.4.2: the program counter goes to the instruction address CIR "as the
 # first operation in servicing the primitive request" -- before an exception
 # it may lead to, too. Then the bit is cleared, so that the decoder, asked
 # again, serves the rest; cprim is in the fault frame, so a fault on either
@@ -3971,39 +3700,39 @@ u('... and the program counter has been passed',
 # After a primitive that allows come-again. CA set: read the response CIR
 # again. CA clear: a general instruction is released -- the decoder refuses CA
 # clear for these in a conditional one -- unless a trace is pending, in which
-# case UM 7.5.2.5 keeps reading until the coprocessor says it has finished.
+# case UM 10.5.2.5 keeps reading until the coprocessor says it has finished.
 label('cp_next')
 u('come again?', seq='COND', cond='CPCA', next='cp_resp')
-u('a trace pending holds the dialogue open -- UM 7.5.2.5',
+u('a trace pending holds the dialogue open -- UM 10.5.2.5',
   seq='COND', cond='TRACEPEND', next='cp_resp')
 label('cp_done')
-u('the coprocessor has let go: the scanPC is the next instruction -- UM 7.4.1',
+u('the coprocessor has let go: the scanPC is the next instruction -- UM 10.4.1',
   pf='ADV', seq='DECODE')
 
-# The two aborts. UM 7.3.2: the processor writes the abort mask to the control
+# The two aborts. UM 10.3.2: the processor writes the abort mask to the control
 # CIR before an F-line or privilege exception a primitive caused, and before a
 # format error; the exception acknowledge before taking one a primitive asked
 # for. The fourteen other bits "are undefined": they are written as zero.
 label('cp_fline_abort')
-cir_write('abort -- UM 7.3.2', CIR_CONTROL, 2, bsrc='ONE', alu='B',
+cir_write('abort -- UM 10.3.2', CIR_CONTROL, 2, bsrc='ONE', alu='B',
           next='exc_line_f')
 
 label('cp_priv_abort')
-cir_write('abort -- UM 7.4.5', CIR_CONTROL, 2, bsrc='ONE', alu='B',
+cir_write('abort -- UM 10.4.5', CIR_CONTROL, 2, bsrc='ONE', alu='B',
           next='exc_priv')
 
 label('cp_format_abort')
-cir_write('abort -- UM 7.2.3.2.3', CIR_CONTROL, 2, bsrc='ONE', alu='B',
+cir_write('abort -- UM 10.2.3.2.3', CIR_CONTROL, 2, bsrc='ONE', alu='B',
           next='exc_format')
 
-# A protocol violation the processor detects -- UM 7.5.2.1. Not notified to the
+# A protocol violation the processor detects -- UM 10.5.2.1. Not notified to the
 # coprocessor; the midinstruction frame, vector 13, and RTE reads the response
 # CIR again.
 label('cp_protocol')
 u('vector 13', asrc='VECOFF', alu='A', dst='T0', size='LONG', vec=13,
   next='exc_cp9')
 
-# ---- Busy -- UM 7.4.3 ------------------------------------------------------
+# ---- Busy -- UM 10.4.3 ------------------------------------------------------
 # "It services pending interrupts using a preinstruction exception stack frame
 # ... then restarts the general or conditional coprocessor instruction". Going
 # back to the operation word IS that: the decode arm takes a pending interrupt
@@ -4015,12 +3744,12 @@ u('start again from the operation word',
 u('... which is an instruction boundary',
   seq='DECODE')
 
-# ---- Null -- UM 7.4.4 and table 7-3 ------------------------------------------
+# ---- Null -- UM 10.4.4 and table 10-3 ------------------------------------------
 # The null primitive is decoded completely -- CA, IA, PF and the category are
 # all the decoder's inputs -- so only the two questions that are not about the
 # primitive are asked here: a trace pending, an interrupt pending.
 label('cp_null_nf')
-u('not finished: the dialogue only goes on if a trace is pending -- UM 7.5.2.5',
+u('not finished: the dialogue only goes on if a trace is pending -- UM 10.5.2.5',
   seq='COND', cond='TRACEPEND', next='cp_null_ca')
 u('... and none is', next='cp_done')
 
@@ -4029,22 +3758,22 @@ u('interrupts allowed?', seq='COND', cond='CPB8', next='cp_null_ia')
 u('no: read the response again at once', next='cp_resp')
 
 label('cp_null_ia')
-u('one pending? UM 7.5.2.6: serviced with the midinstruction frame',
+u('one pending? UM 10.5.2.6: serviced with the midinstruction frame',
   seq='COND', cond='IRQPEND', next='exc_cp_irq')
 u('none', next='cp_resp')
 
-# ---- Supervisor check -- UM 7.4.5 --------------------------------------------
+# ---- Supervisor check -- UM 10.4.5 --------------------------------------------
 label('cp_svchk')
 u('at the user level the instruction is aborted',
   seq='COND', cond='USER', next='cp_priv_abort')
 u('at the supervisor level the response is read again', next='cp_resp')
 
-# ---- Transfer operation word -- UM 7.4.6 --------------------------------------
+# ---- Transfer operation word -- UM 10.4.6 --------------------------------------
 label('cp_opword')
 cir_write('the F-line operation word to the operation word CIR', CIR_OPWORD, 2,
           asrc='STG_D', next='cp_next')
 
-# ---- Transfer from instruction stream -- UM 7.4.7 -----------------------------
+# ---- Transfer from instruction stream -- UM 10.4.7 -----------------------------
 # The length is even -- the decoder refuses an odd one -- so what is left after
 # the long words is nothing or one word.
 label('cp_stream')
@@ -4065,7 +3794,7 @@ u('four fewer', asrc='T1', bsrc='FOUR', alu='SUB', dst='T1',
 
 
 # ---- Moving an operand between memory and the operand CIR ---------------------
-# UM 7.3.8 and the primitives that use it: long words "whenever possible", the
+# UM 10.3.8 and the primitives that use it: long words "whenever possible", the
 # remainder "using a one-, two-, or three-byte transfer as required", and every
 # part aligned to the most significant byte of the operand CIR -- which is what
 # a transfer of n bytes to offset $10 is, since the bus unit puts an n-byte
@@ -4104,7 +3833,7 @@ def _xfer_part(stem, n, to_cp, fc, out):
       next=out)
 
 
-# ---- Evaluate and transfer effective address -- UM 7.4.8 ----------------------
+# ---- Evaluate and transfer effective address -- UM 10.4.8 ----------------------
 label('cp_evalea')
 u('only a control alterable address is evaluated',
   seq='COND', cond='EACTLALT', next='cp_evalea_go')
@@ -4114,7 +3843,7 @@ u('evaluate it', call=1, seq='EAMODE')
 cir_write('to the operand address CIR', CIR_OADDR, 4, asrc='EA',
           next='cp_next')
 
-# ---- Evaluate effective address and transfer data -- UM 7.4.9 -----------------
+# ---- Evaluate effective address and transfer data -- UM 10.4.9 -----------------
 label('cp_eadata')
 u('in the class the primitive names? table 7-4',
   seq='COND', cond='CPEAOK', next='cp_eadata_ok')
@@ -4140,7 +3869,7 @@ label('cp_ead_out')
 xfer_loop('cp_ead_outl', False, 'EASP', 'cp_next')
 
 label('cp_ead_wr')
-u('UM table 7-6: a write to an address that is not alterable is a protocol '
+u('UM table 10-6: a write to an address that is not alterable is a protocol '
   'violation, even in a class the primitive declared',
   seq='COND', cond='EAUNALT', next='cp_protocol')
 u('otherwise as for a read', next='cp_ead_calc')
@@ -4158,7 +3887,7 @@ u('the address register steps back by the length first',
 u('... and that is the address', asrc='AREG', alu='A', dst='EA',
   next='cp_ead_mem')
 
-# A register is one, two or four bytes -- UM table 7-6 -- and the operand
+# A register is one, two or four bytes -- UM table 10-6 -- and the operand
 # size follows the length.
 label('cp_ead_dn')
 u('one, two or four bytes?', seq='COND', cond='CPLEN124', next='cp_ead_dn_ok')
@@ -4169,7 +3898,7 @@ cir_write('the data register to the operand CIR', CIR_OPERAND, 0,
           asrc='DREG', szsel='CPLEN', next='cp_next')
 label('cp_ead_dn_in')
 cir_read('the operand CIR ...', CIR_OPERAND, 0, szsel='CPLEN')
-u('... into the low part of the data register -- UM 7.4.9',
+u('... into the low part of the data register -- UM 10.4.9',
   asrc='RDATA', alu='A', dst='DREG_R', szsel='CPLEN', next='cp_next')
 
 label('cp_ead_an')
@@ -4181,10 +3910,10 @@ cir_write('the address register to the operand CIR', CIR_OPERAND, 0,
           asrc='AREG', szsel='CPLEN', next='cp_next')
 label('cp_ead_an_in')
 cir_read('the operand CIR ...', CIR_OPERAND, 0, szsel='CPLEN')
-u('... sign extended into the whole address register -- UM 7.4.9',
+u('... sign extended into the whole address register -- UM 10.4.9',
   asrc='RDATA', alu='A', dst='AREG_R', szsel='CPLEN', next='cp_next')
 
-# UM 7.4.9: "the length of an immediate operand must be one byte or an even
+# UM 10.4.9: "the length of an immediate operand must be one byte or an even
 # number of bytes (less than 256), and the direction of transfer must be to the
 # coprocessor". A byte immediate occupies a word, the byte in its low half.
 label('cp_ead_imm')
@@ -4200,7 +3929,7 @@ label('cp_ead_imm_b')
 cir_write('the low byte of the immediate word', CIR_OPERAND, 1,
           asrc='STG_C', pf='CONSUME', next='cp_next')
 
-# ---- Write to previously evaluated effective address -- UM 7.4.10 --------------
+# ---- Write to previously evaluated effective address -- UM 10.4.10 --------------
 # "The function code ... indicates either supervisor or user data space", and
 # the address is used exactly as it was left: no register is stepped.
 label('cp_wprev')
@@ -4208,7 +3937,7 @@ u('the address the last evaluation left', asrc='EA', alu='A', dst='T2')
 u('the length', asrc='CPLEN', alu='A', dst='T1')
 xfer_loop('cp_wprev_x', False, 'DATA', 'cp_next')
 
-# ---- Take address and transfer data -- UM 7.4.11 ------------------------------
+# ---- Take address and transfer data -- UM 10.4.11 ------------------------------
 label('cp_takeaddr')
 cir_read('the address, from the operand address CIR', CIR_OADDR, 4)
 u('... held', asrc='RDATA', alu='A', dst='T2')
@@ -4218,7 +3947,7 @@ xfer_loop('cp_takeaddr_in', True, 'DATA', 'cp_next')
 label('cp_takeaddr_out')
 xfer_loop('cp_takeaddr_o', False, 'DATA', 'cp_next')
 
-# ---- Transfer to/from top of stack -- UM 7.4.12 --------------------------------
+# ---- Transfer to/from top of stack -- UM 10.4.12 --------------------------------
 # One, two or four bytes, through the ACTIVE stack pointer: (A7)+ to the
 # coprocessor, -(A7) from it, and a byte steps it by two.
 label('cp_tos')
@@ -4247,7 +3976,7 @@ u('the operand goes where the stack pointer now is', asrc='SP', alu='A',
   dst='T2')
 xfer_loop('cp_tos_o', False, 'DATA', 'cp_next')
 
-# ---- Transfer single main processor register -- UM 7.4.13 ---------------------
+# ---- Transfer single main processor register -- UM 10.4.13 ---------------------
 label('cp_sreg')
 u('which way?', seq='COND', cond='CPDR', next='cp_sreg_in')
 cir_write('the register to the operand CIR', CIR_OPERAND, 4, asrc='CPREG',
@@ -4257,7 +3986,7 @@ cir_read('the operand CIR ...', CIR_OPERAND, 4)
 u('... into the register', asrc='RDATA', alu='A', dst='CPREG',
   next='cp_next')
 
-# ---- Transfer main processor control register -- UM 7.4.14 ---------------------
+# ---- Transfer main processor control register -- UM 10.4.14 ---------------------
 # The select code goes through XW, which is where MOVEC keeps its own, so that
 # both reach the control registers through the same multiplexer.
 label('cp_creg')
@@ -4274,7 +4003,7 @@ cir_read('the operand CIR ...', CIR_OPERAND, 4)
 u('... into the control register', asrc='RDATA', alu='A', dst='CREG',
   next='cp_next')
 
-# ---- Transfer multiple main processor registers -- UM 7.4.15 ------------------
+# ---- Transfer multiple main processor registers -- UM 10.4.15 ------------------
 # "The selected registers are transferred in the order D7-D0 and then A7-A0",
 # with bit 0 of the mask selecting D0. The same walk as MOVEM's control form,
 # which takes them D0 first; doc/manual-contradictions.md says why that is the
@@ -4296,7 +4025,7 @@ label('cp_mreg_nx')
 u('any left?', seq='COND', cond='NOTEMPTY', next='cp_mreg_x')
 u('no', next='cp_next')
 
-# ---- Transfer multiple coprocessor registers -- UM 7.4.16 ---------------------
+# ---- Transfer multiple coprocessor registers -- UM 10.4.16 ---------------------
 # One operand for every set bit of the mask, each LENGTH bytes. The address
 # steps on through them; -(An) walks the operands down and the bytes of each up,
 # figure 7-38.
@@ -4432,7 +4161,7 @@ def _m12_out(first_from):
 # Evaluate effective address and transfer data, twelve bytes FROM the
 # coprocessor to memory -- FMOVEM of the three control registers.
 label('cp_ead_wr12')
-u('UM table 7-6: not alterable is a protocol violation',
+u('UM table 10-6: not alterable is a protocol violation',
   seq='COND', cond='EAUNALT', next='cp_protocol')
 u('evaluate it', call=1, seq='EAMODE')
 u('... and the operand goes there', asrc='EA', alu='A', dst='T2')
@@ -4464,7 +4193,7 @@ _m12_out('T2')
 u('any left?', seq='COND', cond='NOTEMPTY', next='cp_m12pre_op')
 u('no', next='cp_next')
 
-# ---- Transfer status register and scanPC -- UM 7.4.17 --------------------------
+# ---- Transfer status register and scanPC -- UM 10.4.17 --------------------------
 label('cp_srpc')
 u('which way?', seq='COND', cond='CPDR', next='cp_srpc_in')
 u('the scanPC too?', seq='COND', cond='CPB8', next='cp_srpc_pc')
@@ -4486,9 +4215,9 @@ u('... and the queue is refilled from there -- in the space the new status '
   'register says',
   asrc='RDATA', alu='A', dst='SCANPC', next='cp_next')
 
-# ---- Take pre-, mid- and postinstruction exception -- UM 7.4.18 to 7.4.20 ------
+# ---- Take pre-, mid- and postinstruction exception -- UM 10.4.18 to 10.4.20 ------
 label('cp_takepre')
-cir_write('acknowledge -- UM 7.3.2', CIR_CONTROL, 2, bsrc='TWO', alu='B')
+cir_write('acknowledge -- UM 10.3.2', CIR_CONTROL, 2, bsrc='TWO', alu='B')
 u('the coprocessor\'s vector', asrc='CPVEC', alu='A', dst='T0')
 u('figure 7-41: the four-word frame, with the address of the operation word, '
   'so that RTE starts the instruction again',
@@ -4510,11 +4239,11 @@ u('... and the scanPC as the program counter, "the address of the next '
 
 
 # --------------------------------------------------------------------------
-# The primitive patterns -- UM 7.4, 7.6 and table 7-6.
+# The primitive patterns -- UM 10.4, 10.6 and table 10-6.
 #
 # Seventeen characters: the category (1 = conditional), CA, PC, then bits 13:8
 # and the parameter byte. Ordered, first match wins, and everything not matched
-# is a protocol violation -- which is what UM 7.6 makes of the encodings it
+# is a protocol violation -- which is what UM 10.6 makes of the encodings it
 # leaves undefined ($00, $3F, $0B, $18-$1B, $1F, $28-$2B, $38-$3B in bits 13:8).
 # --------------------------------------------------------------------------
 def _prim(cat, ca, fn, par='--------'):
@@ -4522,7 +4251,7 @@ def _prim(cat, ca, fn, par='--------'):
     return cat + ca + '-' + fn + par
 
 
-# PC set: the program counter first, whatever the primitive -- UM 7.4.2.
+# PC set: the program counter first, whatever the primitive -- UM 10.4.2.
 cpprim('--1--------------', 'cp_passpc', 'PC set: pass the program counter first')
 
 # Refused in a conditional instruction: every primitive but null that allows
@@ -4530,7 +4259,7 @@ cpprim('--1--------------', 'cp_passpc', 'PC set: pass the program counter first
 for _fn in ('000111', '100111', '001111', '101111', '-00101', '-01110',
             '-01100', '-01101', '-00110'):
     cpprim(_prim('1', '0', _fn), 'cp_protocol', 'CA clear in a conditional')
-# ... the supervisor check with bit 15 clear (UM 7.4.5) ...
+# ... the supervisor check with bit 15 clear (UM 10.4.5) ...
 cpprim(_prim('1', '0', '000100'), 'cp_protocol',
        'supervisor check, bit 15 clear, conditional')
 # ... and the four that are general-category only, whatever CA says.
@@ -4543,7 +4272,7 @@ cpprim(_prim('-', '-', '-00001', '-------1'), 'cp_protocol',
        'transfer multiple coprocessor registers, odd length')
 
 cpprim(_prim('-', '-', '100100'), 'cp_busy',     'busy')
-# The null primitive, every case -- UM 7.4.2 and 7.5.2.5.
+# The null primitive, every case -- UM 10.4.2 and 10.5.2.5.
 cpprim(_prim('-', '1', '001000'), 'cp_resp',      'null, come again')
 cpprim(_prim('-', '1', '001001'), 'cp_null_ca',   'null, come again, interrupts allowed')
 cpprim(_prim('1', '0', '00100-'), 'cp_cond_done', 'null in a conditional: the verdict is in TF')
@@ -4554,7 +4283,7 @@ cpprim(_prim('-', '-', '-00111'), 'cp_opword',   'transfer operation word')
 cpprim(_prim('-', '-', '-01111'), 'cp_stream',   'transfer from instruction stream')
 cpprim(_prim('-', '-', '001010'), 'cp_evalea',   'evaluate and transfer effective address')
 # Evaluate effective address and transfer data, by the effective address --
-# table 7-4 and UM 7.4.9: outside its class an F-line exception; then a handler
+# table 10-4 and UM 10.4.9: outside its class an F-line exception; then a handler
 # for each kind; four bytes from memory, the control registers, unrolled.
 cpprim(_prim('-', '-', '-10---'), 'cp_fline_abort', 'eadata, outside its class', ea='0----')
 cpprim(_prim('-', '-', '-10---'), 'cp_ead_dn',   'eadata, a data register',   ea='1-000')
@@ -4569,7 +4298,7 @@ cpprim(_prim('-', '-', '110---'), 'cp_ead_wr',   'eadata, memory, from the copro
 cpprim(_prim('-', '-', '010---', '00000100'), 'cp_ead_rd4', 'eadata, memory, four bytes in', ea='1-101')
 cpprim(_prim('-', '-', '010---'), 'cp_ead_calc', 'eadata, memory, to the coprocessor', ea='1-101')
 # Transfer multiple coprocessor registers, twelve bytes each: FMOVEM.X. UM
-# 7.4.16: to the coprocessor control or (An)+, from it control alterable or
+# 10.4.16: to the coprocessor control or (An)+, from it control alterable or
 # -(An); anything else an F-line exception.
 cpprim(_prim('-', '-', '-00001'), 'cp_fline_abort', 'multiple registers, no such address', ea='-0---')
 cpprim(_prim('-', '-', '000001', '00001100'), 'cp_m12in_post', 'multiple registers in, twelve bytes, (An)+', ea='-1011')
@@ -4593,24 +4322,24 @@ cpprim(_prim('-', '-', '-11110'), 'cp_takepost', 'take postinstruction exception
 # --------------------------------------------------------------------------
 # The instructions
 # --------------------------------------------------------------------------
-# cpGEN -- UM 7.2.1. The command word is the word after the operation word.
+# cpGEN -- UM 10.2.1. The command word is the word after the operation word.
 label('cp_gen')
-cir_write('the command word to the command CIR -- UM 7.3.6',
+cir_write('the command word to the command CIR -- UM 10.3.6',
           CIR_COMMAND, 2, init=True, asrc='STG_C', pf='CONSUME')
-u('no coprocessor answered: UM 7.5.2.8, an F-line exception',
+u('no coprocessor answered: UM 10.5.2.8, an F-line exception',
   seq='COND', cond='BERR', next='exc_line_f')
-u('the scanPC is the word after the command word -- UM 7.4.1',
+u('the scanPC is the word after the command word -- UM 10.4.1',
   next='cp_resp')
 
-# cpBcc -- UM 7.2.2.1. "The MC68020 writes the entire operation word to the
+# cpBcc -- UM 10.2.2.1. "The MC68030 writes the entire operation word to the
 # condition CIR", and the scanPC stays on the word after it.
 label('cp_bcc')
-cir_write('the operation word to the condition CIR -- UM 7.3.7',
+cir_write('the operation word to the condition CIR -- UM 10.3.7',
           CIR_CONDITION, 2, init=True, asrc='STG_D')
 u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f')
 u('the dialogue', next='cp_resp')
 
-# cpScc, cpDBcc and cpTRAPcc -- UM 7.2.2.2 to 7.2.2.4. The condition selector is
+# cpScc, cpDBcc and cpTRAPcc -- UM 10.2.2.2 to 10.2.2.4. The condition selector is
 # the word after the operation word.
 for _stem in ('cp_scc', 'cp_dbcc', 'cp_trapcc'):
     label(_stem)
@@ -4620,7 +4349,7 @@ for _stem in ('cp_scc', 'cp_dbcc', 'cp_trapcc'):
     u('the dialogue', next='cp_resp')
 
 # The end of a conditional dialogue: a null primitive with CA clear, and the
-# verdict in TF -- UM 7.4.4. Which instruction it was is in stage D.
+# verdict in TF -- UM 10.4.4. Which instruction it was is in stage D.
 label('cp_cond_done')
 u('cpBcc?', seq='COND', cond='CPBCC', next='cp_bcc_tail')
 u('cpDBcc?', seq='COND', cond='CPDBCC', next='cp_dbcc_tail')
@@ -4680,7 +4409,7 @@ label('cp_dbcc_done')
 u('the displacement word is eaten either way', pf='CONSUME', next='cp_done')
 
 # cpTRAPcc: the operand words are eaten first, so that the frame's program
-# counter is the next instruction -- UM 7.5.2.4.
+# counter is the next instruction -- UM 10.5.2.4.
 label('cp_trapcc_tail')
 u('an operand word?', seq='COND', cond='IR1', next='cp_trapcc_w')
 u('none', next='cp_trapcc_t')
@@ -4696,10 +4425,10 @@ u('true: the trap -- vector 7 and the six-word frame', seq='COND',
 u('false: on to the next instruction', next='cp_done')
 
 
-# cpSAVE -- UM 7.2.3.3. Privileged, and the only coprocessor instruction that
+# cpSAVE -- UM 10.2.3.3. Privileged, and the only coprocessor instruction that
 # starts with a READ.
 label('cp_save')
-u('privileged -- checked before any CIR is touched, UM 7.2.3.3.2',
+u('privileged -- checked before any CIR is touched, UM 10.2.3.3.2',
   seq='COND', cond='USER', next='exc_priv')
 cir_read('the save CIR', CIR_SAVE, 2, init=True)
 u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f')
@@ -4742,7 +4471,7 @@ u('... to memory -- and was that the last?', bus='WRITE', fc='DATA',
 u('... and down', asrc='T2', bsrc='FOUR', alu='SUB', dst='T2',
   next='cp_save_loop')
 
-# cpRESTORE -- UM 7.2.3.4.
+# cpRESTORE -- UM 10.2.3.4.
 label('cp_restore')
 u('privileged', seq='COND', cond='USER', next='exc_priv')
 u('(An)+?', seq='COND', cond='EAPOST', next='cp_rest_an')
@@ -4751,7 +4480,7 @@ u('... where the frame is', next='cp_rest_fw')
 label('cp_rest_an')
 u('the address register', asrc='AREG', alu='A', dst='EA')
 label('cp_rest_fw')
-u('the format word from memory, kept for its length -- UM figure 7-18 note 2',
+u('the format word from memory, kept for its length -- UM figure 10-18 note 2',
   bus='READ', fc='EASP', asel='EA', bytes=2,
   asrc='RDATA', alu='A', dst='T1', size='WORD')
 cir_write('... and written to the restore CIR', CIR_RESTORE, 2, init=True,
@@ -4760,13 +4489,13 @@ u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f')
 label('cp_rest_rd')
 cir_read('what the coprocessor makes of it, held', CIR_RESTORE, 2,
          asrc='RDATA', alu='A', dst='T0', size='WORD')
-u('not ready: read it again, without servicing interrupts -- UM 7.2.3.2.2',
+u('not ready: read it again, without servicing interrupts -- UM 10.2.3.2.2',
   seq='COND', cond='FWNOTRDY', next='cp_rest_rd')
 u('invalid', seq='COND', cond='FWBAD', next='cp_format_abort')
 u('empty: nothing follows', seq='COND', cond='FWEMPTY', next='cp_rest_empty')
 u('the length is the one read from MEMORY', asrc='T1', alu='A', dst='T0',
   size='WORD')
-u('... and must be a multiple of four -- UM 7.5.2.7', seq='COND',
+u('... and must be a multiple of four -- UM 10.5.2.7', seq='COND',
   cond='FWLEN', next='cp_format_abort')
 u('the length', asrc='FWLEN', alu='A', dst='T1')
 u('the state follows the format word and its reserved word',
@@ -4826,7 +4555,7 @@ u('four fewer', asrc='T1', bsrc='FOUR', alu='SUB', dst='T1',
 
 
 # --------------------------------------------------------------------------
-# The midinstruction frame -- UM figure 7-43, format $9
+# The midinstruction frame -- UM figure 10-43, format $9
 #
 # Entered with T0 = the vector offset. It is built with ea_save as the pointer
 # because EA is one of the things it saves. Everything a coprocessor
@@ -4854,13 +4583,13 @@ def frame9_body(ptr_from_sp=True):
 label('exc_cp9')
 u('a copy of the status register as it was', asrc='SR', alu='A', dst='T3',
   size='WORD')
-u('supervisor, and no tracing of the handler -- UM 6.1 step one',
+u('supervisor, and no tracing of the handler -- UM 8.1 step one',
   asrc='SR', alu='EXCSR', dst='SR', size='WORD')
 frame9_body()
 u('and the stack pointer is where the frame begins', asrc='EA_SAVE', alu='A',
   dst='SP', size='LONG', next='exc_f0_vector')
 
-# An interrupt in the middle of the dialogue -- UM 7.5.2.6. The same
+# An interrupt in the middle of the dialogue -- UM 10.5.2.6. The same
 # acknowledge as exc_irq and the same throwaway frame when M is set, around the
 # midinstruction frame instead of the four-word one.
 label('exc_cp_irq')
@@ -4892,7 +4621,7 @@ u('supervisor, and no tracing of the handler',
 frame9_body()
 u('the master stack pointer is where that frame begins', asrc='EA_SAVE',
   alu='A', dst='SP', size='LONG')
-# UM 6.1.9: "this second frame contains the same PC value and vector offset as
+# UM 8.1.9: "this second frame contains the same PC value and vector offset as
 # the frame created on top of the master stack, but has a format number of 1".
 # The midinstruction frame's first long word after the status register is the
 # scanPC, so that is what the throwaway carries.
@@ -4918,7 +4647,7 @@ u('... written there', bus='WRITE', fc='DATA', asel='EA_SAVE', asrc='T3',
 u('and the interrupt stack pointer is where the throwaway begins',
   asrc='EA_SAVE', alu='A', dst='SP', size='LONG', next='exc_f0_vector')
 
-# RTE of a midinstruction frame -- UM 7.4.19: "the MC68020 returns from the
+# RTE of a midinstruction frame -- UM 10.4.19: "the MC68030 returns from the
 # exception handler and reads the response CIR". Entered from rte with T1 the
 # frame base. The status register is written last but one, because it decides
 # which stack pointer is stepped and the space the queue refills from; the

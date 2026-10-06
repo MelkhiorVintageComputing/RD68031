@@ -2,7 +2,7 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 -- the instruction cache, UM section 4.
+// RD68031 -- the instruction cache, UM section 6.
 //
 // The cache is architecturally invisible except in two ways, and this tests both:
 // the bus (a hit makes no cycle), and code that modifies itself (a hit serves the
@@ -121,7 +121,7 @@ module core_cache_tb;
 
     // ----------------------------------------------------------------------
     // Enabled throughout. The first call fills, the other two hit, and a hit
-    // is no bus cycle at all -- UM 4.1, "the cycle ends".
+    // is no bus cycle at all -- UM20 4.1, "the cycle ends".
     // ----------------------------------------------------------------------
     build(32'h1, 32'h1, 32'h1, 1'b0, 32'h0);
     go("enabled");
@@ -131,7 +131,7 @@ module core_cache_tb;
     check(f8[2] == 0, "enabled: the prefetch past the RTS was cached too");
     check(dut.u_seq.dreg[3] == 32'd27, "enabled: the subroutine ran 27 times");
 
-    // UM 4.2: reset clears the cache. The RAM still holds the subroutine from
+    // UM 6.2: reset clears the cache. The RAM still holds the subroutine from
     // the run above; the valid bits say it does not.
     go("after reset");
     check(f0[1] > 0, "after reset: the first call misses again");
@@ -143,7 +143,7 @@ module core_cache_tb;
     go("disabled");
     check(f0[2] >= 9 && f0[3] >= 9, "disabled: every iteration is a bus cycle");
 
-    // UM 4.3.1, F: "when the F-bit is set and a cache miss occurs, the entry is
+    // UM20 4.3.1, F: "when the F-bit is set and a cache miss occurs, the entry is
     // not replaced". Frozen from the start, nothing ever gets in.
     build(32'h3, 32'h3, 32'h3, 1'b0, 32'h0);
     go("frozen empty");
@@ -154,7 +154,7 @@ module core_cache_tb;
     go("frozen full");
     check(f0[2] == 0 && f4[2] == 0, "frozen after a fill: the entries still hit");
 
-    // UM 4.3.1, E: "disabling the instruction cache does not flush the entries.
+    // UM20 4.3.1, E: "disabling the instruction cache does not flush the entries.
     // If the cache is reenabled, the previously valid entries remain valid."
     build(32'h1, 32'h0, 32'h1, 1'b0, 32'h0);
     go("re-enabled");
@@ -182,8 +182,8 @@ module core_cache_tb;
     go("clear entry by index");
     check(f0[2] >= 1, "CE: CAAR's index is all that counts");
 
-    // UM 4.3: "the assertion of CDIS disables the cache, regardless of the state
-    // of the E-bit", and -- like E -- it does not flush.
+    // UM 6.1: "the assertion of CDIS disables the caches, regardless of the
+    // state of the enable bits in CACR", and -- like EI -- it does not flush.
     build(32'h1, 32'h1, 32'h1, 1'b0, 32'h0);
     fork
       go("CDIS");
@@ -197,7 +197,7 @@ module core_cache_tb;
     check(f0[2] >= 9, "CDIS: the cache is off while it is asserted");
     check(f0[3] == 0 && f4[3] == 0, "CDIS: ... and its entries are still there after");
 
-    // UM 4.1: the tag is A31-A8 AND FC2. The same code run at the user level is
+    // UM 6.1.1: the tag is A31-A8 AND FC2. The same code run at the user level is
     // a different address space and misses.
     build(32'h1, 32'h1, 32'h0, 1'b1, 32'h0);
     go("user level");
@@ -206,7 +206,7 @@ module core_cache_tb;
 
     // A prefetch that ends in a bus error is not cached. The long word past the
     // RTS is prefetched and never used, so its bus error is never taken
-    // (UM 5.5.1) -- but it must not come back later as a hit.
+    // (UM 7.5.1) -- but it must not come back later as a hit.
     build(32'h1, 32'h1, 32'h1, 1'b0, 32'h0);
     berr_base = SUB + 32'h8;
     berr_mask = 32'hFFFF_FFFC;

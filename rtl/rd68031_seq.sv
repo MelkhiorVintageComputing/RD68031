@@ -2,7 +2,7 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 - SystemVerilog MC68020
+// RD68031 - SystemVerilog MC68030
 //
 // Sequencer: the microcode engine, the 32-bit datapath, the register file, the
 // three stack pointers, and (from M9) the marshalling of the checkpoint state
@@ -17,8 +17,10 @@
 // registered, so the microword arrives at the same time as the micro-address it
 // belongs to: no clock lost, and a memory instead of logic.
 //
-// M5: reset, NOP, MOVEQ, MOVE.L Dn,Dn and both shapes of BRA. The addressing
-// modes are M6 and the rest of the instruction set M7.
+// The instruction set is the MC68030's: the MC68020's, forked from RD68021, less
+// CALLM and RTM, with the CpID-0 F-line words routed to the MMU's entry rather
+// than the coprocessor interface (tools/ucode/program.py) and CACR in the
+// MC68030's layout. The MMU instructions themselves are M11.
 
 module rd68031_seq #(
     parameter bit COPROCESSOR = 1'b0
@@ -163,15 +165,19 @@ module rd68031_seq #(
   rd68031_decode_rom u_decode (
       .ir (dec_ir), .entry (dec_rom_entry), .illegal (dec_illegal));
 
-  // With no coprocessor interface built, every F-line word is an F-line
-  // exception, which is also what a machine with no coprocessor attached wants
-  // -- UM20 7.5.2.2. The decode table is the same either way; the parameter picks
-  // its output.
+  // With no coprocessor interface built, every F-line word with a CpID other
+  // than zero is an F-line exception, which is also what a machine with no
+  // coprocessor attached wants -- UM 10.5.2.2. CpID 0 is not the coprocessor
+  // interface's on the MC68030 but the MMU's (UM 10.1), so it goes to the
+  // decode table either way: the MMU instructions and the privilege check
+  // that comes before them (UM 8.1.5, 9.8) are there whether or not a
+  // coprocessor can be attached. The decode table is the same either way; the
+  // parameter picks its output.
   generate
     if (COPROCESSOR) begin : g_cp_dec
       assign dec_entry = dec_rom_entry;
     end else begin : g_nocp_dec
-      assign dec_entry = (dec_ir[15:12] == 4'hF)
+      assign dec_entry = ((dec_ir[15:12] == 4'hF) && (dec_ir[11:9] != 3'b000))
                          ? rd68031_ucode_pkg::ENTRY_LINE_F : dec_rom_entry;
     end
   endgenerate
@@ -573,9 +579,6 @@ module rd68031_seq #(
       rd68031_ucode_pkg::U_ASRC_VBR:   a_bus = vbr_q;
       // The fault frame's fields -- doc/ssw.md and doc/checkpoint.md.
       rd68031_ucode_pkg::U_ASRC_SSW:        a_bus = {16'd0, ssw};
-      // PRM 4, RTM: "D/A field ... register field" in bits 3:0 of the opcode,
-      // moved to bit 15 and bits 14:12 so that XREG reads the register.
-      rd68031_ucode_pkg::U_ASRC_RTM_XW:     a_bus = {16'd0, stg_d[3:0], 12'd0};
       rd68031_ucode_pkg::U_ASRC_DFA:        a_bus = flt_addr;
       rd68031_ucode_pkg::U_ASRC_DOB:        a_bus = flt_dob;
       rd68031_ucode_pkg::U_ASRC_DIB:        a_bus = flt_dib;
@@ -886,10 +889,12 @@ module rd68031_seq #(
   //
   // "This is always a 32-bit transfer, even though the control register may be
   // implemented with fewer bits. Unimplemented bits are read as zeros." The
-  // codes are the ones PRM 6 lists for the MC68020; the MC68040's are not here.
+  // codes are the eight PRM 6 lists for the MC68020 and MC68030, which are the
+  // same eight; the MC68040's are not here. The MC68030's MMU registers are not
+  // control registers: PMOVE reaches them (UM 9.7).
   // Any other code is an illegal instruction -- UM 8.1.5, "a MOVEC instruction
   // with an undefined register specification field" -- and, through the
-  // transfer-control-register primitive, a protocol violation (UM20 table 7-5).
+  // transfer-control-register primitive, a protocol violation (UM table 10-5).
   //
   // USP is the one that is NOT simply whichever stack pointer is active: MOVEC
   // names it explicitly, which is the whole point of the instruction in a
@@ -1304,10 +1309,6 @@ module rd68031_seq #(
         y = {24'd0, a_bus[11:8], a_bus[3:0]};
       rd68031_ucode_pkg::U_ALU_UNPK:
         y = {16'd0, 4'd0, a_bus[7:4], 4'd0, a_bus[3:0]};
-      rd68031_ucode_pkg::U_ALU_ZXB:
-        y = {24'd0, a_bus[7:0]};
-      rd68031_ucode_pkg::U_ALU_SETB2:
-        y = {a_bus[31:24], b_bus[7:0], a_bus[15:0]};
       rd68031_ucode_pkg::U_ALU_BYTEPAIR:
         y = {16'd0, a_bus[7:0], b_bus[7:0]};
       rd68031_ucode_pkg::U_ALU_SX:
@@ -1738,19 +1739,6 @@ module rd68031_seq #(
       rd68031_ucode_pkg::U_COND_MASTER: cond_true = master_mode;
       rd68031_ucode_pkg::U_COND_USER:  cond_true = ~super_mode;
       rd68031_ucode_pkg::U_COND_DIVZERO: cond_true = div_zero;
-      // UM20 9.7.1 and 9.7.2. T0 holds a descriptor's control word, or a
-      // frame's first word shifted into the same place.
-      rd68031_ucode_pkg::U_COND_MODBAD:
-        cond_true = !((t_q[0][31:29] == 3'b000) || (t_q[0][31:29] == 3'b100))
-                 || !((t_q[0][28:24] == 5'h00)  || (t_q[0][28:24] == 5'h01));
-      rd68031_ucode_pkg::U_COND_MODTYPE1: cond_true = (t_q[0][28:24] == 5'h01);
-      rd68031_ucode_pkg::U_COND_MODOPT4:  cond_true = (t_q[0][31:29] == 3'b100);
-      // UM20 table 9-6.
-      rd68031_ucode_pkg::U_COND_ASTAT_BAD:
-        cond_true = (t_q[2][7:0] == 8'h00) || (t_q[2][7:0] > 8'h07);
-      rd68031_ucode_pkg::U_COND_ASTAT_STACK:
-        cond_true = (t_q[2][7:0] >= 8'h04) && (t_q[2][7:0] <= 8'h07);
-      rd68031_ucode_pkg::U_COND_T3ZERO:   cond_true = (t_q[3] == 32'd0);
       rd68031_ucode_pkg::U_COND_ZSET:    cond_true = flag_z;
       rd68031_ucode_pkg::U_COND_CSET:    cond_true = flag_c;
       rd68031_ucode_pkg::U_COND_VSET:    cond_true = flag_v;
@@ -2111,30 +2099,26 @@ module rd68031_seq #(
   // inside it is an ordinary one that is retried on its own. TAS is the only
   // instruction in this milestone that asserts it; CAS and CAS2 join it in M10.
   assign req_rmc      = `UF(RMC);
-  // UM20 figure 5-31 lays out the CPU address spaces. Only the interrupt
-  // acknowledge is reached before M10; the breakpoint and the module call join
-  // it there, and the coprocessor in M13.
+  // UM figure 7-42 lays out the CPU address spaces, and "on the MC68030, three
+  // of the encodings are implemented": the breakpoint acknowledge, the
+  // coprocessor, and the interrupt acknowledge.
   always_comb begin
     unique case (`UF(CPUSPACE))
       rd68031_ucode_pkg::U_CPUSPACE_BKPT:   req_cpuspace = rd68031_pkg::CPUS_BKPT;
       rd68031_ucode_pkg::U_CPUSPACE_COPROC,
       rd68031_ucode_pkg::U_CPUSPACE_CPINIT: req_cpuspace = rd68031_pkg::CPUS_COPROC;
-      rd68031_ucode_pkg::U_CPUSPACE_ACCESS: req_cpuspace = rd68031_pkg::CPUS_ACCESS;
       default:                              req_cpuspace = rd68031_pkg::CPUS_IACK;
     endcase
   end
 
   // What goes in the CPU-space address besides the type. An interrupt
   // acknowledge puts the level on A3-A1, and a breakpoint acknowledge puts the
-  // breakpoint number on A4-A2 -- UM20 5.4.1 and 5.4.2, figure 5-31. The bus unit
+  // breakpoint number on A4-A2 -- UM 7.4.1 and 7.4.2, figure 7-42. The bus unit
   // builds the rest of the address from the type.
-  // ... and the access-level hardware of UM20 9.8 takes a register offset, which
-  // the microword carries in its `vec` field.
   always_comb begin
     unique case (`UF(CPUSPACE))
       rd68031_ucode_pkg::U_CPUSPACE_BKPT:   req_cpuaddr = {5'd0, stg_d[2:0]};
-      rd68031_ucode_pkg::U_CPUSPACE_ACCESS: req_cpuaddr = `UF(VEC);
-      // UM20 figure 7-3: the CpID from bits 11:9 of the F-line operation word on
+      // UM figure 10-3: the CpID from bits 11:9 of the F-line operation word on
       // A15-A13, and the interface register on A4-A0, out of `vec`.
       rd68031_ucode_pkg::U_CPUSPACE_COPROC,
       rd68031_ucode_pkg::U_CPUSPACE_CPINIT:
@@ -2215,8 +2199,9 @@ module rd68031_seq #(
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       upc    <= rd68031_ucode_pkg::ENTRY_RESET;
-      // UM20 2.1.1: after reset the processor is at the supervisor level in
-      // interrupt mode with the mask at 7. UM20 4.2: reset clears CACR's E and F.
+      // UM 4.1.1: after reset the processor is at the supervisor level in
+      // interrupt mode, and UM 8.1.1 puts the mask at 7. UM 6.2: reset clears
+      // the enable, burst-enable and freeze bits of both caches, and WA.
       sr_q   <= rd68031_pkg::SR_RESET;
       vbr_q  <= '0;
       sfc_q  <= '0;
@@ -2440,10 +2425,12 @@ module rd68031_seq #(
               areg[movem_wn[2:0]] <= y_areg;
             end
           end
-          // MOVEC writing a control register. SFC and DFC are three bits and
-          // CACR only two of its thirty-two are implemented here; PRM 6 says
-          // the transfer is thirty-two bits wide either way and the rest read
-          // back as zero, which is what narrow registers give.
+          // MOVEC writing a control register. SFC and DFC are three bits, and
+          // CACR keeps the seven of its thirty-two that UM figure 6-14 does not
+          // reserve or make read as zero; PRM 6 says the transfer is thirty-two
+          // bits wide either way and the rest read back as zero, which is what
+          // narrow registers give. CAAR keeps all thirty-two: "all 32 bits of
+          // the register are implemented" (UM 6.3.2).
           // The user stack pointer by name. MOVE USP reaches it while running
           // at the supervisor level, which is the only way a kernel can build
           // a frame on a user stack -- PRM 6.
@@ -2822,15 +2809,17 @@ module rd68031_seq #(
 
   assign cacr      = cacr_q;
   assign caar      = caar_q;
-  // MOVEC setting CACR's C or CE -- UM20 4.3.1. Both "always read as zero", so
-  // they are never stored: the write is an order to the cache, carried out on the
-  // edge that commits it. C clears everything and so covers CE when both are set.
+  // MOVEC setting CACR's CI or CEI -- UM 6.3.1.8 and 6.3.1.9. Both "always read
+  // as a zero", so they are never stored: the write is an order to the cache,
+  // carried out on the edge that commits it. CI clears everything and so covers
+  // CEI when both are set. CD and CED are the same orders to the data cache,
+  // which arrives at M10; until then they are accepted and do nothing.
   logic cacr_wr;
   assign cacr_wr = commit && (`UF(DST) == rd68031_ucode_pkg::U_DST_CREG)
                 && (creg_sel == 12'h002);
   assign cach_op = !cacr_wr                     ? 2'b00
-                 : y[rd68031_pkg::CACR_C]  ? 2'b01
-                 : y[rd68031_pkg::CACR_CE] ? 2'b10
+                 : y[rd68031_pkg::CACR_CI]  ? 2'b01
+                 : y[rd68031_pkg::CACR_CEI] ? 2'b10
                  :                           2'b00;
   // ==========================================================================
   // RTE putting a fault frame back -- UM 8.2.3, doc/ssw.md

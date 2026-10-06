@@ -23,12 +23,12 @@ module core_insn_tb;
   logic [15:0] got;
   int unsigned k;
 
-  // UM 5.5.2 and PRM 4: a compare-and-swap holds RMC across every cycle of the
+  // UM 7.5.2 and PRM 4: a compare-and-swap holds RMC across every cycle of the
   // sequence, so that nothing else can get at the location in between. These
   // count the cycles that ran while it was asserted and the times it was let
   // go and taken again -- which must be never, within one instruction.
   // ------------------------------------------------------------------------
-  // A breakpoint device -- UM 5.4.2. It watches for CPU space type 0, notes the
+  // A breakpoint device -- UM 7.4.2. It watches for CPU space type 0, notes the
   // breakpoint number on A4-A2, and either answers with a replacement
   // instruction word or asserts BERR because it has none. A 16-bit port, so
   // the word arrives on D31-D16.
@@ -43,48 +43,11 @@ module core_insn_tb;
 
   wire bkpt_now = !as_n_o && (fc_o === 3'b111) && (a_o[19:16] === 4'h0);
 
-  // ------------------------------------------------------------------------
-  // The access-level control hardware of UM 9.8, in CPU space type 1 at the
-  // register offsets of figure 9-13. A 32-bit port. It remembers what the
-  // processor wrote and answers with what the test told it to.
-  // ------------------------------------------------------------------------
-  logic  [7:0] acc_cal, acc_status, acc_ial, acc_dal;
-  logic [31:0] acc_desc;
-  logic  [7:0] acc_desc_at;
-  int unsigned acc_cycles;
-  initial begin
-    acc_cal = 8'h11; acc_status = 8'h01; acc_ial = 8'h00; acc_dal = 8'h00;
-    acc_desc = 32'd0; acc_desc_at = 8'h00; acc_cycles = 0;
-  end
-
-  wire acc_now = !as_n_o && (fc_o === 3'b111) && (a_o[19:16] === 4'h1);
-
-  always @(posedge acc_now) acc_cycles = acc_cycles + 1;
-
-  always @(negedge clk) if (acc_now && !rw_o && !ds_n_o) begin
-    case (a_o[7:0])
-      8'h08:   acc_ial = dbus[31:24];
-      8'h0C:   acc_dal = dbus[31:24];
-      default: if (a_o[7:0] >= 8'h40) begin
-        acc_desc    = dbus;
-        acc_desc_at = a_o[7:0];
-      end
-    endcase
-  end
-
   always @(*) begin
     dsack_ext  = 2'b11;
     oe_ext     = 1'b0;
     d_ext      = 32'd0;
     berr_force = 1'b0;
-    if (acc_now) begin
-      dsack_ext = 2'b00;                   // a 32-bit port
-      if (rw_o) begin
-        oe_ext = 1'b1;
-        d_ext  = (a_o[7:0] == 8'h04) ? {acc_status, 24'd0}
-               :                       {acc_cal,    24'd0};
-      end
-    end
     if (bkpt_now) begin
       if (bkpt_answer) begin
         dsack_ext = 2'b01;                 // DSACK1 alone: a 16-bit port
@@ -476,7 +439,7 @@ module core_insn_tb;
 
 
     // ======================================================================
-    // BKPT -- UM 5.4.2. The device answers with an instruction, and that
+    // BKPT -- UM 7.4.2. The device answers with an instruction, and that
     // instruction runs where the breakpoint was.
     // ======================================================================
     setup();
@@ -519,218 +482,39 @@ module core_insn_tb;
 
 
     // ======================================================================
-    // CALLM and RTM -- UM 9.7 and 9.8, type $00. No oracle has these, so the
-    // expectations are the manual's figures read field by field.
-    //
-    //   descriptor at $3000   opt 000, type $00; entry $0600; data $CAFE0000
-    //   module at $0600       entry word names A5; MOVE.L A5,D3; MOVEQ #$11,D1
-    //   caller                A5 = $12345678, one long word of argument pushed,
-    //                         CCR = $0F, then CALLM #4,($3000).L
+    // CALLM and RTM: the MC68020's module calls, which the MC68030 does not
+    // have. UM 8.1.5: an illegal instruction, vector 4, with the stacked
+    // program counter at the instruction -- before any extension word or
+    // operand is read. core_m030_tb has the same from a program.
     // ======================================================================
     setup();
-    poke_l(32'h0000_3000, 32'h0000_0000);  // opt 000, type $00
-    poke_l(32'h0000_3004, 32'h0000_0600);  // module entry word pointer
-    poke_l(32'h0000_3008, 32'hCAFE_0000);  // module data area pointer
-    poke_w(32'h0000_0600, 16'hD000);       // entry word: A5
-    poke_w(32'h0000_0602, 16'h260D);       // MOVE.L A5,D3
-    poke_w(32'h0000_0604, 16'h7211);       // MOVEQ #$11,D1
-    poke_w(32'h0000_0606, 16'h60FE);       // BRA * -- stop inside the module
-    poke_w(CODE +  0, 16'h2A7C);           // MOVEA.L #$12345678,A5
-    poke_l(CODE +  2, 32'h1234_5678);
-    poke_w(CODE +  6, 16'h2F3C);           // MOVE.L #$AAAAAAAA,-(A7)
-    poke_l(CODE +  8, 32'hAAAA_AAAA);
-    poke_w(CODE + 12, 16'h44FC);           // MOVE #$0F,CCR
-    poke_w(CODE + 14, 16'h000F);
-    poke_w(CODE + 16, 16'h06F9);           // CALLM #4,($3000).L
-    poke_w(CODE + 18, 16'h0004);
-    poke_l(CODE + 20, 32'h0000_3000);
-    poke_w(CODE + 24, 16'h7422);           // MOVEQ #$22,D2
-    poke_w(CODE + 26, 16'h60FE);
-    reset_dut();
-    run_until(32'h0000_0606, 3000, reached);
-    check(reached, "CALLM: the module runs, from the word after its entry word");
-    check(dut.u_seq.dreg[3] === 32'hCAFE_0000,
-          "CALLM: the register the entry word names holds the data area pointer");
-    check(dut.u_seq.isp_q === 32'h0000_0FE4,
-          "CALLM: the stack pointer is the base of a six-long-word frame");
-    // UM figure 9-12, field by field.
-    check(peek_w(32'h0FE4) === 16'h0000, "CALLM frame +$00: options, type, access");
-    check(peek_w(32'h0FE6) === 16'h000F, "CALLM frame +$02: the caller's CCR");
-    check(peek_w(32'h0FE8) === 16'h0004, "CALLM frame +$04: the argument count");
-    check(peek_l(32'h0FEC) === 32'h0000_3000, "CALLM frame +$08: the descriptor");
-    check(peek_l(32'h0FF0) === CODE + 24,
-          "CALLM frame +$0C: the instruction after the CALLM");
-    check(peek_l(32'h0FF4) === 32'h1234_5678,
-          "CALLM frame +$10: the register's old value");
-    check(peek_l(32'h0FF8) === 32'h0000_0FFC,
-          "CALLM frame +$14: the stack pointer when CALLM began");
-    check(peek_l(32'h0FFC) === 32'hAAAA_AAAA,
-          "CALLM: the argument is just below the frame, where opt 000 says");
-
-    // ... and back out.
-    poke_w(32'h0000_0606, 16'h06CD);       // RTM A5
-    setup();
-    poke_l(32'h0000_3000, 32'h0000_0000);
-    poke_l(32'h0000_3004, 32'h0000_0600);
-    poke_l(32'h0000_3008, 32'hCAFE_0000);
-    poke_w(32'h0000_0600, 16'hD000);
-    poke_w(32'h0000_0602, 16'h260D);
-    poke_w(32'h0000_0604, 16'h7211);       // MOVEQ changes the codes...
-    poke_w(32'h0000_0606, 16'h06CD);       // RTM A5
-    poke_w(CODE +  0, 16'h2A7C);
-    poke_l(CODE +  2, 32'h1234_5678);
-    poke_w(CODE +  6, 16'h2F3C);
-    poke_l(CODE +  8, 32'hAAAA_AAAA);
-    poke_w(CODE + 12, 16'h44FC);
-    poke_w(CODE + 14, 16'h000F);
-    poke_w(CODE + 16, 16'h06F9);
-    poke_w(CODE + 18, 16'h0004);
-    poke_l(CODE + 20, 32'h0000_3000);
-    // LEA and not MOVEQ after the call: LEA leaves the condition codes alone,
-    // so what is in them afterwards is what RTM put there.
-    poke_w(CODE + 24, 16'h45F8);           // LEA ($0022).W,A2
-    poke_w(CODE + 26, 16'h0022);
-    poke_w(CODE + 28, 16'h60FE);
-    reset_dut();
-    run_until(CODE + 28, 3000, reached);
-    check(reached, "RTM: the caller carries on after its CALLM");
-    check(dut.u_seq.dreg[1] === 32'h0000_0011, "RTM: the module ran");
-    check(dut.u_seq.areg[2] === 32'h0000_0022, "RTM: and so did the caller, after");
-    check(dut.u_seq.areg[5] === 32'h1234_5678,
-          "RTM: the caller's data area pointer is back");
-    check(dut.u_seq.isp_q === ISP0,
-          "RTM: the stack is back past the frame AND the argument");
-    // ... which the MOVEQ inside the module had changed.
-    check(dut.u_seq.sr_q[4:0] === 5'h0F, "RTM: the caller's condition codes are back");
-
-    // ======================================================================
-    // A descriptor CALLM does not recognise -- UM 9.7.1, "all others cause a
-    // format exception", and 9.8.1, "no visible processor registers are
-    // changed".
-    // ======================================================================
-    setup();
-    poke_l(32'h0000_0038, 32'h0000_0500);  // vector 14
-    poke_w(32'h0000_0500, 16'h7E14);       // MOVEQ #$14,D7
+    poke_l(32'h0000_0010, 32'h0000_0500);  // vector 4
+    poke_w(32'h0000_0500, 16'h7E04);       // MOVEQ #4,D7
     poke_w(32'h0000_0502, 16'h60FE);
-    poke_l(32'h0000_3000, 32'h0200_0000);  // type $02
-    poke_l(32'h0000_3004, 32'h0000_0600);
-    poke_l(32'h0000_3008, 32'hCAFE_0000);
-    poke_w(CODE +  0, 16'h2A7C);
-    poke_l(CODE +  2, 32'h1234_5678);
-    poke_w(CODE +  6, 16'h06F9);           // CALLM #0,($3000).L
-    poke_w(CODE +  8, 16'h0000);
-    poke_l(CODE + 10, 32'h0000_3000);
-    poke_w(CODE + 14, 16'h60FE);
+    poke_w(CODE + 0, 16'h06F9);            // CALLM #4,($3000).L
+    poke_w(CODE + 2, 16'h0004);
+    poke_l(CODE + 4, 32'h0000_3000);
+    poke_w(CODE + 8, 16'h60FE);
     reset_dut();
-    run_until(32'h0000_0502, 3000, reached);
-    check(reached, "CALLM, type $02: a format error");
-    check(dut.u_seq.areg[5] === 32'h1234_5678, "CALLM, type $02: A5 untouched");
-    check(peek_l(ISP0 - 6) === CODE + 6,
-          "CALLM, type $02: the frame points at the CALLM");
+    run_until(32'h0000_0502, 2000, reached);
+    check(reached, "CALLM: an illegal instruction on the MC68030");
+    check(peek_l(ISP0 - 6) === CODE, "CALLM: the frame points at the CALLM");
+    check(peek_w(ISP0 - 2) === 16'h0010, "CALLM: format $0, vector offset $010");
+    check(dut.u_seq.isp_q === ISP0 - 8, "CALLM: a four-word frame and nothing else");
 
-    // ======================================================================
-    // CALLM type $01 -- UM 9.8.1. The descriptor asks for access level $33;
-    // the hardware says the caller is at $11 and grants it with no change of
-    // stack. The frame must keep the CALLER's level, and the hardware must
-    // have been told the descriptor's address and the level asked for.
-    // ======================================================================
     setup();
-    poke_l(32'h0000_3000, 32'h0133_0000);  // opt 000, type $01, level $33
-    poke_l(32'h0000_3004, 32'h0000_0600);
-    poke_l(32'h0000_3008, 32'hCAFE_0000);
-    poke_w(32'h0000_0600, 16'hD000);       // entry word: A5
-    poke_w(32'h0000_0602, 16'h60FE);       // stop inside the module
-    poke_w(CODE +  0, 16'h2A7C);           // MOVEA.L #$12345678,A5
-    poke_l(CODE +  2, 32'h1234_5678);
-    poke_w(CODE +  6, 16'h06F9);           // CALLM #0,($3000).L
-    poke_w(CODE +  8, 16'h0000);
-    poke_l(CODE + 10, 32'h0000_3000);
-    poke_w(CODE + 14, 16'h60FE);
-    acc_cal = 8'h11; acc_status = 8'h01; acc_ial = 8'h00; acc_desc = 32'd0;
-    acc_cycles = 0;
-    reset_dut();
-    run_until(32'h0000_0602, 3000, reached);
-    check(reached, "CALLM type $01, granted: the module runs");
-    check(acc_ial === 8'h33, "CALLM type $01: IAL was told the level asked for");
-    check(acc_desc === 32'h0000_3000 && acc_desc_at === 8'h54,
-          "CALLM type $01: the descriptor address went to FC 5's register, $54");
-    check(acc_cycles == 4,
-          "CALLM type $01: four access cycles -- CAL, descriptor, IAL, status");
-    check(peek_w(ISP0 - 32'h18) === 16'h0111,
-          "CALLM type $01: frame +$00 keeps the CALLER's level, $11, not $33");
-    check(dut.u_seq.areg[5] === 32'hCAFE_0000,
-          "CALLM type $01: the data area pointer is loaded as for type $00");
-
-    // ... refused: UM 9.8.1, "the processor takes a format error exception.
-    // No visible processor registers are changed".
-    setup();
-    poke_l(32'h0000_0038, 32'h0000_0500);  // vector 14
-    poke_w(32'h0000_0500, 16'h7E14);
+    poke_l(32'h0000_0010, 32'h0000_0500);
+    poke_w(32'h0000_0500, 16'h7E04);
     poke_w(32'h0000_0502, 16'h60FE);
-    poke_l(32'h0000_3000, 32'h0133_0000);
-    poke_l(32'h0000_3004, 32'h0000_0600);
-    poke_l(32'h0000_3008, 32'hCAFE_0000);
-    poke_w(CODE +  0, 16'h2A7C);
-    poke_l(CODE +  2, 32'h1234_5678);
-    poke_w(CODE +  6, 16'h06F9);
-    poke_w(CODE +  8, 16'h0000);
-    poke_l(CODE + 10, 32'h0000_3000);
-    poke_w(CODE + 14, 16'h60FE);
-    acc_status = 8'h00;
+    poke_w(CODE + 0, 16'h2A7C);            // MOVEA.L #$12345678,A5
+    poke_l(CODE + 2, 32'h1234_5678);
+    poke_w(CODE + 6, 16'h06CD);            // RTM A5
+    poke_w(CODE + 8, 16'h60FE);
     reset_dut();
-    run_until(32'h0000_0502, 3000, reached);
-    check(reached, "CALLM type $01, refused: a format error");
-    check(dut.u_seq.areg[5] === 32'h1234_5678, "CALLM type $01, refused: A5 untouched");
-    check(peek_l(ISP0 - 6) === CODE + 6,
-          "CALLM type $01, refused: the frame is the format error's, at the CALLM");
-
-    // ======================================================================
-    // ... granted WITH a change of stack -- UM table 9-6, status four to
-    // seven. The new stack pointer comes from the descriptor at +$0C, option
-    // 000 copies the argument across, and the frame's +$14 is the OLD stack.
-    // Then RTM takes it all back: it tells DAL the saved level, and the stack
-    // comes back from +$14 plus the argument count.
-    // ======================================================================
-    setup();
-    poke_l(32'h0000_3000, 32'h0133_0000);
-    poke_l(32'h0000_3004, 32'h0000_0600);
-    poke_l(32'h0000_3008, 32'hCAFE_0000);
-    poke_l(32'h0000_300C, 32'h0000_2000);  // the called module's stack
-    poke_w(32'h0000_0600, 16'hD000);       // entry word: A5
-    poke_w(32'h0000_0602, 16'h60FE);       // stop inside the module
-    poke_w(CODE +  0, 16'h2A7C);           // MOVEA.L #$12345678,A5
-    poke_l(CODE +  2, 32'h1234_5678);
-    poke_w(CODE +  6, 16'h2F3C);           // MOVE.L #$AAAAAAAA,-(A7)
-    poke_l(CODE +  8, 32'hAAAA_AAAA);
-    poke_w(CODE + 12, 16'h06F9);           // CALLM #4,($3000).L
-    poke_w(CODE + 14, 16'h0004);
-    poke_l(CODE + 16, 32'h0000_3000);
-    poke_w(CODE + 20, 16'h45F8);           // LEA ($0022).W,A2
-    poke_w(CODE + 22, 16'h0022);
-    poke_w(CODE + 24, 16'h60FE);
-    acc_cal = 8'h11; acc_status = 8'h04;
-    reset_dut();
-    run_until(32'h0000_0602, 3000, reached);
-    check(reached, "CALLM new stack: the module runs");
-    check(dut.u_seq.isp_q === 32'h0000_2000 - 32'h4 - 32'h18,
-          "CALLM new stack: the frame is on the NEW stack, below the argument");
-    check(peek_l(32'h0000_1FFC) === 32'hAAAA_AAAA,
-          "CALLM new stack: the argument was copied across");
-    check(peek_l(32'h0000_2000 - 32'h4 - 32'h18 + 32'h14) === 32'h0000_0FFC,
-          "CALLM new stack: frame +$14 holds the OLD stack pointer");
-
-    // ... and back.
-    poke_w(32'h0000_0602, 16'h06CD);       // RTM A5
-    acc_dal = 8'h00;
-    reset_dut();
-    run_until(CODE + 24, 4000, reached);
-    check(reached, "RTM type $01: the caller carries on");
-    check(acc_dal === 8'h11, "RTM type $01: DAL was told the saved level");
-    check(dut.u_seq.isp_q === ISP0,
-          "RTM type $01: the stack is the caller's again, past its argument");
-    check(dut.u_seq.areg[5] === 32'h1234_5678, "RTM type $01: A5 is back");
-    check(dut.u_seq.areg[2] === 32'h0000_0022, "RTM type $01: the caller ran on");
-    acc_status = 8'h01;
+    run_until(32'h0000_0502, 2000, reached);
+    check(reached, "RTM: an illegal instruction on the MC68030");
+    check(peek_l(ISP0 - 6) === CODE + 6, "RTM: the frame points at the RTM");
+    check(dut.u_seq.areg[5] === 32'h1234_5678, "RTM: A5 untouched");
 
     // ======================================================================
     // The fast effective-address paths -- doc/timing-divergences.md. Each of

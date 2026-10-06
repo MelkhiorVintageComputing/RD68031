@@ -233,3 +233,50 @@ word, and is restarted by RTE as a pre-instruction exception; "short" in 8.1.8
 means "four-word". `core_exc_tb` checks the four-word frame for all ten format
 codes the MC68030 does not have, and `core_fault_tb` for a long frame of another
 version.
+
+---
+
+## 12. Section 3's MMU instructions are the MC68040's
+
+**Followed: UM 9.8 and PRM 6, "(MC68030 only)" -- PFLUSH by function code and
+mask, PTEST with a function code, a level and an optional address register, and
+neither touching what the other does.**
+
+UM 3.2.10: "The PFLUSH instructions flush the address translation caches (ATCs)
+and can optionally select only nonglobal entries for flushing. PTEST performs a
+search of the address translation tables, storing results in the MMU status
+register and loading the entry into the ATC." Table 3-10 lists PFLUSHA,
+PFLUSHA.N, PFLUSH (An), PFLUSH.N (An) and PTEST (An), and Table 3-14 gives PFLUSH
+the syntaxes PFLUSH (An), PFLUSHN (An), PFLUSHA and PFLUSHAN and PTEST only
+PTESTR (An) and PTESTW (An), with "entry → ATC".
+
+Those are the MC68040's forms. The MC68030 has no global or nonglobal ATC entries
+(UM 9.6 lists "ATC Entries Defined as Shared Globally" among the MC68851 features
+it does not have), and UM 9.8 says of its PTEST: "The PTEST instruction does not
+alter the ATC." PRM 6's MC68030 pages give PFLUSHA, PFLUSH FC,MASK and PFLUSH
+FC,MASK,<ea>; PTESTR and PTESTW FC,<ea>,#level with an optional An; PLOADR and
+PLOADW FC,<ea>; and PMOVE and PMOVEFD -- the forms the assembler produces for
+`-mcpu=68030`, and the encodings `mmu_op` accepts. Table 3-14's PLOAD and PMOVE
+rows agree with section 9.
+
+---
+
+## 13. Which exception a CpID-0 word takes in user mode
+
+**Followed: UM 9.8 and 8.1.5 -- a privilege violation, for every CpID-0 word,
+implemented or not.**
+
+UM 10.5.2.2: "Any F-line operation word with bits [8:6] = 110 or 111 causes the
+MC68030 to initiate exception processing without initiating any communication
+with the coprocessor", in a section about F-line emulator exceptions, and UM
+10.1 calls the CpID-0 words with a nonzero type "unimplemented instructions that
+cause the MC68030 to begin exception processing" without naming the exception.
+UM 9.8 is explicit: "If execution of a[n] unimplemented F-line instruction with
+CpID = 0 is attempted in the user mode, the MC68030 takes a privilege violation
+exception", and in supervisor mode an F-line exception; UM 8.1.5 says the same.
+
+The two readings meet once UM 10.1's first sentence is applied -- "F-line
+operation words, in which the CpID is zero, are not coprocessor instructions
+for the MC68030" -- so section 10's rules about types 110 and 111 are about
+CpIDs 1 to 7. `core_m030_tb` checks a type-001 and a type-111 CpID-0 word in
+each mode.
