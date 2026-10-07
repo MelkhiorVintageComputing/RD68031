@@ -71,9 +71,11 @@ three, and they are not in `make check` for that reason.
 
 ### Mind the host's memory
 
-The build machine has 15 GB and no swap. MAME, the Linux kernel and Verilator builds
-are run one at a time, never alongside each other or alongside `make check`, and with
-bounded parallelism (`-j4` at most; `-j2` for MAME).
+The build machine has 15 GB and no swap, and has crashed out of memory. Heavy jobs —
+MAME, the Linux kernel, Verilator builds, the UAE030 core build — are run one at a time,
+never alongside each other or alongside anything else, with bounded parallelism (`-j4` at
+most; `-j2` for MAME). Simulations that take little memory (the iverilog testbenches,
+the oracle runs) may run up to **4 at a time** in parallel, using at most 4 cores.
 
 ## Scope
 
@@ -150,15 +152,18 @@ make sim COPROCESSOR=1   # every core testbench with the coprocessor interface b
 make check    # the gate: ucode-check, lint, audit, sim, AC timing
 ```
 
-The oracles, none of which is in `check` because each takes minutes. Those whose harness
-does not exist yet fail saying so; `doc/oracles.md` has the state of each.
+The oracles, none of which is in `check` because each takes minutes; `doc/oracles.md`
+has the state of each, and `doc/m6-mismatches.md` what they found.
 
 ```sh
+make uae030           # build the UAE030 oracle and its front-ends (heavy: run it alone)
 make ea               # every addressing mode and extension-word shape, against UAE030
 make vectors OP=alu   # one instruction group, against UAE030
 make vectors-all      # every group there is
 make cosim            # real programs, every register at every instruction
-make cache            # the same results with no cache
+make cosim-long       # ... the whole of each program
+make cputest          # WinUAE's cputest corpus (CPUTEST_SEL=ADD,MOVE.L CPUTEST_MAX=N)
+make cache            # the same results with no instruction cache (ICACHE_ENTRIES=0 and 64)
 make timing-verbose   # the AC solver, with the binding constraint named
 make cycles           # instruction clock counts, each a regression check
 ```

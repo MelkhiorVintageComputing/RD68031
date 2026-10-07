@@ -2,9 +2,16 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright 2026 Romain Dolbeau
 # Source location: https://github.com/MelkhiorVintageComputing/RD68031
-"""Decode a WinUAE cputest data set (DATA_VERSION 24) into per-test records.
+"""Decode a WinUAE cputest data set (DATA_VERSION 24), for people and for the core.
 
-    convert.py DIR/MNEMONIC [--limit N] [--json]
+    convert.py dump DIR MNEMONIC [--limit N] [--json]
+    convert.py bench OUTDIR DIR... [--select ADD,MOVE.L] [--max N]
+
+`dump` prints decoded tests. `bench` writes OUTDIR/cputest.vec, the stream
+sim/tb/core_cputest_tb.sv runs (its format is BENCH_FORMAT below), with
+OUTDIR/lmem<N>.hex and tmem<N>.hex, the memory images of the Nth set, and
+OUTDIR/cputest.idx, which maps a failing test's number back to its
+instruction, sub-test and opcode.
 
 DIR is a generated set, e.g. build/spikes/uae030/cputest/data/3_RD030, holding
 lmem.dat, tmem.dat (memory images) and one sub-directory per instruction with
@@ -23,9 +30,16 @@ cpu_lvl >= 1 and no FPU.  Each test is emitted as a dict:
   mem_writes: [(addr, nbytes, old, new)]
   exception: None, or {vector, extra, frame: {PC, format_vector, addr...}}
 
-Runner conventions (main.c): after the instruction the harness places
-NOP_OPCODE (0x2048, MOVEA.L A0,A0) + ILLEGAL (0x4AFC), or ILLEGAL first,
-alternating per sub-test; normal completion is "exception 4 at end_pc".
+Runner conventions (main.c), which decode() replays and the bench reproduces:
+- after the instruction the runner places NOP_OPCODE (0x2048, MOVEA.L A0,A0)
+  + ILLEGAL (0x4AFC), or ILLEGAL first, alternating per sub-test; normal
+  completion is "exception 4 at end_pc" (+2 when the NOP came first);
+- a branch target holds a NOP or an ILLEGAL, toggled per sub-test;
+- before each test, up to 32 bytes at the user A7 are copied to SSP;
+- each test is entered with an RTE from SSP-8, with USP = A7, ISP = SSP =
+  super_stack - $80 and MSP = super_stack;
+- after each test, each expected memory write is checked and its old value put
+  back; the set-up writes of a test group are rolled back at its end.
 """
 import argparse
 import json
@@ -222,8 +236,10 @@ def opcode_bytes(r, mem, hd):
         v = r.u8()
         off, ln = v >> 5, (v & 31) or 32
     base = hd["opcode_memory_start"] + off
+    b = bytes(r.u8() for _ in range(ln))
     for i in range(ln):
-        mem.write(base + i, 1, r.u8())
+        mem.write(base + i, 1, b[i])
+    return [(base, b)]
 
 
 def parse_exception(r, hd, exc, state):
@@ -274,7 +290,64 @@ def parse_exception(r, hd, exc, state):
     return out
 
 
+NOP_OPCODE, ILLG_OPCODE = 0x2048, 0x4AFC
+
+
+def valid_rw(hd, a):
+    """is_valid_test_addr_readwrite(): one of the three test regions."""
+    a &= hd["addressing_mask"]
+    lo_s, lo_e = hd["test_low_memory_start"], hd["test_low_memory_end"]
+    hi_s, hi_e = hd["test_high_memory_start"], hd["test_high_memory_end"]
+    t_s = hd["test_memory_start"]
+    t_e = t_s + hd["test_memory_size"]
+    return ((lo_s != 0xFFFFFFFF and lo_s <= a < lo_e) or
+            (hi_s != 0xFFFFFFFF and hi_s <= a < hi_e) or (t_s <= a < t_e))
+
+
+def undefined_ccr(name, sr, exc):
+    """The condition codes PRM 4 leaves undefined, as the sweep masks them
+    (tools/vectors/gen.c). The generator sends masks of its own, but not on
+    every test (it left one CHK2 test without), so these are added to them."""
+    base = name.split(".")[0].upper()
+    vec = exc["vector"] if exc else 0
+    if base in ("ABCD", "SBCD", "NBCD"):
+        return 0x000A                       # N and V
+    if base in ("CHK2", "CMP2"):
+        return 0x000A                       # N and V
+    if base == "CHK":
+        return 0x000F                       # N (in bounds), Z, V, C
+    if base in ("DIVU", "DIVS", "DIVL"):
+        if vec == 5:
+            return 0x000E                   # N, Z, V after a divide by zero
+        if sr & 0x0002:
+            return 0x000C                   # N and Z after an overflow
+    return 0
+
+
 def decode(setdir, mnemonic, limit=None):
+    """Replay one instruction's data file the way the runner (main.c) does.
+
+    Every record the runner would execute is yielded, skipped ones included,
+    with what the runner does to memory around it:
+
+      pre   [(addr, bytes)]  written before the test, in order: the set-up
+                             writes of a new test group, the opcode bytes, the
+                             end-of-test sentinel, the branch-target toggle --
+                             and, at the first record after a group, the
+                             restores that ended it
+      copy  (src, dst, n) or None
+                             the runner copies n bytes from the user stack
+                             (A7) to the supervisor stack before every test
+      post  [(addr, bytes)]  written after it: each expected write's old value
+                             (the runner checks the new one, then puts the old
+                             one back), and any opcode bytes the result stream
+                             carries
+      run   False for a test the data file marks skipped (CT_END_SKIP)
+      exp_pc  the PC the core must stop at: the sentinel's address, or the
+              faulting instruction's for an exception (frame PC)
+
+    plus the fields fmt_rec() prints.  A final record with run=False and no
+    test carries the restores of the last group."""
     path = os.path.join(setdir, mnemonic, "0000.dat")
     it = chunks(path)
     hd = parse_header(next(it))
@@ -283,6 +356,18 @@ def decode(setdir, mnemonic, limit=None):
     mem = Memory(setdir, hd)
     count = 0
     state = {}
+    pending = []          # writes waiting for the next record
+    # The runner compares SR under the last ignore mask the stream sent it
+    # (main.c keeps it in a static and only a CT_SR item changes it), so a
+    # test whose SR is not in the result stream inherits the previous mask --
+    # and before the first one, nothing is compared.
+    sr_cmp = 0
+
+    def put(a, n, v):
+        b = bytes(((v >> (8 * (n - 1 - i))) & 0xFF) for i in range(n))
+        pending.append((a, b))
+        mem.write(a, n, v)
+
     for ci, data in enumerate(it):
         r = Reader(data)
         if r.u32() != DATA_VERSION or r.u32() != hd["starttime"]:
@@ -290,12 +375,13 @@ def decode(setdir, mnemonic, limit=None):
         r.u32(), r.u32()
         cur = {"regs": [0] * 16, "sr": hd["interrupt_mask"] << 8, "pc": hd["opcode_memory_start"],
                "endpc": hd["opcode_memory_start"], "srcaddr": 0xFFFFFFFF, "dstaddr": 0xFFFFFFFF,
-               "branchtarget": 0xFFFFFFFF}
+               "branchtarget": 0xFFFFFFFF, "branchtarget_mode": 0}
         startpc = endpc = hd["opcode_memory_start"]
+        lregs = None
         test_no = 0
         while True:
             cur["endpc"], cur["pc"] = endpc, startpc
-            hist = []  # memory set-up, rolled back after the test
+            hist = []  # memory set-up, rolled back after the test group
             # ---- restore_data() stream up to CT_END_INIT ----
             while r.peek() not in (CT_END_INIT, CT_END_FINISH):
                 v = r.peek()
@@ -313,9 +399,10 @@ def decode(setdir, mnemonic, limit=None):
                 elif mode == CT_MEMWRITE:
                     a, size, old, new = mem_record(r, hd)
                     hist.append((a, size, old, new))
-                    mem.write(a, size, new)
+                    put(a, size, new)
                 elif mode == CT_MEMWRITES:
-                    opcode_bytes(r, mem, hd)
+                    for a, b in opcode_bytes(r, mem, hd):
+                        pending.append((a, b))
                 elif mode == CT_EDATA:
                     r.u8(), r.u8(), r.u8()
                 elif mode == CT_CYCLES:
@@ -325,7 +412,22 @@ def decode(setdir, mnemonic, limit=None):
             if r.u8() == CT_END_FINISH:
                 break
             startpc, endpc = cur["pc"], cur["endpc"]
-            lregs = {"regs": list(cur["regs"]), "sr": cur["sr"], "pc": cur["pc"]}
+            if lregs is None:
+                lregs = {"regs": list(cur["regs"]), "sr": cur["sr"], "pc": cur["pc"]}
+            else:
+                # copyregs(&last_regs, &cur_regs): the result stream is a
+                # delta against the group's starting registers
+                lregs = {"regs": list(cur["regs"]), "sr": cur["sr"], "pc": cur["pc"]}
+            stackcopy = 0
+            for i in range(0, 32, 2):
+                if not valid_rw(hd, cur["regs"][15] + i):
+                    break
+                stackcopy += 2
+            validend = 2 if valid_rw(hd, endpc + 2) else (1 if valid_rw(hd, endpc) else 0)
+            original_end = (NOP_OPCODE << 16) | ILLG_OPCODE
+            opcodeend = original_end
+            ssp = (hd["super_stack_memory"] - 0x80) & 0xFFFFFFFF
+            msp = hd["super_stack_memory"]
             extraccr = 0
             while True:
                 sr_mask = ((0x2000 if extraccr & 1 else 0) | (0x4000 if extraccr & 2 else 0) |
@@ -334,12 +436,34 @@ def decode(setdir, mnemonic, limit=None):
                 maxccr = ccrmode & 0x3F
                 for ccrcnt in range(maxccr):
                     ccr = ccrcnt & (maxccr - 1)
+                    if hd["interrupttest"] < 2:
+                        opcodeend = ((opcodeend >> 16) | (opcodeend << 16)) & 0xFFFFFFFF
+                    extra = 2 if (opcodeend >> 16) == NOP_OPCODE else 0
+                    if validend == 2:
+                        put(endpc, 4, opcodeend)
+                    elif validend == 1:
+                        put(endpc, 2, opcodeend >> 16)
+                    bt = cur["branchtarget"]
+                    if bt != 0xFFFFFFFF and not (bt & 1):
+                        if cur["branchtarget_mode"] == 1:
+                            bv = int.from_bytes(mem.read(bt, 4), "big")
+                            put(bt, 4, ((bv >> 16) | (bv << 16)) & 0xFFFFFFFF)
+                        elif cur["branchtarget_mode"] == 2:
+                            bv = int.from_bytes(mem.read(bt, 2), "big")
+                            put(bt, 2, ILLG_OPCODE if bv == NOP_OPCODE else NOP_OPCODE)
+                    test_regs = list(cur["regs"])
+                    copy = None
+                    if stackcopy:
+                        copy = (test_regs[15], ssp, stackcopy)
+                        try:
+                            mem.write(ssp, stackcopy, int.from_bytes(mem.read(test_regs[15], stackcopy), "big"))
+                        except ValueError:
+                            pass
                     if maxccr >= 32:
                         sr = ccr & 0xFF
                     else:
                         sr = 31 if ccr & 1 else 0
                     sr |= sr_mask | (hd["initial_interrupt_mask"] << 8)
-                    test_regs = list(cur["regs"])
                     if hd["interrupttest"] == 1:
                         r.u8()
                     while r.peek() == CT_OVERRIDE_REG:
@@ -358,18 +482,21 @@ def decode(setdir, mnemonic, limit=None):
                     rec = {
                         "name": hd["inst_name"], "file": path, "chunk": ci, "test": test_no,
                         "sub": ccrcnt, "extraccr": extraccr,
-                        "start_pc": startpc, "end_pc": endpc,
+                        "start_pc": startpc, "end_pc": endpc, "end_extra": extra,
                         "opcode": mem.read(startpc, max(0, endpc - startpc)).hex(),
                         "srcaddr": cur["srcaddr"], "dstaddr": cur["dstaddr"],
                         "init": {"D": test_regs[:8], "A": test_regs[8:], "SR": sr,
-                                 "SSP": (hd["super_stack_memory"] - 0x80) & 0xFFFFFFFF,
-                                 "MSP": hd["super_stack_memory"]},
+                                 "SSP": ssp, "MSP": msp},
                         "mem_init": [(a, s, n) for (a, s, o, n) in hist],
                         "expect": None, "mem_writes": [], "exception": None,
+                        "pre": pending, "copy": copy, "post": [], "run": False,
+                        "mem": mem,
                     }
+                    pending = []
                     if r.peek() == CT_END_SKIP:
                         r.u8()
                     else:
+                        rec["run"] = True
                         # ---- validate_test() stream up to CT_END|exc ----
                         skip_regs = False
                         while True:
@@ -390,20 +517,32 @@ def decode(setdir, mnemonic, limit=None):
                                 lregs["regs"][mode], _ = r.value(lregs["regs"][mode])
                             elif mode == CT_SR:
                                 lregs["sr"], _ = r.value(lregs["sr"])
+                                sr_cmp = (~(lregs["sr"] >> 16)) & 0xFFFF
                             elif mode == CT_PC:
                                 lregs["pc"] = r.rel(lregs["pc"])
                             elif mode == CT_CYCLES:
                                 r.value(0)
                             elif mode == CT_MEMWRITE:
-                                rec["mem_writes"].append(mem_record(r, hd))
+                                a, size, old, new = mem_record(r, hd)
+                                rec["mem_writes"].append((a, size, old, new))
+                                rec["post"].append((a, bytes(((old >> (8 * (size - 1 - i))) & 0xFF)
+                                                             for i in range(size))))
+                                mem.write(a, size, old)
                             elif mode == CT_MEMWRITES:
-                                opcode_bytes(r, mem, hd)
+                                rec["post"].extend(opcode_bytes(r, mem, hd))
                             else:
                                 raise ValueError("unexpected result item %02x at %d" % (v, r.p))
                         rec["expect"] = {"D": lregs["regs"][:8], "A": lregs["regs"][8:],
                                          "SR": lregs["sr"] & 0xFFFF,
-                                         "SR_ignore": (lregs["sr"] >> 16) & 0xFFFF,
+                                         "SR_ignore": ((~sr_cmp) | undefined_ccr(
+                                             hd["inst_name"], lregs["sr"],
+                                             rec["exception"])) & 0xFFFF,
                                          "PC": lregs["pc"], "skip_regs": skip_regs}
+                        exc = rec["exception"]
+                        if exc is None:
+                            rec["exp_pc"] = (lregs["pc"] + extra) & 0xFFFFFFFF
+                        else:
+                            rec["exp_pc"] = exc.get("frame", {}).get("PC", 0)
                     yield rec
                     count += 1
                     if limit and count >= limit:
@@ -412,10 +551,17 @@ def decode(setdir, mnemonic, limit=None):
                     r.u8()
                     break
                 extraccr = r.u8()
-            # roll back the memory set-up (restoreahist)
+            # the end of a test group: the sentinel goes back to what it was,
+            # and the set-up writes are rolled back (restoreahist)
+            if validend == 2:
+                put(endpc, 4, original_end)
+            elif validend == 1:
+                put(endpc, 2, original_end >> 16)
             for a, size, old, new in reversed(hist):
-                mem.write(a, size, old)
+                put(a, size, old)
             test_no += 1
+    yield {"name": hd["inst_name"], "run": False, "pre": pending, "copy": None, "post": [],
+           "final": True, "mem": mem}
 
 
 def fmt_rec(t):
@@ -439,18 +585,214 @@ def fmt_rec(t):
     return "\n".join(s)
 
 
+# ---------------------------------------------------------------------------
+# The stream sim/tb/core_cputest_tb.sv reads
+# ---------------------------------------------------------------------------
+BENCH_FORMAT = """
+The bench stream, read positionally with $fscanf("%h"), one record after another
+until kind 3:
+
+  kind                      0 run a test, 1 memory only (a test the runner skips,
+                            or one this conversion samples out), 2 reload the
+                            memory images, 3 the end
+  -- kind 2 only:
+  set                       which images: lmem<set>.hex and tmem<set>.hex
+  npre  (addr byte)*npre    bytes written before the test, in order
+  ncopy (src dst len)*ncopy the runner's user-to-supervisor stack copy
+  -- kind 0 only:
+  id  w0  w1                the test's number in the .idx file, and its first
+                            two instruction words, for messages
+  pc  sr  d0..d7  a0..a7  ssp  msp
+                            the starting state: a7 is the user stack pointer,
+                            ssp the interrupt stack pointer before the runner's
+                            RTE frame is pushed below it
+  vec  epc  efmt  naddr  eaddr
+                            the exception that ends it -- vec 0 is the ILLEGAL
+                            sentinel, taken at epc; otherwise the frame's PC,
+                            format word, and, when naddr is 1, the address
+                            word of a format $2 frame
+  skipregs  ed0..ed7  ea0..ea7  esr  esrmask
+                            the registers at that exception (ea7 = USP), and
+                            the stacked SR under the generator's mask
+  nwr  (addr size new old)*nwr
+                            the memory writes the test must have made
+  -- every kind:
+  npost (addr byte)*npost   bytes written after it (each expected write's old
+                            value goes back, as the runner does)
+"""
+
+
+def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
+    """Convert the named instructions of one set into a bench stream."""
+    nrun = nskip = nsampled = ntrace = nundef = 0
+    tid = tid0
+
+    def undefined(t):
+        """Tests whose result PRM 4 leaves undefined: MULU.L/MULS.L with a
+        64-bit product and Dh = Dl ("the results of the operation are
+        undefined")."""
+        op = bytes.fromhex(t["opcode"])
+        if len(op) >= 4 and (int.from_bytes(op[0:2], "big") & 0xFFC0) == 0x4C00:
+            ext = int.from_bytes(op[2:4], "big")
+            if ext & 0x0400 and (ext >> 12) & 7 == ext & 7:
+                return True
+        return False
+
+    def emit_mem(f, writes):
+        bs = [(a + i, b) for a, data in writes for i, b in enumerate(data)]
+        f.write("%x" % len(bs))
+        for a, b in bs:
+            f.write(" %x %x" % (a, b))
+        f.write("\n")
+
+    for mn in mnemonics:
+        total = 0
+        if max_run:
+            total = sum(1 for t in decode(setdir, mn) if t.get("run"))
+        step = max(1, -(-total // max_run)) if max_run and total > max_run else 1
+        out.write("2\n%x\n0\n0\n0\n" % setno)
+        seen = 0
+        # What the records that are not run do to memory is folded into the
+        # next one that is: the net bytes, read from the replay's own memory,
+        # which holds every write the runner makes (the core's writes in a test
+        # that is not run are the ones it does not make).
+        fold = {}
+
+        def touched(t):
+            for a, data in t["pre"] + t["post"]:
+                for i in range(len(data)):
+                    yield a + i
+            if t["copy"]:
+                for i in range(t["copy"][2]):
+                    yield t["copy"][1] + i
+
+        for t in decode(setdir, mn):
+            run = t["run"]
+            if run and t["exception"] and "trace_sr" in t["exception"]:
+                run = False     # an exception followed by a trace: two frames
+                ntrace += 1
+            if run and undefined(t):
+                run = False
+                nundef += 1
+            if run:
+                if seen % step:
+                    run = False
+                    nsampled += 1
+                seen += 1
+            elif not t.get("final"):
+                nskip += 1
+            if not run:
+                for a in touched(t):
+                    try:
+                        fold[a] = t["mem"].read(a, 1)[0]
+                    except ValueError:
+                        pass
+                if not t.get("final"):
+                    continue
+                out.write("1\n")
+                emit_mem(out, [(a, bytes([v])) for a, v in sorted(fold.items())])
+                out.write("0\n0\n")
+                fold = {}
+                continue
+            out.write("0\n")
+            emit_mem(out, [(a, bytes([v])) for a, v in sorted(fold.items())] + t["pre"])
+            fold = {}
+            if t["copy"]:
+                out.write("1 %x %x %x\n" % t["copy"])
+            else:
+                out.write("0\n")
+            op = bytes.fromhex(t["opcode"]) + bytes(4)
+            i, e, x = t["init"], t["expect"], t["exception"]
+            out.write("%x %x %x\n" % (tid, int.from_bytes(op[0:2], "big"),
+                                      int.from_bytes(op[2:4], "big")))
+            out.write("%x %x %s %s %x %x\n" % (t["start_pc"], i["SR"],
+                      " ".join("%x" % v for v in i["D"]),
+                      " ".join("%x" % v for v in i["A"]), i["SSP"], i["MSP"]))
+            fr = (x or {}).get("frame", {})
+            out.write("%x %x %x %x %x\n" % (x["vector"] if x else 0, t["exp_pc"],
+                      fr.get("format_vector", 0), 1 if "addr" in fr else 0,
+                      fr.get("addr", 0)))
+            out.write("%x %s %s %x %x\n" % (1 if e["skip_regs"] else 0,
+                      " ".join("%x" % v for v in e["D"]),
+                      " ".join("%x" % v for v in e["A"]), e["SR"],
+                      (~e["SR_ignore"]) & 0xFFFF))
+            out.write("%x" % len(t["mem_writes"]))
+            for a, sz, old, new in t["mem_writes"]:
+                out.write(" %x %x %x %x" % (a, sz, new, old))
+            out.write("\n")
+            idx.write("%x %s chunk%d test%d sub%d x%d pc=%08x op=%s\n" % (
+                tid, mn, t["chunk"], t["test"], t["sub"], t["extraccr"],
+                t["start_pc"], t["opcode"]))
+            tid += 1
+            nrun += 1
+            emit_mem(out, t["post"])
+    return nrun, nskip, nsampled, ntrace, nundef
+
+
+def images(setdir, outdir, setno):
+    """lmem.dat and tmem.dat as $readmemh files, and the set's header."""
+    sub = sorted(d for d in os.listdir(setdir) if os.path.isdir(os.path.join(setdir, d)))
+    hd = parse_header(next(chunks(os.path.join(setdir, sub[0], "0000.dat"))))
+    for name in ("lmem", "tmem"):
+        p = os.path.join(setdir, name + ".dat")
+        data = open(p, "rb").read() if os.path.exists(p) else b""
+        with open(os.path.join(outdir, "%s%d.hex" % (name, setno)), "w") as f:
+            f.write("@%x\n" % (0 if name == "lmem" else hd["test_memory_start"]))
+            for i in range(0, len(data), 16):
+                f.write(" ".join("%02x" % b for b in data[i:i + 16]) + "\n")
+    return hd, sub
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("set", help="data/<lvl>_<name> directory")
-    ap.add_argument("mnemonic", help="sub-directory, e.g. ADD.L")
-    ap.add_argument("--limit", type=int, default=20)
-    ap.add_argument("--json", action="store_true", help="one JSON object per line")
-    ap.add_argument("--header", action="store_true", help="print the set header")
+    sp = ap.add_subparsers(dest="cmd")
+    d = sp.add_parser("dump", help="print decoded tests")
+    d.add_argument("set", help="data/<lvl>_<name> directory")
+    d.add_argument("mnemonic", help="sub-directory, e.g. ADD.L")
+    d.add_argument("--limit", type=int, default=20)
+    d.add_argument("--json", action="store_true", help="one JSON object per line")
+    d.add_argument("--header", action="store_true", help="print the set header")
+    b = sp.add_parser("bench", help="write the stream core_cputest_tb reads")
+    b.add_argument("out", help="output directory")
+    b.add_argument("sets", nargs="+", help="data/<lvl>_<name> directories")
+    b.add_argument("--select", default="", help="comma-separated mnemonics or "
+                   "prefixes (ADD matches ADD.B ADD.W ADD.L); empty = all")
+    b.add_argument("--max", type=int, default=0, help="at most this many tests run "
+                   "per instruction, evenly sampled (0 = all)")
     a = ap.parse_args()
-    if a.header:
-        print(json.dumps(parse_header(next(chunks(os.path.join(a.set, a.mnemonic, "0000.dat")))), indent=1))
-    for t in decode(a.set, a.mnemonic, a.limit or None):
-        print(json.dumps(t) if a.json else fmt_rec(t))
+    if a.cmd == "dump":
+        if a.header:
+            print(json.dumps(parse_header(next(chunks(os.path.join(a.set, a.mnemonic, "0000.dat")))), indent=1))
+        for t in decode(a.set, a.mnemonic, a.limit or None):
+            if not t.get("final"):
+                print(json.dumps(t, default=lambda o: o.hex() if isinstance(o, bytes) else str(o))
+                      if a.json else fmt_rec(t))
+        return
+    if a.cmd != "bench":
+        ap.print_help()
+        return
+    sel = [x.strip().upper() for x in a.select.split(",") if x.strip()]
+    os.makedirs(a.out, exist_ok=True)
+    tot = [0, 0, 0, 0, 0]
+    with open(os.path.join(a.out, "cputest.vec"), "w") as out, \
+         open(os.path.join(a.out, "cputest.idx"), "w") as idx, \
+         open(os.path.join(a.out, "cputest.sets"), "w") as sets:
+        sets_ok = [d for d in a.sets
+                   if any(os.path.isdir(os.path.join(d, x)) for x in os.listdir(d))]
+        for si, sdir in enumerate(sets_ok):
+            hd, sub = images(sdir, a.out, si)
+            if sel:
+                sub = [m for m in sub if any(m.upper() == x or m.upper().split(".")[0] == x
+                                             for x in sel)]
+            sets.write("%d %s %x %x %x %x\n" % (si, sdir, hd["test_memory_start"],
+                                                hd["test_memory_size"], hd["super_stack_memory"],
+                                                hd["user_stack_memory"]))
+            r = bench(sdir, sub, out, idx, a.max, si, tot[0])
+            tot = [x + y for x, y in zip(tot, r)]
+        out.write("3\n")
+    print("cputest: %d tests to run; %d skipped by the generator, %d sampled out, "
+          "%d with a trace after an exception, %d whose result the manual leaves "
+          "undefined" % tuple(tot))
 
 
 if __name__ == "__main__":

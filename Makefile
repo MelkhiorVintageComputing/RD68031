@@ -57,7 +57,8 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$(ICACHE_ENTRIES)
 .PHONY: sim-progs
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl paths audit ucode ucode-check sim sim-bus \
-        timing timing-verbose timing-build ea cache cycles cpif check clean
+        timing timing-verbose timing-build ea cache cycles cpif check clean \
+        vectors vectors-all cosim cosim-long cputest
 
 all: lint
 
@@ -77,12 +78,14 @@ help:
 	@echo "  make timing      AC-specification feasibility, all five MC68030EC grades"
 	@echo
 	@echo "The oracles, minutes each:"
+	@echo "  make uae030      build the UAE030 oracle and its front-ends (build/uae030/)"
 	@echo "  make ea          every addressing mode and extension-word shape, against the oracle"
 	@echo "  make vectors     instruction groups against the oracle (OP=alu ...; default OP=$(VECGROUPS))"
 	@echo "  make vectors-all every group, whatever OP says"
 	@echo "  make cosim       real programs, every register at every instruction (STEPS=$(STEPS))"
 	@echo "  make cosim-long  ... the whole of each program"
 	@echo "  make cache       the same results with no instruction cache at all"
+	@echo "  make cputest     WinUAE's cputest corpus (CPUTEST_SEL=ADD,MOVE.L CPUTEST_MAX=$(CPUTEST_MAX))"
 	@echo "  make cycles      instruction clock counts against UM section 8"
 	@echo "  make timing-verbose  the AC solver, with the binding constraint named"
 	@echo
@@ -195,7 +198,7 @@ ucode-check: dirs
 # until M10 adds instructions the generator has no group for yet.
 VECGROUPS := all
 
-TBS := $(filter-out core_ea_tb core_vec_tb core_cosim_tb core_cycles_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
+TBS := $(filter-out core_ea_tb core_vec_tb core_cosim_tb core_cycles_tb core_cputest_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
 
 # COPROCESSOR=1 builds the coprocessor interface into every core testbench, and
 # puts the scripted coprocessor of sim/models/rd68031_cpmodel.sv on the bus.
@@ -267,15 +270,45 @@ paging: dirs
 #
 # RD68021 used Musashi here. Musashi's MC68030 has a stub for an MMU -- no
 # PTEST, no TT0/TT1, no ATC -- and no data cache, so this design does not use
-# it. Its replacement is the WinUAE MC68030 core, built out of tree into
-# build/uae030/ (Inputs/ is immutable) behind a small harness in
-# tools/cosim/uae030/. Until that harness exists every target that needs it
-# says so and fails. doc/oracles.md has the state of each oracle.
+# it. Its replacement is UAE030, the WinUAE MC68030 core as Hatari carries it,
+# built out of tree into build/uae030/ (Inputs/ is immutable) by
+# tools/cosim/uae030/build.sh as one library, libuae030.a, and linked into
+# small front-ends: uae030_trace (cosim), uae030_ea (ea), vectors_gen
+# (vectors) and uae030, a tracer for looking at one program by hand.
+# doc/oracles.md has what it is trusted for.
+#
+# The library is built once and reused: build.sh is incremental, and only runs
+# again when the harness's own glue changes. The generated cores are compiled
+# at -O0/-O1, four at a time, which keeps each compile near 300 MB.
+#
+# The --wrap options let the glue see a misaligned operand as the one operand
+# it is, rather than as the aligned pieces the core splits it into.
 # ---------------------------------------------------------------------------
-OBUILD := $(BUILD)/uae030
+OBUILD  := $(BUILD)/uae030
+OSRC    := tools/cosim/uae030
+comma   := ,
+OWRAP   := mmu030_get_word_unaligned mmu030_get_long_unaligned \
+           mmu030_put_word_unaligned mmu030_put_long_unaligned
+OLDFLAGS := $(addprefix -Wl$(comma)--wrap=,$(OWRAP)) -lm
+OCFLAGS  := -O2 -g -Wall -Wextra -I$(OSRC)
 
-$(OBUILD)/uae030_ea:
-	@echo "FAIL: the UAE030 effective-address generator does not exist yet -- doc/oracles.md"; exit 1
+.PHONY: uae030
+uae030: $(OBUILD)/uae030 $(OBUILD)/uae030_trace $(OBUILD)/uae030_ea $(OBUILD)/vectors_gen
+
+$(OBUILD)/libuae030.a: $(OSRC)/build.sh $(OSRC)/uae030_glue.c $(OSRC)/uae030.h
+	@mkdir -p $(OBUILD)
+	@echo "  uae030: building the oracle core into $(OBUILD)"
+	@JOBS=4 sh $(OSRC)/build.sh $(OBUILD) > $(OBUILD)/build.log 2>&1 \
+	  || { tail -30 $(OBUILD)/build.log; exit 1; }
+
+$(OBUILD)/uae030: $(OSRC)/uae030_main.c $(OBUILD)/libuae030.a
+	@$(CC) $(OCFLAGS) -o $@ $< $(OBUILD)/libuae030.a $(OLDFLAGS)
+
+$(OBUILD)/uae030_trace: $(OSRC)/uae030_trace.c $(OBUILD)/libuae030.a
+	@$(CC) $(OCFLAGS) -o $@ $< $(OBUILD)/libuae030.a $(OLDFLAGS)
+
+$(OBUILD)/uae030_ea: $(OSRC)/uae030_ea.c $(OBUILD)/libuae030.a
+	@$(CC) $(OCFLAGS) -o $@ $< $(OBUILD)/libuae030.a $(OLDFLAGS)
 
 # ---------------------------------------------------------------------------
 # Effective addresses, against the oracle
@@ -293,8 +326,8 @@ ea: dirs $(OBUILD)/uae030_ea
 	 grep -q '^PASS' $(BUILD)/core_ea_tb.log || { tail -3 $(BUILD)/core_ea_tb.log; exit 1; }
 	@tail -2 $(BUILD)/core_ea_tb.log
 
-$(OBUILD)/vectors_gen:
-	@echo "FAIL: the UAE030 vector generator does not exist yet -- doc/oracles.md"; exit 1
+$(OBUILD)/vectors_gen: tools/vectors/gen.c $(OBUILD)/libuae030.a
+	@$(CC) $(OCFLAGS) -o $@ $< $(OBUILD)/libuae030.a $(OLDFLAGS)
 
 # ---------------------------------------------------------------------------
 # The per-opcode sweep
@@ -318,7 +351,7 @@ vectors: dirs $(OBUILD)/vectors_gen
 	    $(RTL) sim/models/*.sv sim/tb/core_vec_tb.sv \
 	    > $(BUILD)/core_vec_tb.build.log 2>&1 \
 	  || { grep -v $(NOTES) $(BUILD)/core_vec_tb.build.log; exit 1; }
-	@vvp $(BUILD)/core_vec_tb.vvp +vec=$(BUILD)/vectors.hex \
+	@vvp $(BUILD)/core_vec_tb.vvp +vec=$(BUILD)/vectors.hex +faillog=$(BUILD)/vectors.fail \
 	    > $(BUILD)/core_vec_tb.log 2>&1; \
 	 grep -E '^  FAIL' $(BUILD)/core_vec_tb.log | head -20; \
 	 grep -q '^PASS' $(BUILD)/core_vec_tb.log || { tail -3 $(BUILD)/core_vec_tb.log; exit 1; }
@@ -326,9 +359,6 @@ vectors: dirs $(OBUILD)/vectors_gen
 
 vectors-all: dirs
 	@$(MAKE) --no-print-directory vectors OP=all
-
-$(OBUILD)/uae030_trace:
-	@echo "FAIL: the UAE030 trace harness does not exist yet -- doc/oracles.md"; exit 1
 
 # ---------------------------------------------------------------------------
 # Real programs, against the oracle at every instruction boundary
@@ -372,7 +402,11 @@ $(BUILD)/programs/%.bin: $(BUILD)/programs/%.elf
 $(BUILD)/programs/%.hex: $(BUILD)/programs/%.elf
 	@$(CROSS)objcopy -O verilog --verilog-data-width=1 $< $@
 
-$(BUILD)/programs/%.trc: $(BUILD)/programs/%.bin $(OBUILD)/uae030_trace
+# A trace is as long as STEPS says, so a change of STEPS (cosim-long) remakes it.
+$(BUILD)/programs/.steps-$(STEPS):
+	@mkdir -p $(BUILD)/programs; rm -f $(BUILD)/programs/.steps-*; touch $@
+
+$(BUILD)/programs/%.trc: $(BUILD)/programs/%.bin $(OBUILD)/uae030_trace $(BUILD)/programs/.steps-$(STEPS)
 	@$(OBUILD)/uae030_trace $< $(STEPS) > $@ 2> $(BUILD)/programs/$*.trace.log \
 	  || { cat $(BUILD)/programs/$*.trace.log; exit 1; }
 	@sed 's/^/  /' $(BUILD)/programs/$*.trace.log
@@ -388,7 +422,7 @@ cosim: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(PROGS)) \
 	      +trace=$(BUILD)/programs/$$p.trc > $(BUILD)/cosim-$$p.log 2>&1; \
 	  grep -E '^  FAIL' $(BUILD)/cosim-$$p.log | head -5; \
 	  if grep -q '^PASS' $(BUILD)/cosim-$$p.log; then \
-	    echo "  PASS: $$p -- $$(sed -n 's/^core_cosim_tb: \([0-9]*\) instructions.*/\1/p' $(BUILD)/cosim-$$p.log) instructions"; \
+	    echo "  PASS: $$p -- $$(sed -n 's/^core_cosim_tb: \([0-9]*\) instructions, every.*/\1/p' $(BUILD)/cosim-$$p.log) instructions"; \
 	  else \
 	    echo "  FAIL: $$p"; tail -3 $(BUILD)/cosim-$$p.log; ok=0; \
 	  fi; \
@@ -427,13 +461,30 @@ NOCACHE := $(BUILD)/nocache
 
 cache: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(PROGS)) \
             $(patsubst %,$(BUILD)/programs/%.trc,$(PROGS))
+	@mkdir -p $(NOCACHE); rm -f $(NOCACHE)/cache.failed
 	@echo "  -- ICACHE_ENTRIES=0: the directed testbenches"
-	@$(MAKE) --no-print-directory sim ICACHE_ENTRIES=0 BUILD=$(NOCACHE)
+	@$(MAKE) --no-print-directory sim ICACHE_ENTRIES=0 BUILD=$(NOCACHE) \
+	  || echo sim > $(NOCACHE)/cache.failed
 	@echo "  -- ICACHE_ENTRIES=0: the sweep and the effective addresses"
-	@$(MAKE) --no-print-directory vectors ea ICACHE_ENTRIES=0 BUILD=$(NOCACHE) \
-	    OBUILD=$(OBUILD)
+	@$(MAKE) --no-print-directory vectors ICACHE_ENTRIES=0 BUILD=$(NOCACHE) \
+	    OBUILD=$(OBUILD) || true
+	@# Mismatches the cached core has as well are the RTL's, not the cache's:
+	@# the failure list is compared with the last full sweep of the cached core
+	@# ($(BUILD)/vectors.fail, from `make vectors-all`), and only a difference
+	@# counts here. Without that list the sweep has to pass outright.
+	@if [ -f $(BUILD)/vectors.fail ]; then \
+	  if diff -q <(cut -d' ' -f1-3 $(BUILD)/vectors.fail) <(cut -d' ' -f1-3 $(NOCACHE)/vectors.fail) \
+	      > /dev/null; then echo "  the sweep fails the same $$(wc -l < $(NOCACHE)/vectors.fail) vectors with the cache and without"; \
+	  else echo "  FAIL: the sweep fails different vectors with the cache and without (run make vectors-all first?)"; \
+	       echo sweep-differs >> $(NOCACHE)/cache.failed; fi; \
+	else grep -q '^PASS' $(NOCACHE)/core_vec_tb.log \
+	  || { echo "  FAIL: the sweep without the cache, and no $(BUILD)/vectors.fail to compare with"; \
+	       echo vectors >> $(NOCACHE)/cache.failed; }; fi
+	@$(MAKE) --no-print-directory ea ICACHE_ENTRIES=0 BUILD=$(NOCACHE) \
+	    OBUILD=$(OBUILD) || echo ea >> $(NOCACHE)/cache.failed
 	@echo "  -- the programs, both ways"
-	@ok=1; for e in 0 64; do \
+	@ok=1; test -f $(NOCACHE)/cache.failed && { echo "  (failed so far: $$(tr '\n' ' ' < $(NOCACHE)/cache.failed))"; ok=0; }; \
+	for e in 0 64; do \
 	  iverilog -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$$e -I sim/tb \
 	      -o $(NOCACHE)/cosim$$e.vvp -s core_cosim_tb \
 	      $(RTL) sim/models/*.sv sim/tb/core_cosim_tb.sv \
@@ -455,6 +506,58 @@ cache: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(PROGS)) \
 
 cosim-long: dirs
 	@$(MAKE) --no-print-directory cosim STEPS=4000000
+
+# ---------------------------------------------------------------------------
+# WinUAE's cputest corpus, on the core
+#
+# cputestgen (built out of tree into build/cputest/gen/ by
+# tools/cputest/build.sh) writes a 68030 corpus from CPUTEST_INI into
+# build/cputest/run/data/; tools/cputest/convert.py replays its runner's
+# bookkeeping and writes the stream core_cputest_tb runs. doc/oracles.md has
+# the conventions it reproduces.
+#
+#   CPUTEST_INI=<file>   the generator's ini (default tools/cputest/cputestgen.ini)
+#   CPUTEST_SEL=ADD,MOVE.L   only these instructions (a bare name takes every size)
+#   CPUTEST_MAX=N        at most N tests run per instruction, sampled evenly
+#                        across its corpus; 0 runs every one (hours)
+#   CPUTEST_TIMEOUT=s    the generator's time limit per instruction (default 120);
+#                        one that runs out is listed and left out
+#
+# The corpus is regenerated only when the ini or the generator changes.
+# ---------------------------------------------------------------------------
+CTBUILD     := $(BUILD)/cputest
+CPUTEST_INI ?= tools/cputest/cputestgen.ini
+CPUTEST_SEL ?=
+CPUTEST_MAX ?= 40
+
+$(CTBUILD)/gen/cputestgen: tools/cputest/build.sh tools/cputest/compat/cputest_compat.h \
+                           tools/cputest/compat/ua_stub.cpp
+	@mkdir -p $(CTBUILD)/gen
+	@echo "  cputest: building cputestgen into $(CTBUILD)/gen"
+	@JOBS=3 sh tools/cputest/build.sh $(CTBUILD)/gen > $(CTBUILD)/gen.log 2>&1 \
+	  || { tail -30 $(CTBUILD)/gen.log; exit 1; }
+
+$(CTBUILD)/run/stamp: $(CTBUILD)/gen/cputestgen $(CPUTEST_INI) tools/cputest/generate.sh
+	@rm -rf $(CTBUILD)/run
+	@mkdir -p $(CTBUILD)/run/data
+	@cp $(CPUTEST_INI) $(CTBUILD)/run/cputestgen.ini
+	@echo "  cputest: generating the corpus from $(CPUTEST_INI), one instruction at a time"
+	@set -o pipefail; sh tools/cputest/generate.sh $(CTBUILD)/gen/cputestgen $(CPUTEST_INI) $(CTBUILD)/run \
+	  | sed 's/^/  /'
+	@touch $@
+
+cputest: dirs $(CTBUILD)/run/stamp
+	@python3 tools/cputest/convert.py bench $(CTBUILD) $(CTBUILD)/run/data/*/ \
+	    --select "$(CPUTEST_SEL)" --max $(CPUTEST_MAX) | sed 's/^/  /'
+	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_cputest_tb.vvp -s core_cputest_tb \
+	    $(RTL) sim/models/*.sv sim/tb/core_cputest_tb.sv \
+	    > $(BUILD)/core_cputest_tb.build.log 2>&1 \
+	  || { grep -v $(NOTES) $(BUILD)/core_cputest_tb.build.log; exit 1; }
+	@vvp $(BUILD)/core_cputest_tb.vvp +vec=$(CTBUILD)/cputest.vec +mem=$(CTBUILD) \
+	    +faillog=$(CTBUILD)/cputest.fail > $(BUILD)/core_cputest_tb.log 2>&1; \
+	 grep -E '^  FAIL' $(BUILD)/core_cputest_tb.log | head -25; \
+	 grep -E '^core_cputest_tb: ' $(BUILD)/core_cputest_tb.log; \
+	 grep -q '^PASS' $(BUILD)/core_cputest_tb.log || { tail -2 $(BUILD)/core_cputest_tb.log; exit 1; }
 
 # ---------------------------------------------------------------------------
 # AC timing, against the MC68030EC data sheet

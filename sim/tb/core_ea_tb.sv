@@ -2,7 +2,7 @@
 // Copyright 2026 Romain Dolbeau
 // Source location: https://github.com/MelkhiorVintageComputing/RD68031
 
-// RD68031 -- every addressing mode, against Musashi.
+// RD68031 -- every addressing mode, against UAE030.
 //
 // There are two instruments. LEA <ea>,A0 -- PRM 4, "the effective address is
 // loaded into the specified address register" -- computes an address and does
@@ -12,12 +12,12 @@
 // measured with MOVE.L <ea>,D0, and show up in the final register state and in
 // the access list rather than in the address.
 //
-// tools/cosim/musashi_ea.c builds one test per (mode, extension-word shape),
-// runs it through Musashi as an MC68020 and records the address it produced and
+// tools/cosim/uae030/uae030_ea.c builds one test per (mode, extension-word
+// shape), runs it through UAE030 as an MC68030 and records the address it produced and
 // every data access it made on the way. This replays each one through the core
 // and compares both.
 //
-// Musashi is an ORACLE, not a source. Where the two disagree the manual decides;
+// UAE030 is an ORACLE, not a source. Where the two disagree the manual decides;
 // PRM section 2 is what both were written from, independently.
 
 `timescale 1ns / 1ps
@@ -57,7 +57,7 @@ module core_ea_tb;
       $finish;
     end
     n = $fscanf(vec, "%h", ntests);
-    $display("core_ea_tb: %0d effective-address vectors from Musashi", ntests);
+    $display("core_ea_tb: %0d effective-address vectors from UAE030", ntests);
 
     passed = 0;
     failed = 0;
@@ -97,7 +97,7 @@ module core_ea_tb;
       poke_l(32'h0000_0004, PROG_BASE);            // initial program counter
       for (n = 0; n < 6; n = n + 1)
         poke_w(PROG_BASE + 32'(n * 2), w[n][15:0]);
-      // A NOP, which is what the oracle writes there (tools/cosim/musashi_ea.c).
+      // A NOP, which is what the oracle writes there (tools/cosim/uae030/uae030_ea.c).
       // Memory-indirect modes read memory to build an address and nothing stops
       // one of them reading the word after the instruction, so the two memories
       // have to agree here as everywhere else. run_until stops the core at this
@@ -140,14 +140,14 @@ module core_ea_tb;
         failed = failed + 1;
         if (mismatch_shown < 12) begin
           mismatch_shown = mismatch_shown + 1;
-          $display("  FAIL: vector %0d (%04h %04h %04h): Musashi says %08h, this core says %08h",
+          $display("  FAIL: vector %0d (%04h %04h %04h): UAE030 says %08h, this core says %08h",
                    idx, w[0][15:0], w[1][15:0], w[2][15:0], want_ea, got_ea);
         end
       end else if (nacc != nreads) begin
         failed = failed + 1;
         if (mismatch_shown < 12) begin
           mismatch_shown = mismatch_shown + 1;
-          $display("  FAIL: vector %0d: Musashi made %0d data accesses, this core made %0d",
+          $display("  FAIL: vector %0d: UAE030 made %0d data accesses, this core made %0d",
                    idx, nreads, nacc);
         end
       end else begin
@@ -158,7 +158,7 @@ module core_ea_tb;
           failed = failed + 1;
           if (mismatch_shown < 12) begin
             mismatch_shown = mismatch_shown + 1;
-            $display("  FAIL: vector %0d: the access list differs -- Musashi read %08h in %s space, this core read %08h in %s space",
+            $display("  FAIL: vector %0d: the access list differs -- UAE030 read %08h in %s space, this core read %08h in %s space",
                      idx, radd[0], rprog[0] ? "program" : "data",
                      acc_addr[0], acc_prog[0] ? "program" : "data");
           end
@@ -175,10 +175,10 @@ module core_ea_tb;
             if (mismatch_shown < 12) begin
               mismatch_shown = mismatch_shown + 1;
               if (bad_reg == 7)
-                $display("  FAIL: vector %0d (%04h %04h): D0 is %08h, Musashi says %08h",
+                $display("  FAIL: vector %0d (%04h %04h): D0 is %08h, UAE030 says %08h",
                          idx, w[0][15:0], w[1][15:0], dut.u_seq.dreg[0], fd0);
               else
-                $display("  FAIL: vector %0d (%04h %04h): A%0d is %08h, Musashi says %08h",
+                $display("  FAIL: vector %0d (%04h %04h): A%0d is %08h, UAE030 says %08h",
                          idx, w[0][15:0], w[1][15:0], bad_reg,
                          dut.u_seq.areg[bad_reg], fav[bad_reg]);
             end

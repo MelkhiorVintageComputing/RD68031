@@ -9,25 +9,33 @@
 # replaced by compat/ua_stub.cpp.  The file list follows
 # od-win32/cputester/cputester.vcxproj.
 #
-#   tools/cputest/build.sh [OUT]     (default OUT = build/spikes/uae030/cputest-build)
+#   tools/cputest/build.sh [OUT]     (default OUT = build/cputest/gen)
+#
+# Incremental: the source copy is made once, gencpu.cpp is patched only if it
+# is not already, and only stale objects are recompiled.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../.." && pwd)
-OUT=${1:-$TOP/build/spikes/uae030/cputest-build}
+OUT=${1:-$TOP/build/cputest/gen}
 JOBS=${JOBS:-3}
 W=$TOP/Inputs/ref/winuae
 mkdir -p "$OUT/obj" "$OUT/compat/machdep"
+OUT=$(cd "$OUT" && pwd)
 if [ ! -d "$OUT/src" ]; then
 	mkdir -p "$OUT/src"
 	(cd "$W" && tar cf - --exclude=.git .) | (cd "$OUT/src" && tar xf -)
 fi
-cp "$HERE/compat/cputest_compat.h" "$HERE/compat/ua_stub.cpp" "$OUT/compat/"
+for f in "$HERE/compat/cputest_compat.h" "$HERE/compat/ua_stub.cpp"; do
+	cmp -s "$f" "$OUT/compat/$(basename "$f")" || cp "$f" "$OUT/compat/"
+done
 # cputest.h declares 'int cctrue(int)': use the Windows machdep header (extern
 # cctrue, defined in newcpu_common.cpp) rather than od-unix's static inline one.
-cp "$W/od-win32/machdep/m68k.h" "$OUT/compat/machdep/m68k.h"
+cmp -s "$W/od-win32/machdep/m68k.h" "$OUT/compat/machdep/m68k.h" \
+  || cp "$W/od-win32/machdep/m68k.h" "$OUT/compat/machdep/m68k.h"
 
 cd "$OUT/src"
-sed -i 's/^#define CPU_TESTER 0$/#define CPU_TESTER 1/' gencpu.cpp
+grep -q '^#define CPU_TESTER 1$' gencpu.cpp \
+  || sed -i 's/^#define CPU_TESTER 0$/#define CPU_TESTER 1/' gencpu.cpp
 grep -q '^#define CPU_TESTER 1$' gencpu.cpp
 CXX=${CXX:-g++}
 INC="-I. -Iinclude -Iod-unix -Iod-unix/include"

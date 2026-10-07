@@ -111,6 +111,14 @@ assign dbus = d_oe ? d_o : 32'bz;
 `define TB_ICACHE_ENTRIES 64
 `endif
 
+// The 32-bit port's store, as a power of two of bytes. 64 KB is what every
+// testbench and program here was written for (the poke and peek tasks below
+// index it with sixteen bits); core_cputest_tb needs the cputest corpus's
+// memory map and asks for more before including this.
+`ifndef TB_S32_ABITS
+`define TB_S32_ABITS 16
+`endif
+
 // The coprocessor interface is built only when a testbench asks for it, and a
 // testbench that does gets the scripted coprocessor of sim/models/rd68031_cpmodel.sv
 // at CpID 1 as well.
@@ -187,7 +195,7 @@ assign dsack_cp = 2'b11;
 assign dsack_n_i = dsack32 & dsack16 & dsack8 & dsack_ext & dsack_cp;
 
 rd68031_slave #(.PORT_BYTES (4), .WAITS (0), .BASE (32'h0000_0000),
-                .MASK (32'hF000_0000), .ABITS (16)) s32 (
+                .MASK (32'hF000_0000), .ABITS (`TB_S32_ABITS)) s32 (
     .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
     .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),
     .d_i (dbus), .wr_inhibit_i (wr_protect && !berr_n_i),
@@ -419,7 +427,7 @@ endtask
 // separates the two is who asked, and the bus unit already knows -- op_isfetch
 // tells its fault path which of its two requesters to report to.
 // ---------------------------------------------------------------------------
-localparam int MAXACC = 16;
+localparam int MAXACC = 24;
 int unsigned nacc;
 logic [31:0] acc_addr [0:MAXACC-1];
 logic        acc_rw   [0:MAXACC-1];

@@ -33,17 +33,31 @@
 
 static uint8_t *ram;
 static uint32_t ram_size;
+static uint32_t alias_window;
 static uae030_insn_hook insn_hook;
 static uae030_bus_hook bus_hook;
+static uae030_op_hook op_hook;
+static uae030_exc_hook exc_hook;
 static void *hook_user;
 static jmp_buf run_exit;
 static int run_status;
 static uint64_t insn_count;
 
 /* Set by the patched cpummu030.c right before each physical access
- * (uae030_bus_fc = fc), and to -1 around table-search descriptor accesses. */
+ * (uae030_bus_fc = fc), around table-search descriptor accesses
+ * (uae030_bus_walk) and around instruction fetches (uae030_bus_ifetch). */
 int uae030_bus_fc = 5;
 int uae030_bus_walk = 0;
+int uae030_bus_ifetch = 0;
+
+/* A misaligned operand in progress: the core splits it into aligned bus
+ * accesses inside mmu030_{get,put}_*_unaligned, which are wrapped at link
+ * time (-Wl,--wrap, see UAE030_LDFLAGS in the Makefile) so that the pieces
+ * are reported to the operand hook as the one operand they are. */
+static struct {
+	int active, have, berr, fc;
+	uint32_t pa;
+} op_pend;
 
 /* ------------------------------------------------------------------ */
 /* Hatari / UAE globals the core expects                               */
@@ -99,7 +113,17 @@ bool VDI_AES_Entry(void) { return false; }
 const char *Symbols_GetByCpuAddress(uint32_t a, int t) { (void)a; (void)t; return NULL; }
 bool Profile_CpuAddr_HasData(uint32_t a) { (void)a; return false; }
 int Profile_CpuAddr_DataStr(char *b, int m, uint32_t a) { (void)b; (void)m; (void)a; return 0; }
-void DebugUI_Exceptions(int nr, long pc) { (void)nr; (void)pc; }
+static void op_flush(void);
+/* Called by the core when exception processing starts (exception_debug). A
+ * misaligned operand cut short by a bus error is reported first, so that the
+ * operand list stays in bus order ahead of the frame the exception writes. */
+void DebugUI_Exceptions(int nr, long pc)
+{
+	(void)pc;
+	op_flush();
+	if (exc_hook)
+		exc_hook(nr, hook_user);
+}
 void DebugUI(int r) { (void)r; }
 void DebugCpu_Check(void) {}
 void Dialog_HaltDlg(void)
@@ -162,46 +186,140 @@ TCHAR *buf_out(TCHAR *buffer, int *bufsize, const TCHAR *format, ...)
 	return buffer + strlen(buffer);
 }
 
+
 /* ------------------------------------------------------------------ */
-/* Flat physical memory                                                */
+/* Physical memory                                                     */
 
 static void bus_report(uint32_t pa, int size, int write, uint32_t data, int berr)
 {
+	int kind = uae030_bus_walk ? UAE030_KIND_WALK
+		 : uae030_bus_ifetch ? UAE030_KIND_IFETCH : UAE030_KIND_CPU;
+	int fc = uae030_bus_walk ? 5 : uae030_bus_fc;
 	if (bus_hook)
-		bus_hook(pa, size, write, data, uae030_bus_walk ? 5 : uae030_bus_fc,
-			 uae030_bus_walk ? UAE030_KIND_WALK : UAE030_KIND_CPU, berr, hook_user);
+		bus_hook(pa, size, write, data, fc, kind, berr, hook_user);
+	if (kind != UAE030_KIND_CPU)
+		return;
+	if (op_pend.active) {
+		/* one piece of a misaligned operand: remember where it began */
+		if (!op_pend.have) {
+			op_pend.have = 1;
+			op_pend.pa = pa;
+			op_pend.fc = fc;
+		}
+		op_pend.berr |= berr;
+		return;
+	}
+	if (op_hook)
+		op_hook(pa, size, write, data, fc, berr, hook_user);
+}
+
+/* A misaligned operand, bracketing the core's own split. */
+static int op_size, op_write;
+static uint32_t op_value;
+
+static void op_begin(int size, int write, uint32_t value)
+{
+	op_pend.active = 1;
+	op_pend.have = 0;
+	op_pend.berr = 0;
+	op_size = size;
+	op_write = write;
+	op_value = value;
+}
+
+static void op_end(uint32_t value)
+{
+	op_pend.active = 0;
+	if (op_pend.have && op_hook)
+		op_hook(op_pend.pa, op_size, op_write, value, op_pend.fc, op_pend.berr, hook_user);
+	op_pend.have = 0;
+}
+
+/* An operand the core abandoned part way through (a bus error longjmps out
+ * of the split): report what it reached, once. */
+static void op_flush(void)
+{
+	if (op_pend.active)
+		op_end(op_write ? op_value : 0);
+}
+
+extern uae_u16 __real_mmu030_get_word_unaligned(uaecptr, uae_u32, int);
+extern uae_u32 __real_mmu030_get_long_unaligned(uaecptr, uae_u32, int);
+extern void __real_mmu030_put_word_unaligned(uaecptr, uae_u16, uae_u32, int);
+extern void __real_mmu030_put_long_unaligned(uaecptr, uae_u32, uae_u32, int);
+
+uae_u16 __wrap_mmu030_get_word_unaligned(uaecptr a, uae_u32 fc, int fl)
+{
+	op_begin(2, 0, 0);
+	uae_u16 v = __real_mmu030_get_word_unaligned(a, fc, fl);
+	op_end(v);
+	return v;
+}
+uae_u32 __wrap_mmu030_get_long_unaligned(uaecptr a, uae_u32 fc, int fl)
+{
+	op_begin(4, 0, 0);
+	uae_u32 v = __real_mmu030_get_long_unaligned(a, fc, fl);
+	op_end(v);
+	return v;
+}
+void __wrap_mmu030_put_word_unaligned(uaecptr a, uae_u16 v, uae_u32 fc, int fl)
+{
+	op_begin(2, 1, v);
+	__real_mmu030_put_word_unaligned(a, v, fc, fl);
+	op_end(v);
+}
+void __wrap_mmu030_put_long_unaligned(uaecptr a, uae_u32 v, uae_u32 fc, int fl)
+{
+	op_begin(4, 1, v);
+	__real_mmu030_put_long_unaligned(a, v, fc, fl);
+	op_end(v);
+}
+
+/* The physical address map: RAM from 0, or a window folded onto it. */
+static inline int map(uint32_t a, int size, uint32_t *off)
+{
+	if (alias_window && a < alias_window)
+		a %= ram_size;
+	if (a < ram_size && (uint64_t)a + size <= ram_size) {
+		*off = a;
+		return 1;
+	}
+	return 0;
 }
 
 static inline bool in_ram(uint32_t a, int size)
 {
-	return a < ram_size && (uint64_t)a + size <= ram_size;
+	uint32_t o;
+	return map(a, size, &o);
 }
 
 static uint32_t phys_read(uint32_t a, int size)
 {
-	if (!in_ram(a, size)) {
-		bool ins = !uae030_bus_walk && (uae030_bus_fc & 3) == 2;
+	uint32_t o;
+	if (!map(a, size, &o)) {
+		bool ins = uae030_bus_ifetch || (!uae030_bus_walk && (uae030_bus_fc & 3) == 2);
 		bus_report(a, size, 0, 0, 1);
 		hardware_exception2(a, 0, true, ins, size == 1 ? sz_byte : size == 2 ? sz_word : sz_long);
 		return 0xffffffff;
 	}
 	uint32_t v = 0;
 	for (int i = 0; i < size; i++)
-		v = (v << 8) | ram[a + i];
+		v = (v << 8) | ram[o + i];
 	bus_report(a, size, 0, v, 0);
 	return v;
 }
 
 static void phys_write(uint32_t a, int size, uint32_t v)
 {
-	if (!in_ram(a, size)) {
+	uint32_t o;
+	if (!map(a, size, &o)) {
 		bus_report(a, size, 1, v, 1);
 		hardware_exception2(a, v, false, false, size == 1 ? sz_byte : size == 2 ? sz_word : sz_long);
 		return;
 	}
 	bus_report(a, size, 1, v, 0);
 	for (int i = size - 1; i >= 0; i--) {
-		ram[a + i] = (uint8_t)v;
+		ram[o + i] = (uint8_t)v;
 		v >>= 8;
 	}
 }
@@ -209,8 +327,21 @@ static void phys_write(uint32_t a, int size, uint32_t v)
 uae_u32 memory_get_long(uaecptr a) { return phys_read(a, 4); }
 uae_u32 memory_get_word(uaecptr a) { return phys_read(a, 2); }
 uae_u32 memory_get_byte(uaecptr a) { return phys_read(a, 1); }
-uae_u32 memory_get_longi(uaecptr a) { return phys_read(a, 4); }
-uae_u32 memory_get_wordi(uaecptr a) { return phys_read(a, 2); }
+/* The core reads the instruction stream through these when it bypasses the
+ * MMU's fetch routines -- the instruction cache's burst fill does -- so they
+ * are instruction fetches whatever the last function code was. */
+static uint32_t ifetch_read(uint32_t a, int size)
+{
+	int f = uae030_bus_ifetch, fc = uae030_bus_fc;
+	uae030_bus_ifetch = 1;
+	uae030_bus_fc = regs.s ? 6 : 2;
+	uint32_t v = phys_read(a, size);
+	uae030_bus_ifetch = f;
+	uae030_bus_fc = fc;
+	return v;
+}
+uae_u32 memory_get_longi(uaecptr a) { return ifetch_read(a, 4); }
+uae_u32 memory_get_wordi(uaecptr a) { return ifetch_read(a, 2); }
 void memory_put_long(uaecptr a, uae_u32 v) { phys_write(a, 4, v); }
 void memory_put_word(uaecptr a, uae_u32 v) { phys_write(a, 2, v & 0xffff); }
 void memory_put_byte(uaecptr a, uae_u32 v) { phys_write(a, 1, v & 0xff); }
@@ -227,14 +358,15 @@ void wait_cpu_cycle_write(uaecptr a, int mode, uae_u32 v)
 uae_u32 wait_cpu_cycle_read_ce020(uaecptr a, int mode) { return wait_cpu_cycle_read(a, mode); }
 void wait_cpu_cycle_write_ce020(uaecptr a, int mode, uae_u32 v) { wait_cpu_cycle_write(a, mode, v); }
 
-uae_u8 *memory_get_real_address(uaecptr a) { return in_ram(a, 1) ? ram + a : NULL; }
+uae_u8 *memory_get_real_address(uaecptr a) { uint32_t o; return map(a, 1, &o) ? ram + o : NULL; }
 int memory_valid_address(uaecptr a, uae_u32 s) { return in_ram(a, s); }
 void memory_clear(void) { /* keep the loaded image across the reset */ }
 
 /* debugger / logging peeks: no bus activity */
-uint32_t STMemory_ReadLong(uint32_t a) { return in_ram(a, 4) ? (ram[a] << 24) | (ram[a + 1] << 16) | (ram[a + 2] << 8) | ram[a + 3] : 0; }
-uint16_t STMemory_ReadWord(uint32_t a) { return in_ram(a, 2) ? (ram[a] << 8) | ram[a + 1] : 0; }
-uint8_t STMemory_ReadByte(uint32_t a) { return in_ram(a, 1) ? ram[a] : 0; }
+static uint8_t peek8(uint32_t a) { uint32_t o; return map(a, 1, &o) ? ram[o] : 0; }
+uint32_t STMemory_ReadLong(uint32_t a) { return (peek8(a) << 24) | (peek8(a + 1) << 16) | (peek8(a + 2) << 8) | peek8(a + 3); }
+uint16_t STMemory_ReadWord(uint32_t a) { return (peek8(a) << 8) | peek8(a + 1); }
+uint8_t STMemory_ReadByte(uint32_t a) { return peek8(a); }
 
 static uae_u32 REGPARAM2 flat_lget(uaecptr a) { return phys_read(a, 4); }
 static uae_u32 REGPARAM2 flat_wget(uaecptr a) { return phys_read(a, 2); }
@@ -243,7 +375,7 @@ static void REGPARAM2 flat_lput(uaecptr a, uae_u32 v) { phys_write(a, 4, v); }
 static void REGPARAM2 flat_wput(uaecptr a, uae_u32 v) { phys_write(a, 2, v & 0xffff); }
 static void REGPARAM2 flat_bput(uaecptr a, uae_u32 v) { phys_write(a, 1, v & 0xff); }
 static int REGPARAM2 flat_check(uaecptr a, uae_u32 s) { return in_ram(a, s); }
-static uae_u8 *REGPARAM2 flat_xlate(uaecptr a) { return in_ram(a, 1) ? ram + a : ram; }
+static uae_u8 *REGPARAM2 flat_xlate(uaecptr a) { uint32_t o; return map(a, 1, &o) ? ram + o : ram; }
 
 static addrbank flat_bank = {
 	flat_lget, flat_wget, flat_bget, flat_lput, flat_wput, flat_bput,
@@ -261,6 +393,7 @@ void uae030_insn_boundary(void)
 {
 	static int last_dh, last_dm, last_ih, last_im;
 	uae030_state s;
+	op_flush();
 	uae030_get_state(&s);
 	s.d_hit = CpuInstruction.D_Cache_hit - last_dh;
 	s.d_miss = CpuInstruction.D_Cache_miss - last_dm;
@@ -308,6 +441,7 @@ void uae030_init(uint32_t ram_bytes, int data_cache)
 	init_m68k();
 }
 
+void uae030_set_alias(uint32_t window) { alias_window = window; }
 uint8_t *uae030_ram(void) { return ram; }
 uint32_t uae030_ram_size(void) { return ram_size; }
 
@@ -327,6 +461,9 @@ void uae030_set_hooks(uae030_insn_hook ih, uae030_bus_hook bh, void *user)
 	bus_hook = bh;
 	hook_user = user;
 }
+
+void uae030_set_op_hook(uae030_op_hook oh) { op_hook = oh; }
+void uae030_set_exc_hook(uae030_exc_hook eh) { exc_hook = eh; }
 
 void uae030_get_state(uae030_state *s)
 {
@@ -352,6 +489,101 @@ void uae030_get_state(uae030_state *s)
 	s->srp = srp_030;
 	s->mmusr = mmusr_030;
 	s->insn_count = insn_count;
+}
+
+void uae030_set_state(const uae030_state *s)
+{
+	int sb = (s->sr >> 13) & 1, mb = (s->sr >> 12) & 1;
+
+	op_flush();
+	/* Leave nothing of the last instruction behind: no pending trace, no
+	 * STOP, no restart state. */
+	regs.stopped = 0;
+	regs.t0 = regs.t1 = 0;
+	unset_special(SPCFLAG_TRACE | SPCFLAG_DOTRACE | SPCFLAG_STOP);
+	for (int i = 0; i < 8; i++)
+		m68k_dreg(regs, i) = s->d[i];
+	for (int i = 0; i < 7; i++)
+		m68k_areg(regs, i) = s->a[i];
+	regs.usp = s->usp;
+	regs.isp = s->isp;
+	regs.msp = s->msp;
+	/* S and M first, so that MakeFromSR() swaps no stack pointer, and A7 is
+	 * the one they select. */
+	regs.s = sb;
+	regs.m = mb;
+	m68k_areg(regs, 7) = sb ? (mb ? s->msp : s->isp) : s->usp;
+	regs.vbr = s->vbr;
+	regs.sfc = s->sfc & 7;
+	regs.dfc = s->dfc & 7;
+	regs.cacr = s->cacr;
+	regs.caar = s->caar;
+	set_cpu_caches(true);
+	/* Refetch at the new PC while the trace bits are still clear: the core
+	 * counts a refill as a change of flow, and under T0 that would arm a
+	 * trace the instruction never asked for. */
+	m68k_setpc_normal(s->pc);
+	mmu030_opcode_stageb = -1;
+	mmu030_fake_prefetch = -1;
+	fill_prefetch();
+	/* Then the status register: MakeFromSR() takes the flags, the mask and
+	 * the trace bits from it. */
+	regs.intmask = (s->sr >> 8) & 7;
+	regs.sr = s->sr;
+	MakeFromSR();
+	/* The core arms tracing between instructions, before the hook runs: it
+	 * latches the address of the instruction about to be traced (the format
+	 * $2 frame's address field) and, for T1, schedules the trace exception
+	 * for after it. A state installed here missed that step, so it is done
+	 * here, the same way. */
+	if (regs.t1 || regs.t0) {
+		regs.trace_pc = s->pc;
+		if (regs.t1) {
+			unset_special(SPCFLAG_TRACE);
+			set_special(SPCFLAG_DOTRACE);
+		}
+	}
+}
+
+static struct {
+	int n, i, started;
+	uae030_setup_fn setup;
+	uae030_result_fn result;
+	void *user;
+} each;
+
+static int each_hook(const uae030_state *s, void *u)
+{
+	(void)u;
+	if (each.started) {
+		each.result(each.i, s, each.user);
+		each.i++;
+	}
+	if (each.i >= each.n)
+		return 1;
+	uae030_state st;
+	memset(&st, 0, sizeof st);
+	each.setup(each.i, &st, each.user);
+	each.started = 1;
+	uae030_set_state(&st);
+	return 0;
+}
+
+int uae030_run_each(int ntests, uae030_setup_fn setup, uae030_result_fn result,
+		    void *user, int *done)
+{
+	each.n = ntests;
+	each.i = 0;
+	each.started = 0;
+	each.setup = setup;
+	each.result = result;
+	each.user = user;
+	insn_hook = each_hook;
+	hook_user = user;
+	int r = uae030_run();
+	if (done)
+		*done = each.i;
+	return r;
 }
 
 int uae030_run(void)

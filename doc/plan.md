@@ -111,6 +111,12 @@ It takes over every flow that ran on Musashi:
 - `make vectors` / `vectors-all`: retarget `tools/vectors/gen.c`, and add the 030 groups `pmmu`, `cacr`, `movec030`. CALLM/RTM become illegal-instruction vectors.
 - `make cosim`: `core_cosim_tb` now also compares MSP, USP and the MMU registers.
 
+**Status (M6–M7 phase A):** in production. `make ea`, `vectors`/`vectors-all`, `cosim`/
+`cosim-long` and `make cache` run against UAE030; the vector stream carries CACR, the
+trace USP and MSP as well as ISP. The groups are RD68021's plus `movec030`, `illegal030`
+(CALLM/RTM), `cmp2`, `cas`, `bitfield_mem` and `packunpk_mem`; `pmmu` and `cache` wait for
+M11 and M10. The mismatches found on the RTL are triaged in `doc/m6-mismatches.md`.
+
 New: `make cosim-mmu` runs bare-metal kernels with real 030 page tables:
 - programs `sim/programs/mmu_*.S`, such as `cow030.S`, TT-mapped I/O, early termination, indirect descriptors, limit faults, U/M updates, PTEST at every level;
 - compared on registers **and** on the ordered physical data-access stream, table-walk accesses included.
@@ -122,6 +128,11 @@ New: `make cosim-mmu` runs bare-metal kernels with real 030 page tables:
 - `sim/tb/core_cputest_tb.sv` runs the converted stream.
 
 This is the closest available thing to real silicon. Instructions, flags and exception frames are covered, MMU is not.
+
+**Status (M6–M7 phase A):** in production. The corpus is generated one instruction at a
+time (`tools/cputest/generate.sh`; the generator's `mode=all` stalls on a few
+instructions), fits the core harness's 64 KB port, and `make cputest` runs an even sample
+of it (`CPUTEST_MAX` per instruction). Results in `doc/m6-mismatches.md`.
 
 ### Layer 2: second-core cross-checks
 

@@ -22,28 +22,57 @@ Rules that apply to every oracle:
 
 ---
 
-## UAE030: the WinUAE MC68030 core (instructions, MMU, data cache)
+## UAE030: the WinUAE MC68030 core (instructions, MMU, data cache) -- in production
 
 **What.** Toni Wilen's MC68030 core, with its MMU (`cpummu030`) and data-cache emulation.
 It is taken from Hatari's copy of it, in `Inputs/ref/hatari/src/cpu`, which builds on
-Linux with far less of an emulator around it than WinUAE's own tree. The harness is in
-`tools/cosim/uae030/`:
-- `build.sh` copies the core into `build/` and generates the opcode tables there.
-- `uae030_glue.c` (about 300 lines) stands in for Hatari's memory, custom-chip and event
-  code.
-- `uae030_main.c` is the tracer.
+Linux with far less of an emulator around it than WinUAE's own tree. Since M6 it is the
+oracle behind `make ea`, `make vectors`, `make cosim` and `make cache`, the flows RD68021
+ran against Musashi. It is GPL code, so everything that links it is GPL-2.0-or-later; the
+testbenches that read its output are not linked to it and stay CERN-OHL-S-2.0.
 
-It is GPL code, so the harness is GPL-2.0-or-later.
+**The harness** (`tools/cosim/uae030/`):
 
-**Interface** (`tools/cosim/uae030/uae030.h`):
-- `uae030_init(ram_bytes, dcache)`, `uae030_load`, `uae030_set_hooks`, `uae030_run`,
-  `uae030_get_state`.
-- The instruction hook gets the whole state at every boundary: PC, D0–D7, A0–A7, USP, ISP,
-  MSP, SR, VBR, SFC, DFC, CACR, CAAR, TC, CRP, SRP, TT0, TT1, MMUSR and the cache hit counts.
-- The bus hook gets every physical access: address, size, R/W, data, FC, whether it is a
-  table search, and BERR. Cache hits do not appear.
-- Memory is flat from 0, and an access above it is a bus error. There is one run per
-  process.
+| File | What |
+|---|---|
+| `build.sh` | copies the core into `build/uae030/`, patches the copy, generates the opcode tables and archives core and glue as `libuae030.a`. Incremental: a second run compiles nothing. |
+| `uae030.h` | the library's interface |
+| `uae030_glue.c` | stands in for Hatari's memory, chipset and event code; the hooks; `uae030_set_state` and `uae030_run_each` |
+| `uae030_trace.c` | the `make cosim` tracer |
+| `uae030_ea.c` | the `make ea` generator |
+| `uae030_main.c` | `uae030`, a tracer for looking at one program by hand: every instruction's state and every physical access |
+| `../../vectors/gen.c` | the `make vectors` generator (`vectors_gen`) |
+
+The Makefile builds the library once (`make uae030` builds it and all four front-ends) and
+links each front-end against it. A clean build takes about 40 s at `-j4`; the generated
+`cpuemu_*.c` are compiled at `-O0` (`cpuemu_34.c`, the core actually used, at `-O1`), which
+keeps each compile near 300 MB.
+
+**Interface** (`uae030.h`):
+- `uae030_init(ram_bytes, dcache)`: flat RAM from physical 0; an access outside it is a
+  bus error. `uae030_set_alias(window)` folds every address below `window` onto the RAM,
+  the way the core harness's partially decoded 32-bit port does.
+- `uae030_load`, `uae030_ram`: the image.
+- `uae030_set_hooks(insn, bus, user)`: the instruction hook gets the whole state at every
+  boundary -- PC, D0-D7, A0-A7, USP, ISP, MSP, SR, VBR, SFC, DFC, CACR, CAAR, TC, CRP, SRP,
+  TT0, TT1, MMUSR and the cache hit counts -- and returns nonzero to stop. The bus hook gets
+  every physical access: address, size, R/W, data, FC, its kind (operand, table search or
+  instruction fetch) and BERR. Cache hits do not appear.
+- `uae030_set_op_hook`: one call per *operand* access. A misaligned operand the core moves
+  as several aligned accesses is reported once, at its first byte, with its whole size and
+  value. Instruction fetches and table searches never appear. This is the unit the core's
+  testbenches record (OCS, UM 7.1.1).
+- `uae030_set_exc_hook`: the vector number, when exception processing starts.
+- `uae030_set_state`, from inside the instruction hook: install a whole programmer's-model
+  state (registers, the three stack pointers, SR, VBR, SFC, DFC, CACR, CAAR, PC), invalidate
+  both caches and refetch. It arms tracing the way the core does at an instruction boundary,
+  so a state with T1 or T0 set is traced exactly as if an RTE had installed it.
+- `uae030_run_each(n, setup, result, user, &done)`: n one-instruction tests in one run;
+  `setup` writes memory and fills the state, `result` gets the state after. This is how
+  `uae030_ea` and `vectors_gen` work. `vectors_gen` also forks a process per batch, so a
+  test that halts the core costs that test and not the run.
+- `uae030_run`: reset (SSP and PC from physical 0 and 4) and run until the instruction hook
+  stops it or the core halts. One run per process.
 
 **Configured as:** `cpu_model` 68030, `mmu_model` 68030, `cpu_compatible`, `cpu_data_cache`.
 That is WinUAE's "68030 MMU + cache" core, `op_smalltbl_34`. There is no FPU, and
@@ -52,10 +81,70 @@ addressing is 32-bit.
 **Patches to the build copy** (sed, in `build.sh`):
 - `MMU_DPAGECACHE030` and `MMU_IPAGECACHE030` are off. They are host-speed shortcuts that
   bypass the emulated ATC, so with them on the ATC's behaviour could not be trusted.
-- Hooks are added for the function code of each physical access, for table-search accesses,
-  and for the instruction boundary.
+- Flags for the function code of each physical access, for table-search accesses and for
+  instruction fetches, and a hook at the instruction boundary.
+- Not a patch, a link option: the core's misaligned-operand routines are wrapped
+  (`-Wl,--wrap`, `OWRAP` in the Makefile) so that the glue sees each misaligned operand as
+  the one operand it is.
 
-**M0 spike** (commits: Hatari b166d8c, WinUAE 858c5f3). It works. A smoke program
+### The flows
+
+| Target | Front-end | Bench | What is compared |
+|---|---|---|---|
+| `make ea` | `uae030_ea` | `core_ea_tb` | LEA's address and MOVE.L's operand fetch for every addressing mode and extension-word shape (703 vectors) |
+| `make vectors OP=<group>...` / `vectors-all` | `vectors_gen` | `core_vec_tb` | one instruction from a random state: every register, the three stack pointers, SR (under `srmask`), PC, VBR, SFC, DFC, CACR, CAAR, and the ordered operand-access list with each written value (12,200 vectors in 31 groups) |
+| `make cosim` / `cosim-long` | `uae030_trace` | `core_cosim_tb` | real programs, every register at every instruction boundary (arith 19,497 and corners 2,157 instructions: the whole of each, so the two targets are the same today) |
+| `make cache` | `uae030_trace` | `core_cosim_tb` | the same programs with `ICACHE_ENTRIES=0` and 64, through `tools/cache_diff.py`, after the directed testbenches, the sweep and the effective addresses at 0 |
+
+`vectors_gen list` names the groups. `VEC_DEBUG=<index>` prints every bus access the
+oracle makes for one vector, instruction fetches included. `core_vec_tb +faillog=` (the
+Makefile writes `build/vectors.fail`) lists every failing vector with both access lists.
+
+**The trace format** (`uae030_trace` to `core_cosim_tb`): a header `nstep nfield`, then per
+instruction the PC and `nfield` values: D0-D7, A0-A6, USP, ISP, MSP, SR, VBR, CACR, CAAR,
+SFC, DFC (`nfield` = 24). Registers are only ever appended -- the MMU's at M11 -- and the
+bench skips the ones it does not know. The first record is the state at the entry point:
+USP, MSP, CAAR, SFC and DFC, which a reset leaves undefined (UM 8.1), are copied from it
+into the core before anything runs, and compared from then on.
+
+**The vector stream** (`vectors_gen` to `core_vec_tb`): RD68021's, with CACR added to both
+the starting and the final state and a value mask added to each access. The format is at
+the top of `tools/vectors/gen.c`. A test whose oracle run took a bus or address error (the
+long frames are mostly internal state), made more than 24 accesses, or halted is dropped
+and counted. Groups RD68031 adds: `movec030` (CACR's implemented bits, CAAR, the control
+registers the MC68030 does not have), `illegal030` (the CALLM/RTM encodings), `cmp2`,
+`cas`, `bitfield_mem` and `packunpk_mem` (the memory forms RD68021 could not sweep against
+Musashi). Room is left for `cache` (M10) and `pmmu` (M11).
+
+### Quirks, and what the harness does about them
+
+Where the oracle and the manual disagree on something a test compares, the generator
+records the manual's answer, and says so in a comment at the place it does. Each of these
+moves or relabels accesses the oracle made; none invents one.
+
+| Quirk | Manual | What the generator records |
+|---|---|---|
+| A program-counter-relative mode's reads are driven in data space | UM 2.4.11-2.4.14: "a program space reference" | program space, for every read of a PC-relative test (ZPC included) |
+| The exception vector is fetched before the frame is written | UM 8.1: the third step builds the frame, the last fetches the vector | the vector read after the frame |
+| RTE reads the SR first, and on a format error reads the whole frame first | UM 8.1.13: the frame is validated before it is read | the format word first; on a format error, nothing else of the frame |
+| CAS2 writes destination 2 before destination 1 | PRM 4, CAS2: "Update 1 -> Destination 1; Update 2 -> Destination 2" | destination 1 first |
+| DIVU/DIVS overflow leaves C as it was | PRM 4: "C -- Always cleared" | C clear |
+| The format $2 frame's instruction address is the next instruction for CHK2, TRAPcc, TRAPV and the zero divide | UM 8.4, the six-word frame (format $2): "the address of the instruction that caused the exception" | the instruction's address. UM table 8-6 says so for every format $2 exception, and the cputest corpus -- WinUAE's own copy of the core, whose tester is checked against real processors -- stacks the instruction's address for CHK, CHK2 and the zero divide (93 sampled tests); the quirk is Hatari's copy's |
+| A misaligned or multi-byte operand is several accesses | (granularity, not behaviour) | one operand: the core's unit; bit fields in memory become one operand of up to five bytes, PACK/UNPK's word becomes the two bytes the core moves |
+| An instruction-cache burst fill reads the instruction stream through the data path | -- | labelled an instruction fetch |
+| A jump to an odd address takes its address error at the next instruction | UM 8.1.3 | the vector is dropped (long frame either way) |
+
+Two more belong to the harness, not the oracle, and are fixed in it:
+- `uae030_set_state` arms tracing itself and refetches before the trace bits are set; a
+  refetch after them counted, in the core, as a change of flow and traced a NOP under T0.
+- The vector bench enters a test that starts traced through an RTE (the core decides
+  whether to trace an instruction as it decodes it, earlier than a deposit reaches), and
+  lets the core reach the boundary after the instruction where its trace exception is
+  taken.
+
+### The M0 spike
+
+Commits: Hatari b166d8c, WinUAE 858c5f3. It worked. A smoke program
 (`tools/cosim/uae030/tests/mmu_smoke.S`) traced correctly against UM §6, §8, §9 and the PRM:
 - **Table searches:** a two-level short-format table search, with the U bit written back on
   a read and U|M on a write, plus a fresh search to set M when the ATC entry lacks it.
@@ -90,28 +179,84 @@ addressing is 32-bit.
 `(d16,PC)`. That is not a control alterable mode (PRM §6), so the part takes an F-line
 exception, and UAE030 does too. Test programs address the operands of PMOVE through `(An)`.
 
-## cputest: WinUAE's instruction tester (bulk instruction vectors)
+## cputest: WinUAE's instruction tester (bulk instruction vectors) -- in production
 
 **What.** The vector generator that comes with WinUAE (`Inputs/ref/winuae/cputest/`). It
-was written to be run against real CPUs on real hardware, which is why it is here. It is
-built on Linux by `tools/cputest/build.sh`, using small shims for Windows-only functions in
+was written to be run against real CPUs on real hardware, which is why it is here: it is
+the closest thing to silicon this project has for the integer instructions. It is built
+on Linux by `tools/cputest/build.sh`, using small shims for Windows-only functions in
 `tools/cputest/compat/`.
 
-**M0 spike.** It works. `cputestgen` builds in about 12 s. With
-`tools/cputest/cputestgen-m0.ini` (68030; ADD.L, MOVE.W, DIVU.W, CAS.L, BFEXTU) it made
-55,042 tests in 1 s, reproducibly. `tools/cputest/convert.py` decodes every one: initial
-registers and memory, the instruction, and the expected registers, memory writes and
-exception frame. Its counts equal the generator's own. Notes on the format (DATA_VERSION
-24) are at the top of `convert.py`.
+**The flow** (`make cputest`, about 40 minutes on this machine once the corpus exists):
 
-The testbench has to reproduce two things the corpus assumes:
-- **Sentinels.** Each test ends at an ILLEGAL sentinel (exception 4) placed by the
-  generator.
-- **Starting stack pointers.** SSP is super_stack − $80, MSP is super_stack, and USP is A7.
+1. `build/cputest/gen/cputestgen`, built once (about 1 min at `-j3`, `-O0` for the
+   generated test cores).
+2. The corpus, generated once per ini into `build/cputest/run/data/` by
+   `tools/cputest/generate.sh`, **one instruction per generator run** with a time limit
+   (`CPUTEST_TIMEOUT`, 120 s). The generator's own `mode=all` stops the whole corpus at
+   the first instruction it cannot finish -- it retries one effective address forever:
+   OR.L under seed 1, CHK under seed 2. An instruction that runs out of time is tried once
+   more with the next seed, into a set of its own (`3_RD030S3`), since each set has its own
+   memory images; one that fails twice is listed and left out. Today: 176 instruction
+   files, about 1.57 million tests, in 2 min 15 s; CHK comes from seed 3, nothing is left
+   out.
+3. `tools/cputest/convert.py bench` replays the corpus the way the target-side runner
+   (`main.c`) reads it, and writes `build/cputest/cputest.vec` (the format is
+   `BENCH_FORMAT` in `convert.py`), the memory images (`lmem<N>.hex`, `tmem<N>.hex`) and
+   `cputest.idx`, which maps a test number back to its instruction, sub-test and opcode.
+   It runs `CPUTEST_MAX` tests per instruction (default 40), evenly spread over that
+   instruction's corpus; the memory effects of the tests it does not run are folded into
+   the next one it does, so the core's memory is what the runner's would be.
+   `CPUTEST_SEL=ADD,MOVE.L` restricts it to some instructions (a bare name takes every
+   size). About 6,500 tests run by default, about 2 min of conversion.
+4. `sim/tb/core_cputest_tb.sv` is the runner, with the core as the target.
+
+**The memory map** (`tools/cputest/cputestgen.ini`). The corpus is generated for the core
+harness's 64 KB 32-bit port: low memory $0000-$7FFF (reached by `(xxx).W`), test memory
+$8000-$FFFF (instructions, operands, both stacks). A larger port costs iverilog many
+minutes of elaboration per doubling (64 KB: about 7 min; 128 KB: more than 10), and every
+other split of the 64 KB that was tried made the generator abort on RTS, RTD, RTR and RTE.
+The bench's vector table and its handlers live on the 16-bit port at $1000_0000, where no
+generated address reaches.
+
+**What the bench reproduces of the runner:**
+- **Entry.** Each test is entered with an RTE from a frame at SSP-8, with USP = A7,
+  ISP = SSP = super_stack - $80 and MSP = super_stack; the corpus's SR (user mode for most
+  tests) comes in through that RTE, so trace bits and S/M take the architectural path.
+- **Sentinels.** After the instruction the runner places a NOP (`MOVEA.L A0,A0`, $2048)
+  and an ILLEGAL, or the ILLEGAL first, alternating per sub-test; a branch target holds a
+  NOP or an ILLEGAL, toggled per sub-test. A test that completes normally ends at vector
+  4 with the stacked PC at the ILLEGAL.
+- **Stack copy.** Up to 32 bytes at the user A7 are copied to SSP before each test.
+- **Memory.** Each expected write is checked and then its old value put back; a test
+  group's set-up writes are rolled back at its end, as the runner does. Writes the runner
+  does not check (an exception's frame) persist, as on the target.
+- **Ending.** Every vector points at its own RTE; the PC says which vector was taken, and
+  that RTE starts the next test.
+
+**What is compared:** the vector; the stacked PC; for an exception the test is about, the
+frame's format word and, for a format $2 frame, its address; the stacked SR under the
+corpus's own mask of undefined flags (`feature_undefined_ccr=0`, which -- whatever its readme says -- is the setting that emits them: DIVx, CHK, CHK2); D0-D7,
+A0-A6 and USP (the runner's A7); every memory write. A long $A/$B bus-fault frame is
+compared in its first eight bytes, which is all the corpus records. `+faillog=` (the
+Makefile writes `build/cputest/cputest.fail`) lists every difference of every failing
+test.
 
 **Not authoritative for:** the MMU instructions ("not going to happen", says its readme);
-68020/030 bus-error frames (only their first 8 bytes are recorded); the cache instructions.
-It is the bulk integer corpus. UAE030 and the directed tests cover the rest.
+68020/030 bus-error frames (only their first 8 bytes are recorded); the cache instructions;
+the access *order* (it checks memory contents, not bus order -- the sweep does that). It
+is the bulk integer corpus; UAE030 and the directed tests cover the rest.
+
+**Found on the way:**
+- The generator stalls forever on some instruction under some seeds (above).
+- With `feature_full_extension_format`, in this memory map, it generates nothing for most
+  instructions, so the corpus has the MC68000 addressing modes only; `make ea` sweeps the
+  full-format ones.
+- Not every test it emits is run: its own skipped tests (`CT_END_SKIP`) and those that
+  end in an exception followed by a trace (two frames) are counted, not run.
+
+The M0 spike (`cputestgen-m0.ini`: 68030; ADD.L, MOVE.W, DIVU.W, CAS.L, BFEXTU; 55,042
+tests) proved the build and the decoder; `convert.py dump` still prints decoded tests.
 
 ## AP68030: a second core (bus cycles, MMU)
 

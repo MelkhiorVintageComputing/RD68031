@@ -4,10 +4,20 @@
 
 /*
  * uae030 -- the WinUAE 68030 CPU core (Hatari's src/cpu copy) as a standalone
- * instruction + MMU + data-cache oracle.  Flat physical RAM from 0, everything
- * above it answers with a bus error.  No chipset, no interrupts.
+ * instruction + MMU + data-cache oracle, behind a small library interface.
  *
- * M0 spike interface: one run per process (m68k_go is not re-entrant).
+ * Memory is flat physical RAM from 0. Everything above it answers with a bus
+ * error, unless uae030_set_alias() folds a window of the address space onto
+ * the RAM the way a partially decoded memory does. No chipset, no interrupts.
+ *
+ * One run per process: uae030_run() enters the core once and stays there
+ * until the instruction hook asks to stop. A front-end that needs many short
+ * runs (one instruction per test, say) does it from inside the instruction
+ * hook, with uae030_set_state(), which is how vectors_gen and uae030_ea work.
+ *
+ * The configuration is the one doc/oracles.md describes: 68030, 68030 MMU,
+ * compatible prefetch and instruction cache, data-cache emulation (switchable),
+ * no FPU, 32-bit addressing, and the ATC's host-side page caches compiled out.
  */
 #ifndef UAE030_H
 #define UAE030_H
@@ -16,8 +26,9 @@
 
 /* Bus-access kinds reported by the bus hook. */
 enum uae030_kind {
-	UAE030_KIND_CPU = 0,   /* operand / instruction / stack access issued by the core */
-	UAE030_KIND_WALK = 1,  /* MMU table-search descriptor fetch/update */
+	UAE030_KIND_CPU = 0,    /* an operand or stack access issued by the core */
+	UAE030_KIND_WALK = 1,   /* an MMU table-search descriptor fetch or update */
+	UAE030_KIND_IFETCH = 2, /* an instruction fetch (prefetch or cache fill) */
 };
 
 typedef struct uae030_state {
@@ -39,16 +50,48 @@ typedef int (*uae030_insn_hook)(const uae030_state *s, void *user);
 
 /* Called on every physical bus access (cache hits do not appear).
  * size = 1/2/4, write = 0/1, fc = function code (0..7), kind = enum above.
- * A bus error (access above RAM) is reported with berr = 1. */
+ * A bus error (access outside memory) is reported with berr = 1. */
 typedef void (*uae030_bus_hook)(uint32_t pa, int size, int write, uint32_t data,
 				int fc, int kind, int berr, void *user);
 
+/* Called once per OPERAND access of kind UAE030_KIND_CPU: a misaligned
+ * operand the core splits into several bus accesses is reported here once,
+ * at the physical address of its first byte, with its whole size and value.
+ * Instruction fetches and table searches never appear. */
+typedef void (*uae030_op_hook)(uint32_t pa, int size, int write, uint32_t data,
+			       int fc, int berr, void *user);
+
+/* Called when exception processing starts, with the vector number. */
+typedef void (*uae030_exc_hook)(int vector, void *user);
+
 void uae030_init(uint32_t ram_bytes, int data_cache);
+/* Physical addresses below `window` (a power of two, at least the RAM size)
+ * address the RAM modulo its size; 0 turns aliasing off (the default). */
+void uae030_set_alias(uint32_t window);
 uint8_t *uae030_ram(void);
 uint32_t uae030_ram_size(void);
 int uae030_load(const char *path, uint32_t phys);
 void uae030_set_hooks(uae030_insn_hook ih, uae030_bus_hook bh, void *user);
+void uae030_set_op_hook(uae030_op_hook oh);
+void uae030_set_exc_hook(uae030_exc_hook eh);
 void uae030_get_state(uae030_state *s);
+/* From inside the instruction hook only: replace the whole programmer's-model
+ * state (PC, D0-D7, A0-A6, USP, ISP, MSP, SR, VBR, SFC, DFC, CACR, CAAR;
+ * a[7] is ignored and derived from SR), invalidate both caches, and refetch
+ * the instruction stream at the new PC. MMU registers are left alone. */
+void uae030_set_state(const uae030_state *s);
+/* One instruction per test, many tests per run. The RAM must hold reset
+ * vectors that lead to a valid instruction. At each instruction boundary the
+ * driver calls result() for the test just run (not before the first), then
+ * setup() for the next: setup() writes whatever memory the test needs and
+ * fills *st (its pc included), which uae030_set_state() then installs.
+ * Returns 0 when every test ran, 1 if the oracle halted part way (a double
+ * bus fault); *done says how many tests completed. */
+typedef void (*uae030_setup_fn)(int i, uae030_state *st, void *user);
+typedef void (*uae030_result_fn)(int i, const uae030_state *st, void *user);
+int uae030_run_each(int ntests, uae030_setup_fn setup, uae030_result_fn result,
+		    void *user, int *done);
+
 /* Reset (SSP/PC from physical 0/4) and run until the instruction hook asks
  * to stop or the CPU halts (double bus fault).  Returns 0 on hook stop,
  * 1 on halt. */

@@ -62,7 +62,8 @@ static void on_bus(uint32_t pa, int size, int write, uint32_t data, int fc, int 
 	if (!print_bus)
 		return;
 	printf("B %c %08x %d %0*x fc=%d%s%s\n", write ? 'W' : 'R', pa, size, size * 2,
-	       data, fc, kind == UAE030_KIND_WALK ? " walk" : "", berr ? " BERR" : "");
+	       data, fc, kind == UAE030_KIND_WALK ? " walk" : kind == UAE030_KIND_IFETCH ? " ifetch" : "",
+	       berr ? " BERR" : "");
 }
 
 int main(int argc, char **argv)
