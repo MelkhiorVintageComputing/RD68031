@@ -121,6 +121,7 @@ module rd68031_top #(
   logic        req_cpfault;
 
   logic        req_ack;
+  logic        req_start;
   logic        req_last;
   logic        req_early;
   logic [39:0] req_rdata;
@@ -210,6 +211,16 @@ module rd68031_top #(
   logic        reset_req;
   logic        reset_busy;
   logic        dbf;            // double bus fault
+  // The RESET pin, from outside -- UM 7.8, 8.1.1. `rst_n` is the power-on
+  // initialisation, which is not an MC68030 pin, and resets every register;
+  // the RESET pin resets the processor as the manual describes it, which
+  // leaves the data and address registers, USP, MSP, SFC, DFC and CAAR alone
+  // (rd68031_seq) and the arbiter running (rd68031_biu). The fetch unit and its
+  // cache keep nothing a reset spares, so the pin resets all of them --
+  // "invalidates all entries in the instruction and data caches" (UM 8.1.1).
+  logic        crst;
+  logic        core_rst_n;
+  assign core_rst_n = rst_n && !crst;
   logic        sts_bound, sts_pend, sts_exc, sts_refill;   // UM 12.7.1
   logic        mmudis_sync_n;
 
@@ -235,6 +246,7 @@ module rd68031_top #(
   rd68031_seq #(.COPROCESSOR (COPROCESSOR)) u_seq (
       .clk            (clk),
       .rst_n          (rst_n),
+      .crst           (crst),
 
       .req_valid      (req_valid),
       .req_kind       (req_kind),
@@ -247,6 +259,7 @@ module rd68031_top #(
       .req_cpuaddr    (req_cpuaddr),
       .req_cpfault    (req_cpfault),
       .req_ack        (req_ack),
+      .req_start      (req_start),
       .req_last       (req_last),
       .req_early      (req_early),
       .req_rdata      (req_rdata),
@@ -321,7 +334,7 @@ module rd68031_top #(
 
   rd68031_ifu #(.ICACHE_ENTRIES (ICACHE_ENTRIES)) u_ifu (
       .clk            (clk),
-      .rst_n          (rst_n),
+      .rst_n          (core_rst_n),
 
       .pf_op          (pf_op),
       .pf_addr        (pf_addr),
@@ -379,6 +392,7 @@ module rd68031_top #(
       .req_burst      (req_burst),
       .req_ciout      (req_ciout),
       .req_ack        (req_ack),
+      .req_start      (req_start),
       .req_last       (req_last),
       .req_early      (req_early),
       .req_rdata      (req_rdata),
@@ -432,6 +446,7 @@ module rd68031_top #(
 
       .reset_req      (reset_req),
       .reset_busy     (reset_busy),
+      .crst           (crst),
       .dbf            (dbf),
       .sts_bound      (sts_bound),
       .sts_pend       (sts_pend),

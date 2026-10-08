@@ -18,7 +18,7 @@
 
 package rd68031_ucode_pkg;
 
-  localparam int UW    = 105;   // microword width
+  localparam int UW    = 107;   // microword width
   localparam int UADDR = 12;   // micro-address width
 
   localparam int U_SEQ_LSB = 0;
@@ -89,6 +89,8 @@ package rd68031_ucode_pkg;
   localparam int U_POST_W   = 1;
   localparam int U_SYNC_LSB = 104;
   localparam int U_SYNC_W   = 1;
+  localparam int U_MARK_LSB = 105;
+  localparam int U_MARK_W   = 2;
 
   localparam logic [2:0] U_SEQ_NEXT = 3'd0;
   localparam logic [2:0] U_SEQ_DECODE = 3'd1;
@@ -256,17 +258,18 @@ package rd68031_ucode_pkg;
   localparam logic [6:0] U_ASRC_UPC = 7'd59;
   localparam logic [6:0] U_ASRC_INT08 = 7'd60;
   localparam logic [6:0] U_ASRC_INT36 = 7'd61;
-  localparam logic [6:0] U_ASRC_CREG = 7'd62;
-  localparam logic [6:0] U_ASRC_XREG = 7'd63;
-  localparam logic [6:0] U_ASRC_CPLEN = 7'd64;
-  localparam logic [6:0] U_ASRC_CPRIM = 7'd65;
-  localparam logic [6:0] U_ASRC_CPVEC = 7'd66;
-  localparam logic [6:0] U_ASRC_CPREG = 7'd67;
-  localparam logic [6:0] U_ASRC_CPINT = 7'd68;
-  localparam logic [6:0] U_ASRC_FWLONG = 7'd69;
-  localparam logic [6:0] U_ASRC_FWLEN = 7'd70;
-  localparam logic [6:0] U_ASRC_PC_C_RAW = 7'd71;
-  localparam logic [6:0] U_ASRC_UBOUND = 7'd72;
+  localparam logic [6:0] U_ASRC_RMWUPC = 7'd62;
+  localparam logic [6:0] U_ASRC_CREG = 7'd63;
+  localparam logic [6:0] U_ASRC_XREG = 7'd64;
+  localparam logic [6:0] U_ASRC_CPLEN = 7'd65;
+  localparam logic [6:0] U_ASRC_CPRIM = 7'd66;
+  localparam logic [6:0] U_ASRC_CPVEC = 7'd67;
+  localparam logic [6:0] U_ASRC_CPREG = 7'd68;
+  localparam logic [6:0] U_ASRC_CPINT = 7'd69;
+  localparam logic [6:0] U_ASRC_FWLONG = 7'd70;
+  localparam logic [6:0] U_ASRC_FWLEN = 7'd71;
+  localparam logic [6:0] U_ASRC_PC_C_RAW = 7'd72;
+  localparam logic [6:0] U_ASRC_UBOUND = 7'd73;
 
   localparam logic [5:0] U_BSRC_ZERO = 6'd0;
   localparam logic [5:0] U_BSRC_STG_C_U = 6'd1;
@@ -391,6 +394,7 @@ package rd68031_ucode_pkg;
   localparam logic [5:0] U_DST_CPINT = 6'd43;
   localparam logic [5:0] U_DST_SSWA = 6'd44;
   localparam logic [5:0] U_DST_AREG_R = 6'd45;
+  localparam logic [5:0] U_DST_RMWUPC = 6'd46;
 
   localparam logic [1:0] U_SIZE_BYTE = 2'd0;
   localparam logic [1:0] U_SIZE_WORD = 2'd1;
@@ -460,16 +464,23 @@ package rd68031_ucode_pkg;
   localparam logic [2:0] U_CPUSPACE_COPROC = 3'd3;
   localparam logic [2:0] U_CPUSPACE_CPINIT = 3'd4;
 
+  localparam logic [1:0] U_MARK_NONE = 2'd0;
+  localparam logic [1:0] U_MARK_EXC = 2'd1;
+  localparam logic [1:0] U_MARK_LOAD = 2'd2;
+  localparam logic [1:0] U_MARK_RMW = 2'd3;
+
   // Named entry points.
   localparam logic [UADDR-1:0] ENTRY_RESET = 12'd0;
   localparam logic [UADDR-1:0] ENTRY_ILLEGAL = 12'd4;
-  localparam logic [UADDR-1:0] ENTRY_TRACE = 12'd1259;
-  localparam logic [UADDR-1:0] ENTRY_IRQ = 12'd1262;
-  localparam logic [UADDR-1:0] ENTRY_FAULT_LONG = 12'd1290;
+  localparam logic [UADDR-1:0] ENTRY_TRACE = 12'd1264;
+  localparam logic [UADDR-1:0] ENTRY_IRQ = 12'd1267;
+  localparam logic [UADDR-1:0] ENTRY_FAULT_LONG = 12'd1295;
   localparam logic [UADDR-1:0] ENTRY_LINE_F = 12'd1093;
-  localparam logic [UADDR-1:0] ENTRY_CP_IRQ = 12'd1883;
+  localparam logic [UADDR-1:0] ENTRY_LINE_F_NOCP = 12'd1094;
+  localparam logic [UADDR-1:0] ENTRY_CP_IRQ = 12'd1890;
   localparam logic [UADDR-1:0] ENTRY_RTE_BOUNDARY = 12'd3;
-  localparam logic [UADDR-1:0] ENTRY_CP_NOCP_PRIV = 12'd1353;
+  localparam logic [UADDR-1:0] ENTRY_RTE_RMW_DONE = 12'd268;
+  localparam logic [UADDR-1:0] ENTRY_CP_NOCP_PRIV = 12'd1360;
 
 endpackage
 

@@ -96,6 +96,32 @@ module core_status_tb;
 
   int unsigned b0;
 
+  // The other end of an interrupt acknowledge -- UM 7.4.1: a vector number,
+  // AVEC, or a bus error (the spurious interrupt) -- and the bus error a
+  // coprocessor access gets when no coprocessor is there, CpID 3 (UM 10.5.2.2;
+  // a build with the interface has its scripted coprocessor at CpID 1).
+  localparam int IACK_VECTOR = 0, IACK_AUTO = 1, IACK_NONE = 2;
+  int unsigned iack_mode;
+  initial iack_mode = IACK_VECTOR;
+  wire iack_now = !as_n_o && (fc_o === 3'b111) && (a_o[19:16] === 4'hF);
+  wire cp3_now  = !as_n_o && (fc_o === 3'b111) && (a_o[19:16] === 4'h2)
+                  && (a_o[15:13] === 3'd3);
+  always @(*) begin
+    dsack_ext  = 2'b11;
+    avec_n_i   = 1'b1;
+    oe_ext     = 1'b0;
+    d_ext      = 32'd0;
+    berr_force = cp3_now;
+    if (iack_now) begin
+      unique case (iack_mode)
+        IACK_AUTO: avec_n_i = 1'b0;
+        IACK_NONE: berr_force = 1'b1;
+        default: begin dsack_ext = 2'b10; oe_ext = 1'b1; d_ext = 32'h4000_0000; end
+      endcase
+    end
+  end
+  always @(posedge iack_now) ipl_n_i = 3'b111;
+
   initial begin
     $display("core_status_tb: STATUS and REFILL, UM 12.7.1");
 
@@ -192,6 +218,68 @@ module core_status_tb;
     $sformat(what, "bus error: a second three-clock STATUS pulse after reset's (got %0d)", n3);
     check(n3 == 2, what);
 
+    // =====================================================================
+    // Interrupts -- UM Table 12-4. The boundary at which one is taken shows
+    // two clocks; the acknowledge then decides whether exception processing
+    // "begins for ... spurious interrupt OR autovectored interrupt", which
+    // shows three more. A vectored interrupt shows none.
+    // =====================================================================
+    for (int k = 0; k < 3; k++) begin
+      base_setup();
+      poke_l(64 * 4, HAND);          // the device's vector
+      poke_l(27 * 4, HAND);          // the level 3 autovector
+      poke_l(24 * 4, HAND);          // spurious
+      poke_w(CODE + 0, 16'h46FC);    // MOVE #$2000,SR -- mask 0
+      poke_w(CODE + 2, 16'h2000);
+      poke_w(CODE + 4, 16'h4E71);    // NOP
+      poke_w(CODE + 6, 16'h60FE);
+      poke_w(HAND + 0, 16'h60FE);
+      iack_mode = (k == 0) ? IACK_VECTOR : (k == 1) ? IACK_AUTO : IACK_NONE;
+      ipl_n_i   = ~3'd3;
+      clear_counts();
+      reset_dut();
+      run_until(HAND, 2000, reached);
+      repeat (8) @(negedge clk);
+      tally();
+      what = (k == 0) ? "vectored" : (k == 1) ? "autovectored" : "spurious";
+      check(reached && n2 == 1,
+            $sformatf("%s interrupt: a two-clock STATUS pulse at the boundary it is taken at (got %0d)",
+                      what, n2));
+      check(n3 == ((k == 0) ? 1 : 2),
+            $sformatf("%s interrupt: %0d three-clock pulses, reset's%s -- UM Table 12-4",
+                      what, n3, (k == 0) ? " alone" : " and the acknowledge's"));
+      ipl_n_i = 3'b111;
+    end
+    iack_mode = IACK_VECTOR;
+
+    // =====================================================================
+    // An F-line instruction no coprocessor responds to -- UM Table 12-4, "F-
+    // line instruction (no coprocessor responded)", three clocks. A cpGEN for
+    // CpID 3: without a coprocessor interface it is one at once; with one,
+    // the bus error on the command CIR says so (UM 10.5.2.2). A CpID-0 word
+    // that is no MMU instruction is an F-line exception too, but no
+    // coprocessor was asked, and it shows none.
+    // =====================================================================
+    for (int k = 0; k < 2; k++) begin
+      base_setup();
+      poke_l(11 * 4, HAND);          // vector 11, F-line
+      poke_w(CODE + 0, (k == 0) ? 16'hF600 : 16'hF1C0);  // cpGEN CpID 3; CpID 0 type 111
+      poke_w(CODE + 2, 16'h0000);
+      poke_w(CODE + 4, 16'h60FE);
+      poke_w(HAND + 0, 16'h60FE);
+      clear_counts();
+      reset_dut();
+      run_until(HAND, 2000, reached);
+      repeat (8) @(negedge clk);
+      tally();
+      check(reached && peek_w(ISP0 - 2) === 16'h002C,
+            (k == 0) ? "F-line, no coprocessor: vector 11" : "F-line, CpID 0: vector 11");
+      check(n3 == ((k == 0) ? 2 : 1),
+            $sformatf("%s: %0d three-clock STATUS pulses -- UM Table 12-4",
+                      (k == 0) ? "F-line, no coprocessor responded" : "F-line, CpID 0 (no coprocessor asked)",
+                      n3));
+    end
+
     $display("core_status_tb: %0d checks, %0d failures", checks, fails);
     if (fails == 0) $display("PASS: core_status_tb");
     else            $display("FAIL: core_status_tb");
@@ -199,7 +287,7 @@ module core_status_tb;
   end
 
   initial begin
-    #2_000_000;
+    #4_000_000;
     $display("FAIL: core_status_tb timed out");
     $finish;
   end

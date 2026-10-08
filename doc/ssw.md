@@ -163,8 +163,9 @@ the X bits.
 
 | | |
 |---|---|
-| `DF` set | rerun the faulted data access from `flt_*` restored into the bus unit, and -- if `RM` is also set -- rerun the whole read-modify-write, from its faulted cycle |
-| `DF` clear, `RM` set | UM 8.2.2: "the RTE instruction expects the entire operation to have been completed if the RM bit is set and the DF bit is cleared. This is true even if the fault occurred on the first read cycle." **Not yet**: RTE resumes the faulted microword as it does with `RM` clear -- `doc/divergences.md`, M8-M9 |
+| `DF` set, `RM` clear | rerun the faulted data access from `flt_*` restored into the bus unit -- the residual, at the faulted microword |
+| `DF` set, `RM` set | UM 8.2.3: "the rerun operation, executed by the RTE instruction with the DF bit of the SSW set, reruns the entire instruction". Nothing is handed back to the bus unit; RTE resumes at the first microword of the locked sequence, which the long frame carries at `+$52` (`doc/checkpoint.md`), and every cycle of the CAS, CAS2 or TAS runs again -- its reads included, so the compare sees memory as it now is |
+| `DF` clear, `RM` set | UM 8.2.2: "the RTE instruction expects the entire operation to have been completed if the RM bit is set and the DF bit is cleared. This is true even if the fault occurred on the first read cycle." RTE runs none of it again: it ends the instruction (`rte_rmw_done`), with the condition codes and the registers the handler left |
 | `RC` or `RB` set | run the prefetch for that stage. `FC`/`FB` set as well means the cycle faulted and is rerun; clear means the stage was merely pending. This core expresses it as the **queue depth**: RC and RB say which stages RTE still owes a word, the depth comes back from them, and a queue with room asks the bus unit for the next long word by itself. There is no separate rerun path for a prefetch to get wrong, and no flag carried across the rest of the RTE |
 | `RC`, `RB`, `DF` all clear | the images on the stack are taken as valid and nothing is rerun |
 
@@ -180,10 +181,17 @@ deallocating the previous frame**" -- so the rerun happens after the stack
 pointer has been stepped, and a fault there is an ordinary bus error and not a
 double bus fault.
 
-A fault **while RTE is reading the frame** is a different matter. UM 8.1.2
-makes it a double bus fault -- "or while the processor is loading internal
-state information from the stack during the execution of an RTE instruction" --
-and this design does not yet (`doc/divergences.md`). What it does do, since
-M4, is read the frame's far end **before** it loads anything (UM 8.1.13), so a
-frame that is not all there faults while nothing has been restored, as an
-ordinary bus error that its handler can fix and return from.
+A fault **while RTE is reading the frame** is a different matter, and has two
+halves. RTE first validates the frame -- the format, both ends, and for `$B`
+the version -- and a bus error on one of those reads is an ordinary bus error
+that its handler can fix and return from: UM 8.1.13, "if the frame is invalid or
+inaccessible, the processor takes a format error or a bus error exception",
+with the faulty frame left intact below the new one. Then it loads the frame,
+and "once the processor begins to load the frame to restore its internal state,
+the assertion of the BERR signal causes the processor to enter the halted state
+with the continuous assertion of the STATUS signal" (UM 8.1.13; 8.1.2 lists it
+with the double bus faults). Since M8-M9 that is what this design does, for the
+long and the short frame alike, from the first microword of the load (`mark =
+LOAD`) to the RESUME. The four-, six-word, throwaway and coprocessor frames
+carry no internal state to load in that sense, and a bus error reading one of
+them stays an ordinary one.

@@ -340,6 +340,7 @@ ASRC = enc(
     'UPC',       # the micro-address to resume at
     'INT08',     # the packed internal word at +$08
     'INT36',     # ... and the one at +$36, which carries the version nibble
+    'RMWUPC',    # the micro-address a read-modify-write starts again at
     'CREG',      # the control register MOVEC's extension word names
     'XREG',      # the general register it names -- data or address per bit 15
     # ---- The coprocessor interface -----------------------------------------
@@ -560,6 +561,9 @@ DST = enc(
     # The address register the effective-address field names, written as a
     # VALUE: sign extended from the operand size -- UM 10.4.9.
     'AREG_R',
+    # The micro-address a read-modify-write starts again at, out of the long
+    # frame's +$52 -- UM 8.2.3, and MARK below.
+    'RMWUPC',
 )
 
 # How wide the destination write is. A write to a data register of size byte or
@@ -668,6 +672,23 @@ CPUSPACE = enc('NONE', 'IACK', 'BKPT', 'COPROC',
                # on every other CIR access -- COPROC -- it is a bus error. The
                # CIR offset is in `vec` too, and the CpID comes from stage D.
                'CPINIT')
+
+# What the sequencer is told about a microword, for exception processing --
+# UM 8.1.2, 8.2.2, 8.2.3 and 12.7.1. One of:
+#
+#   EXC    exception processing begins here, for one of the exceptions UM
+#          Table 12-4 gives STATUS three clocks for that the sequencer cannot
+#          tell from a fault entry: a spurious or an autovectored interrupt, and
+#          an F-line instruction no coprocessor responded to.
+#   LOAD   RTE has validated a bus fault frame and begins to load it. UM
+#          8.1.13: "once the processor begins to load the frame to restore its
+#          internal state, the assertion of the BERR signal causes the
+#          processor to enter the halted state" -- from here to the RESUME, a
+#          bus error is a double bus fault.
+#   RMW    a read-modify-write starts here, and starts here again: UM 8.2.3,
+#          RTE with DF set "reruns the entire instruction". The micro-address
+#          is latched and carried by the long frame at +$52.
+MARK = enc('NONE', 'EXC', 'LOAD', 'RMW')
 
 # Which exception stack frame a microword is building. UM table 8-6 names the
 # exceptions that take each; the code below is the value that goes in bits 15:12
@@ -794,6 +815,7 @@ FIELDS = OrderedDict([
     # would lose -- mark_sync -- and for NOP, which PRM 4 makes wait for the
     # bus.
     ('sync',  (1,  None,  0)),
+    ('mark',  (2,  MARK,  'NONE')),
 ])
 
 

@@ -27,6 +27,11 @@ module rd68031_seq #(
 ) (
     input  logic        clk,
     input  logic        rst_n,
+    // The RESET pin, from outside, registered by the bus unit -- UM 7.8, 8.1.1.
+    // Everything here but the registers a reset leaves alone is held in its
+    // reset state while it is asserted; reset exception processing starts when
+    // it negates, as it does after rst_n.
+    input  logic        crst,
 
     // Operand request to the bus unit ----------------------------------------
     output logic        req_valid,
@@ -42,6 +47,7 @@ module rd68031_seq #(
     // for every coprocessor interface register access but the first.
     output logic        req_cpfault,
     input  logic        req_ack,
+    input  logic        req_start,
     input  logic        req_last,
     input  logic        req_early,
     input  logic [39:0] req_rdata,
@@ -49,7 +55,7 @@ module rd68031_seq #(
     input  logic        req_fault,
     input  logic        req_fault_wr,
     input  logic  [1:0] req_dsack,
-    // Posted writes -- UM20 8.1.3, doc/checkpoint.md rule 9. This microword's
+    // Posted writes -- UM 11.2.5.2, doc/checkpoint.md rule 9. This microword's
     // write is posted; the bus unit has taken it; a posted write is still
     // outstanding; and the fault being reported is on one.
     output logic        req_post,
@@ -129,6 +135,29 @@ module rd68031_seq #(
 
 
   // ==========================================================================
+  // The two resets
+  //
+  // `rst_n` is the power-on initialisation, and is not an MC68030 pin
+  // (doc/pinout.md): every register takes its value from it. The RESET pin is
+  // the architectural one, and UM 8.1.1 lists what it does: T1 and T0 cleared,
+  // S set and M cleared, the mask at 7, VBR zero, CACR's enable, freeze, burst
+  // and write-allocate bits cleared, both caches invalidated, and the MMU's
+  // TC.E, TT0.E and TT1.E cleared (M11 builds those registers, and their reset
+  // goes in the `crst` arm below with these). Then "reset exception processing"
+  // -- the stack pointer and the program counter out of the vector table, which
+  // is the microcode's `reset`. It does not say a reset changes D0-D7, A0-A6,
+  // USP, MSP, SFC, DFC or CAAR, so the pin leaves them as they were; rst_n
+  // still clears them, because ASIC has no power-on state.
+  //
+  // Every register in this unit that is not architectural is reset by both,
+  // asynchronously, through core_rst_n. The one clocked process that holds
+  // the architectural registers takes the pin as a synchronous `crst` arm
+  // instead, which leaves the spared ones out of it.
+  // ==========================================================================
+  logic core_rst_n;
+  assign core_rst_n = rst_n && !crst;
+
+  // ==========================================================================
   // The microword
   // ==========================================================================
   `define UF(f) uw[rd68031_ucode_pkg::U_``f``_LSB +: rd68031_ucode_pkg::U_``f``_W]
@@ -139,7 +168,7 @@ module rd68031_seq #(
   logic [rd68031_ucode_pkg::UADDR-1:0] dec_entry;
   logic                                dec_illegal;
 
-  // The coprocessor response primitive being served -- UM20 7.4. Held from the
+  // The coprocessor response primitive being served -- UM 10.4. Held from the
   // read of the response CIR to the end of the service, because the primitive
   // decoder and the operand transfers read its fields, and checkpointed because
   // a bus error can land in the middle of one.
@@ -151,7 +180,7 @@ module rd68031_seq #(
   logic [15:0] cp_int;
 
   rd68031_ucode_rom u_urom (
-      .clk (clk), .rst_n (rst_n), .addr (upc_nxt), .uw (uw));
+      .clk (clk), .rst_n (core_rst_n), .addr (upc_nxt), .uw (uw));
 
   // The word to decode. An instruction ends with one microword that both
   // advances the pipe and decodes, so the opcode the decoder must look at is the
@@ -189,7 +218,7 @@ module rd68031_seq #(
                               && (dec_rom_entry != rd68031_ucode_pkg::ENTRY_LINE_F);
       assign dec_entry = !nocp_fline     ? dec_rom_entry
                        : nocp_save_rest  ? rd68031_ucode_pkg::ENTRY_CP_NOCP_PRIV
-                       :                   rd68031_ucode_pkg::ENTRY_LINE_F;
+                       :                   rd68031_ucode_pkg::ENTRY_LINE_F_NOCP;
     end
   endgenerate
 
@@ -233,12 +262,12 @@ module rd68031_seq #(
       .pc_base (ea_pc_base), .xw (stg_c),
       .entry (ea_entry), .reserved (ea_reserved));
 
-  // The response primitive decoder -- UM20 7.4 and table 7-6. Its seventeenth bit
+  // The response primitive decoder -- UM 10.4 and table 10-6. Its seventeenth bit
   // is the instruction's category, because what a primitive is allowed to do
   // depends on it: most of them with CA clear, and several at all, are protocol
   // violations inside a conditional instruction. Bits 8:6 of stage D say which
   // category it is -- 000 for cpGEN, anything else reaching the dialogue is a
-  // conditional (UM20 figures 7-6 to 7-13).
+  // conditional (UM figures 10-6 to 10-13).
   logic cp_cond;
   assign cp_cond = (stg_d[8:6] != 3'b000);
 
@@ -249,7 +278,7 @@ module rd68031_seq #(
   // Architectural state
   //
   // A7 is not a register. It is whichever of USP, ISP and MSP the S and M bits
-  // of the status register select (UM20 2.1.1), so an exception switches stacks
+  // of the status register select (UM 4.1.1), so an exception switches stacks
   // without moving anything.
   // ==========================================================================
   logic [31:0] dreg [0:7];
@@ -284,6 +313,12 @@ module rd68031_seq #(
   logic [31:0] ea_save;
   logic        flt_odd_q;
   logic [rd68031_ucode_pkg::UADDR-1:0] flt_upc;
+  // Where the read-modify-write under way starts again -- UM 8.2.3, frame +$52.
+  logic [rd68031_ucode_pkg::UADDR-1:0] rmw_upc_q;
+  // A fault is being taken this clock, and the step into an interrupt's entry
+  // point -- both driven further down, read first by IPEND.
+  logic fault_now;
+  logic irq_enter;
   // The fault was on a posted write -- doc/checkpoint.md rule 9. Frame +$08.
   logic        post_flt_q;
   logic [15:0] ssw;
@@ -476,7 +511,7 @@ module rd68031_seq #(
       rd68031_ucode_pkg::U_SZSEL_CHK:
         eff_size = stg_d[7] ? rd68031_ucode_pkg::U_SIZE_WORD
                             : rd68031_ucode_pkg::U_SIZE_LONG;
-      // UM20 7.4.9: a register operand is one, two or four bytes. Anything else
+      // UM 10.4.9: a register operand is one, two or four bytes. Anything else
       // is refused before a microword with this selector is reached.
       rd68031_ucode_pkg::U_SZSEL_CPLEN:
         unique case (cprim_q[7:0])
@@ -617,6 +652,8 @@ module rd68031_seq #(
         a_bus = {{(32 - rd68031_ucode_pkg::UADDR){1'b0}}, flt_upc};
       rd68031_ucode_pkg::U_ASRC_INT08:      a_bus = {16'd0, int08};
       rd68031_ucode_pkg::U_ASRC_INT36:      a_bus = {16'd0, int36};
+      rd68031_ucode_pkg::U_ASRC_RMWUPC:
+        a_bus = {{(32 - rd68031_ucode_pkg::UADDR){1'b0}}, rmw_upc_q};
       rd68031_ucode_pkg::U_ASRC_PC_PREV: a_bus = pc_prev_q;
       rd68031_ucode_pkg::U_ASRC_IRQLEVEL: a_bus = {29'd0, irq_taking_q};
       // UM Table 8-1: the autovectors are 25 to 31 for levels 1 to 7, which is
@@ -645,17 +682,17 @@ module rd68031_seq #(
       // PRM 2.5: "the value of the PC is the address of the extension word".
       rd68031_ucode_pkg::U_ASRC_PC_C:  a_bus = stg_b_addr - 32'd2;
       rd68031_ucode_pkg::U_ASRC_EABASE: a_bus = ea_base;
-      // The coprocessor interface -- UM20 section 7.
+      // The coprocessor interface -- UM section 10.
       rd68031_ucode_pkg::U_ASRC_CPLEN: a_bus = {24'd0, cprim_q[7:0]};
       rd68031_ucode_pkg::U_ASRC_CPRIM: a_bus = {16'd0, cprim_q};
       rd68031_ucode_pkg::U_ASRC_CPVEC: a_bus = {22'd0, cprim_q[7:0], 2'b00};
       rd68031_ucode_pkg::U_ASRC_CPREG: a_bus = cpreg_read;
       rd68031_ucode_pkg::U_ASRC_CPINT: a_bus = {16'd0, cp_int};
-      // UM20 figure 7-14: the format word, then a reserved word, at the head of
+      // UM figure 10-14: the format word, then a reserved word, at the head of
       // a coprocessor state frame. The reserved word is written as zero.
       rd68031_ucode_pkg::U_ASRC_FWLONG: a_bus = {t_q[0][15:0], 16'd0};
       rd68031_ucode_pkg::U_ASRC_FWLEN:  a_bus = {24'd0, t_q[0][7:0]};
-      // The scanPC -- UM20 7.4.1 -- is the address of stage C, "the word
+      // The scanPC -- UM 10.4.1 -- is the address of stage C, "the word
       // following" whatever the instruction has consumed so far.
       rd68031_ucode_pkg::U_ASRC_PC_C_RAW: a_bus = stg_b_addr - 32'd2;
       // The instruction boundary RTE resumes at out of a short bus fault
@@ -760,7 +797,7 @@ module rd68031_seq #(
       // UM 8.1.13: the long frame's version word, from rd68031_frame_pkg.
       rd68031_ucode_pkg::U_BSRC_VEROFF:  b_bus = rd68031_frame_pkg::OFF_VERSION;
       rd68031_ucode_pkg::U_BSRC_CPLEN:   b_bus = {24'd0, cprim_q[7:0]};
-      // UM20 7.4.9 and 7.4.12: a one-byte operand through A7 steps it by two.
+      // UM 10.4.9 and 10.4.12: a one-byte operand through A7 steps it by two.
       rd68031_ucode_pkg::U_BSRC_CPSTEP:
         b_bus = ((cprim_q[7:0] == 8'd1) && (rsel == 3'd7)) ? 32'd2
                                                            : {24'd0, cprim_q[7:0]};
@@ -984,7 +1021,7 @@ module rd68031_seq #(
   end
 
   // ... and the one a transfer-single-register primitive names: D/A in bit 3,
-  // the number in bits 2:0 -- UM20 figure 7-33.
+  // the number in bits 2:0 -- UM figure 10-33.
   always_comb begin
     if (!cprim_q[3])             cpreg_read = dreg[cprim_q[2:0]];
     else if (cprim_q[2:0] == 3'd7) cpreg_read = sp_read;
@@ -1184,7 +1221,7 @@ module rd68031_seq #(
 
 
   rd68031_divider u_divider (
-      .clk (clk), .rst_n (rst_n),
+      .clk (clk), .rst_n (core_rst_n),
       .start (div_start), .dividend (div_num), .divisor (t_q[1]),
       .is_signed (md_signed),
       .busy (div_busy), .quotient (div_q), .remainder (div_r),
@@ -1391,8 +1428,8 @@ module rd68031_seq #(
 
   assign div_start = div_req && !div_go_q && !div_fin_q;
 
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n) begin
       div_go_q  <= 1'b0;
       div_fin_q <= 1'b0;
     end else if (!div_req) begin
@@ -1449,7 +1486,7 @@ module rd68031_seq #(
   // ... and what the pin says, which is the same comparison against the
   // register as it stands. The pin is a statement about the outside world and
   // nothing is timed off it, so it is kept off the arithmetic result sr_eff
-  // carries: UM20 3.10 asks only that IPEND reflect a request the mask admits.
+  // carries: UM 5.8.2 asks only that IPEND reflect a request the mask admits.
   assign irq_ipend   = (irq_level > sr_q[rd68031_pkg::SR_I0 +: 3])
                     || irq_nmi_edge;
 
@@ -1467,10 +1504,30 @@ module rd68031_seq #(
   // Registered, it is one rising edge later than the comparison, which is
   // still before the boundary the sequencer acts at: the sequencer reads
   // irq_pending, not the pin.
+  //
+  // And it stays asserted until the acknowledge starts. UM 8.1.9: "if no
+  // higher priority interrupt has been synchronized, the IPEND signal is
+  // negated during state 0 (S0) of an interrupt acknowledge cycle". The
+  // exception raises the mask, and drops the level-7 edge, a few microwords
+  // before the acknowledge runs -- either would negate the comparison early
+  // -- so iack_due_q holds the pin from the step into the interrupt entry to
+  // the rising edge that starts the acknowledge's S0 (req_start). A fault
+  // landing in between (a posted write's, doc/checkpoint.md rule 9) takes the
+  // acknowledge out of this exception processing, and the hold with it.
   logic ipend_q;
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) ipend_q <= 1'b0;
-    else        ipend_q <= irq_ipend;
+  logic iack_due_q;
+  logic iack_now;
+  assign iack_now = req_start
+                 && (`UF(CPUSPACE) == rd68031_ucode_pkg::U_CPUSPACE_IACK);
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n) begin
+      ipend_q    <= 1'b0;
+      iack_due_q <= 1'b0;
+    end else begin
+      ipend_q    <= irq_ipend || (iack_due_q && !iack_now);
+      if (fault_now || iack_now) iack_due_q <= 1'b0;
+      else if (irq_enter)        iack_due_q <= 1'b1;
+    end
   end
 
   assign ipend_n_o = ~ipend_q;
@@ -1624,14 +1681,26 @@ module rd68031_seq #(
   // T0 matters only without it -- which is what the cputest corpus, generated
   // by a tester validated against real processors, records the part doing
   // (doc/divergences.md). RD68021 traced nothing under 11.
-  assign trace_take = !notrace_q
+  //
+  // Not at the end of exception processing for a bus error or an address
+  // error, which is the boundary g0_q is still set at: UM 8.1.7, "if an
+  // instruction does not complete due to a bus error or address error
+  // exception, trace exception processing is deferred until after the
+  // execution of the suspended instruction is resumed and the instruction
+  // execution completes normally". The trace mode and the cancel bit go into
+  // the frame as they were (+$36, +$08), and the RTE that resumes the
+  // instruction brings them back for the boundary that ends it. An exception
+  // an instruction forces as part of its own execution -- TRAP, CHK, a zero
+  // divide -- is not one of these, and is traced at the end of its exception
+  // processing (UM 8.1.12).
+  assign trace_take = !notrace_q && !g0_q
                    && (trace_mode_q[1]
                        || ((trace_mode_q == 2'b01) && flow_eff));
 
   // ==========================================================================
   // The addressing-mode classes -- PRM 2.2 and table 2-4, for the coprocessor
   // primitives that evaluate the effective address in the operation word and
-  // must first check it is one the primitive allows (UM20 table 7-4).
+  // must first check it is one the primitive allows (UM table 10-4).
   // ==========================================================================
   logic ea_dn, ea_an, ea_ind, ea_post, ea_pre, ea_d16, ea_idx, ea_abs;
   logic ea_pcrel, ea_imm, ea_valid;
@@ -1656,7 +1725,7 @@ module rd68031_seq #(
   assign ea_mem     = ea_valid && !ea_dn && !ea_an;
   assign ea_data    = ea_valid && !ea_an;
 
-  // UM20 table 7-4, the valid-EA field of the evaluate-and-transfer-data
+  // UM table 10-4, the valid-EA field of the evaluate-and-transfer-data
   // primitive, bits 10:8.
   always_comb begin
     unique case (cprim_q[10:8])
@@ -1674,7 +1743,7 @@ module rd68031_seq #(
   // ... and for the primitive decoder, so that a primitive that takes an
   // effective address goes straight to the handler for the kind it is, rather
   // than asking microword by microword: in the class (table 7-4); suitable for
-  // multiple coprocessor registers (UM20 7.4.16: to the coprocessor control or
+  // multiple coprocessor registers (UM 10.4.16: to the coprocessor control or
   // (An)+, from it control alterable or -(An)); and which kind. Everything
   // here is a function of stage D and the primitive, both registers.
   logic       cp_mea_ok;
@@ -1798,8 +1867,8 @@ module rd68031_seq #(
       rd68031_ucode_pkg::U_COND_GTZ:    cond_true = chk_gt;
       rd68031_ucode_pkg::U_COND_MDOVF: cond_true =
           (`UF(MDOP) == rd68031_ucode_pkg::U_MDOP_DIV) ? div_ovf : mul_ovf;
-      // ---- The coprocessor interface -- UM20 section 7 --------------------
-      // The primitive's own bits, figure 7-22.
+      // ---- The coprocessor interface -- UM section 10 --------------------
+      // The primitive's own bits, figure 10-22.
       rd68031_ucode_pkg::U_COND_CPCA:  cond_true = cprim_q[15];
       rd68031_ucode_pkg::U_COND_CPPC:  cond_true = cprim_q[14];
       rd68031_ucode_pkg::U_COND_CPDR:  cond_true = cprim_q[13];
@@ -1833,13 +1902,13 @@ module rd68031_seq #(
       rd68031_ucode_pkg::U_COND_EAUNALT:  cond_true = ea_imm || ea_pcrel;
       rd68031_ucode_pkg::U_COND_CPEAOK:   cond_true = cp_ea_ok;
       rd68031_ucode_pkg::U_COND_EACTLALT: cond_true = ea_ctlalt;
-      // UM20 7.4.16: to the coprocessor, control or (An)+; from it, control
+      // UM 10.4.16: to the coprocessor, control or (An)+; from it, control
       // alterable or -(An).
       rd68031_ucode_pkg::U_COND_CPMEAOK:  cond_true = cp_mea_ok;
       rd68031_ucode_pkg::U_COND_CPLEN124:
         cond_true = (cprim_q[7:0] == 8'd1) || (cprim_q[7:0] == 8'd2)
                  || (cprim_q[7:0] == 8'd4);
-      // A coprocessor format word in T0 -- UM20 table 7-2.
+      // A coprocessor format word in T0 -- UM table 10-2.
       rd68031_ucode_pkg::U_COND_FWNOTRDY: cond_true = (t_q[0][15:8] == 8'h01);
       rd68031_ucode_pkg::U_COND_FWEMPTY:  cond_true = (t_q[0][15:8] == 8'h00);
       rd68031_ucode_pkg::U_COND_FWBAD:
@@ -1864,8 +1933,9 @@ module rd68031_seq #(
   logic stall;
   // PRM 6 STOP. While this is set the sequencer does nothing at all: no
   // microword retires, so nothing commits, no bus request is presented and the
-  // pipe does not move. UM20 2.3: "the stopped state ... no further bus cycles
-  // are generated".
+  // pipe does not move. UM 4: "when the processor executes a STOP instruction, it
+  // is in a special type of normal processing state, one without bus cycles. It
+  // is stopped, not halted".
   logic stopped_q;
 
   assign bus_req = (`UF(BUS) != rd68031_ucode_pkg::U_BUS_NONE);
@@ -1968,7 +2038,7 @@ module rd68031_seq #(
                       && !pf_dvalid);
 
   // ==========================================================================
-  // Posted writes -- UM20 8.1.3, doc/checkpoint.md rule 9
+  // Posted writes -- UM 11.2.5.2, doc/checkpoint.md rule 9
   //
   // A posted write's fault is taken at whatever microword is running when it
   // arrives, and that microword is re-executed after RTE. So a microword that
@@ -2005,7 +2075,6 @@ module rd68031_seq #(
   // doc/bugs-found.md.
 
   // Any of the three, and only the data one sets DF.
-  logic fault_now;
   assign fault_now = req_fault || pipe_fault;
 
   // doc/checkpoint.md rule 2: A FAULTED MICROWORD ENDS BUT COMMITS NOTHING --
@@ -2137,9 +2206,9 @@ module rd68031_seq #(
 
   assign req_wdata    = (`UF(SZSEL) == rd68031_ucode_pkg::U_SZSEL_BFMEM)
                         ? bf_wdata : {8'd0, y};
-  // UM20 5.5.2: RMC is held across the whole read-modify-write, and each cycle
-  // inside it is an ordinary one that is retried on its own. TAS is the only
-  // instruction in this milestone that asserts it; CAS and CAS2 join it in M10.
+  // UM 7.3.3 and 7.5.2: RMC is held across the whole read-modify-write, and each
+  // cycle inside it is an ordinary one that is retried on its own. TAS, CAS and
+  // CAS2 assert it.
   assign req_rmc      = `UF(RMC);
   // UM figure 7-42 lays out the CPU address spaces, and "on the MC68030, three
   // of the encodings are implemented": the breakpoint acknowledge, the
@@ -2226,7 +2295,19 @@ module rd68031_seq #(
         // doc/checkpoint.md rule 2 is what makes this a jump and nothing else:
         // the microword that faulted committed nothing, so re-executing it
         // reissues exactly the same request.
-        rd68031_ucode_pkg::U_SEQ_RESUME: upc_nxt = rupc_q;
+        //
+        // ... except for a read-modify-write, which is not resumed at its
+        // faulted access at all. UM 8.2.2: with RM set and DF cleared, "the RTE
+        // instruction expects the entire operation to have been completed",
+        // "even if the fault occurred on the first read cycle" -- so the
+        // instruction ends (rte_rmw_done). UM 8.2.3: with DF set, "the rerun
+        // operation ... reruns the entire instruction" -- so it starts again
+        // at the first microword of the locked sequence, from the frame's
+        // +$52, and runs every one of its cycles afresh.
+        rd68031_ucode_pkg::U_SEQ_RESUME:
+          upc_nxt = !rs_rm_q ? rupc_q
+                  : rs_df_q  ? rmw_upc_q
+                  :            rd68031_ucode_pkg::ENTRY_RTE_RMW_DONE;
         // Branch when the condition holds, fall through when it does not.
         rd68031_ucode_pkg::U_SEQ_COND:   upc_nxt = cond_true ? `UF(NEXT)
                                                              : upc + 1'b1;
@@ -2282,6 +2363,47 @@ module rd68031_seq #(
       for (int i = 0; i < 8; i++) dreg[i] <= '0;
       for (int i = 0; i < 7; i++) areg[i] <= '0;
       for (int i = 0; i < 4; i++) t_q[i]  <= '0;
+    end else if (crst) begin
+      // The RESET pin -- see "The two resets" above. The same values as
+      // rst_n gives them, less the registers UM 8.1.1 does not name.
+      upc    <= rd68031_ucode_pkg::ENTRY_RESET;
+      // UM 4.1.1: after reset the processor is at the supervisor level in
+      // interrupt mode, and UM 8.1.1 puts the mask at 7. UM 6.2: reset clears
+      // the enable, burst-enable and freeze bits of both caches, and WA.
+      sr_q   <= rd68031_pkg::SR_RESET;
+      vbr_q  <= '0;
+      cacr_q <= '0;
+      xw_q   <= '0;
+      ea_q   <= '0;
+      cprim_q <= '0;
+      link_q <= '0;
+      eapc_q  <= 1'b0;
+      eadst_q <= 1'b0;
+      trace_mode_q <= 2'b00;
+      flow_q       <= 1'b0;
+      notrace_q    <= 1'b0;
+      pc_prev_q    <= '0;
+      pc_kept_q    <= 1'b0;
+      rs_rc_q      <= 1'b0;
+      rs_rb_q      <= 1'b0;
+      rs_dv_q      <= 1'b0;
+      rs_df_q      <= 1'b0;
+      rs_rm_q      <= 1'b0;
+      rs_rw_q      <= 1'b1;
+      rs_space_q   <= 3'd0;
+      rupc_q       <= '0;
+      rst_addr_q   <= '0;
+      rst_data_q   <= '0;
+      rst_bytes_q  <= 3'd0;
+      size_q  <= rd68031_ucode_pkg::U_SIZE_LONG;
+      // Written out, not looped: a loop index in this arm, which is not the
+      // asynchronous reset's, is a variable yosys gives storage of its own --
+      // thirty-two flip-flops with no reset, which `make audit` counts
+      // (doc/coding-standard.md).
+      t_q[0] <= '0;
+      t_q[1] <= '0;
+      t_q[2] <= '0;
+      t_q[3] <= '0;
     end else begin
       upc <= upc_nxt;
 
@@ -2411,7 +2533,10 @@ module rd68031_seq #(
             rs_rc_q    <= y[rd68031_frame_pkg::SSW_RC];
             rs_rb_q    <= y[rd68031_frame_pkg::SSW_RB];
             rs_df_q    <= y[rd68031_frame_pkg::SSW_DF] & ~y[rd68031_frame_pkg::SSW_RW];
-            rs_rm_q    <= y[rd68031_frame_pkg::SSW_RM];
+            // A short frame is taken at an instruction boundary, where no
+            // read-modify-write can be under way: RM in one is not acted on,
+            // or a RESUME would end the instruction at the boundary as well.
+            rs_rm_q    <= 1'b0;
             rs_rw_q    <= y[rd68031_frame_pkg::SSW_RW];
             rs_space_q <= y[rd68031_frame_pkg::SSW_FCODE_HI:rd68031_frame_pkg::SSW_FCODE_LO];
             rs_dv_q    <= 1'b1;
@@ -2574,7 +2699,7 @@ module rd68031_seq #(
               areg[rsel] <= y;
             end
           end
-          // UM20 7.4.13: a long word into the register the primitive names.
+          // UM 10.4.13: a long word into the register the primitive names.
           rd68031_ucode_pkg::U_DST_CPREG: begin
             if (!cprim_q[3]) begin
               dreg[cprim_q[2:0]] <= y;
@@ -2586,7 +2711,7 @@ module rd68031_seq #(
               areg[cprim_q[2:0]] <= y;
             end
           end
-          // UM20 7.4.9: "the MC68020 sign-extends a byte or word-sized operand
+          // UM 10.4.9: "the MC68030 sign-extends a byte or word-sized operand
           // to a long-word value when it is transferred to an address register
           // ... using this primitive with the register direct effective
           // addressing mode" -- the register the effective-address field names.
@@ -2753,15 +2878,15 @@ module rd68031_seq #(
 
   // A microword retired early, so the acknowledge the bus unit registers on the
   // same edge is its, not the next one's.
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) early_q <= 1'b0;
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n) early_q <= 1'b0;
     else        early_q <= retire && bus_req && early_hit;
   end
 
   // Entered by the decode arm, once the trace and the interrupt have had their
   // chance at that same boundary, and left only by an interrupt or by reset.
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n)
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n)
       stopped_q <= 1'b0;
     else if (irq_pending)
       stopped_q <= 1'b0;
@@ -2776,11 +2901,17 @@ module rd68031_seq #(
 
   // The fault itself. Everything here is latched on the one clock the bus unit
   // reports it, because the microcode that follows runs bus cycles of its own.
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n) begin
       df_q      <= 1'b0;
       flt_odd_q <= 1'b0;
-      g0_q      <= 1'b0;
+      // Reset exception processing is a group-0 window from its first clock:
+      // UM 8.1.1, figure 8-1, and UM 12.7.1 -- "the processor also halts if it
+      // receives a bus error or address error during the vector table read
+      // operations or the prefetch for the first instruction after an
+      // external reset".
+      g0_q      <= 1'b1;
+      rmw_upc_q <= '0;
       ea_save   <= '0;
       flt_upc   <= '0;
       post_flt_q <= 1'b0;
@@ -2808,7 +2939,10 @@ module rd68031_seq #(
         ea_save <= master_mode ? msp_q : isp_q;
       end else if (commit && (`UF(SEQ) == rd68031_ucode_pkg::U_SEQ_DECODE)) begin
         // A fault taken at an instruction boundary is a prefetch fault, never
-        // a data one, and must say so -- doc/ssw.md.
+        // a data one, and must say so -- doc/ssw.md. And the first instruction
+        // of a handler is beginning, so exception processing is over (UM 4,
+        // "it has completed when execution of the first instruction of the
+        // exception handler routine begins").
         df_q    <= 1'b0;
         g0_q    <= 1'b0;
       end else if (commit && (`UF(DST) == rd68031_ucode_pkg::U_DST_EA_SAVE)) begin
@@ -2820,6 +2954,25 @@ module rd68031_seq #(
         // posted: RTE hands it to the bus unit to run on its own -- rule 9.
         post_flt_q <= y[rd68031_frame_pkg::SSW_DF] & ~y[rd68031_frame_pkg::SSW_RW];
       end
+      // RTE begins to load a validated bus fault frame -- UM 8.1.13 -- and from
+      // here to its RESUME a bus error is a double bus fault. The microword
+      // that marks it writes ea_save as well, which the chain above does.
+      if (commit && (`UF(MARK) == rd68031_ucode_pkg::U_MARK_LOAD))
+        g0_q <= 1'b1;
+      // ... and has loaded it. A fault on the rerun that follows is an
+      // ordinary one: UM 8.2.3, "the processor creates a new stack frame on
+      // the supervisor stack after deallocating the previous frame".
+      if (commit && (`UF(SEQ) == rd68031_ucode_pkg::U_SEQ_RESUME))
+        g0_q <= 1'b0;
+      // Where a read-modify-write starts -- UM 8.2.3 -- and RTE putting it
+      // back out of the frame. Latched whenever the marked microword is
+      // presented, and not only when it commits: for CAS and TAS it is the
+      // locked read itself, and a fault on that read is one the frame has to
+      // carry it for.
+      if (`UF(MARK) == rd68031_ucode_pkg::U_MARK_RMW)
+        rmw_upc_q <= upc;
+      else if (commit && (`UF(DST) == rd68031_ucode_pkg::U_DST_RMWUPC))
+        rmw_upc_q <= y[rd68031_ucode_pkg::UADDR-1:0];
     end
   end
 
@@ -2828,7 +2981,6 @@ module rd68031_seq #(
   // the stopped state -- and not while sitting on it, which a stalled first
   // microword would otherwise do once per clock with whatever the pins then
   // said.
-  logic irq_enter;
   // The coprocessor's midinstruction interrupt is the same acknowledge reached
   // from inside an instruction -- UM 10.5.2.6 -- and latches the same way.
   assign irq_enter = ((upc != rd68031_ucode_pkg::ENTRY_IRQ)
@@ -2844,15 +2996,15 @@ module rd68031_seq #(
   // the level from before: a device holds its request until the handler clears
   // it, so that was a fresh "transition", and the non-maskable interrupt was
   // taken a second time, nested (doc/bugs-found.md).
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n)                                        irq_prev_q <= 3'd0;
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n)                                        irq_prev_q <= 3'd0;
     else if ((retire && (`UF(SEQ) == rd68031_ucode_pkg::U_SEQ_DECODE))
              || irq_enter)
                                                        irq_prev_q <= irq_level;
   end
 
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n)          irq_taking_q <= 3'd0;
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n)          irq_taking_q <= 3'd0;
     else if (irq_enter)  irq_taking_q <= irq_level;
     // ... and put back by RTE: a posted write's fault may have been taken
     // between the dispatch and the acknowledge -- doc/checkpoint.md rule 9.
@@ -2918,8 +3070,8 @@ module rd68031_seq #(
   // nothing from the fill point to the RESUME, which comes after the status
   // register. A fault in between ends the hold with the RTE.
   logic ckpt_hold_q;
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n)
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n)
       ckpt_hold_q <= 1'b0;
     else if (fault_now)
       ckpt_hold_q <= 1'b0;
@@ -2951,7 +3103,9 @@ module rd68031_seq #(
   // rst_addr_q, rst_data_q and rst_bytes_q are declared with the checkpoint set
   // at the top of the module: the register-write block uses them first.
 
-  assign rst_op_valid = commit && `UF(RSTOP);
+  // Nothing is handed back for a read-modify-write: it is either finished or
+  // started again from its first cycle -- the RESUME arm above.
+  assign rst_op_valid = commit && `UF(RSTOP) && !rs_rm_q;
   assign rst_addr     = rst_addr_q;
   // UM 8.2.3 reruns the faulted access when DF is still set, and UM 8.2.2 says
   // the handler did it when DF is clear. Both hand the operand back; the only
@@ -2968,8 +3122,8 @@ module rd68031_seq #(
   // operand it has taken the hand-back by now; if it did not, the fault was a
   // prefetch at a boundary and the hand-back is nobody's. Either way it is over.
   logic resumed_q;
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n)      resumed_q <= 1'b0;
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n)      resumed_q <= 1'b0;
     else if (retire) resumed_q <= (`UF(SEQ) == rd68031_ucode_pkg::U_SEQ_RESUME);
   end
   assign rst_cancel = resumed_q && retire;
@@ -2980,13 +3134,22 @@ module rd68031_seq #(
   // attempt to alter the current state of memory. Only an external RESET can
   // restart a processor halted by a double bus fault."
   //
+  // The window is g0_q: exception processing for a bus error, an address error
+  // or reset, up to the first instruction of the handler -- UM 12.7.1, "any
+  // additional bus error exception occurring before the execution of the
+  // first instruction of the bus error handler routine constitutes a double
+  // bus fault", which takes in the vector read and the handler's own first
+  // prefetch, faulted or odd (UM 8.1.3) -- and RTE loading a bus fault frame,
+  // UM 8.1.13. Any fault in it halts: a data fault, and a prefetch one.
+  //
   // Once set it stays set: the bus unit shows it on STATUS, asserted
   // continuously (UM 7.5.4 -- HALT is an input only on the MC68030), nothing
-  // here retires again, and only the asynchronous reset clears it. Declared at the
-  // top of the module, because the stall logic reads it first.
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n)                 dbf_q <= 1'b0;
-    else if (req_fault && g0_q) dbf_q <= 1'b1;
+  // here retires again, and only a reset clears it -- rst_n, or the RESET pin,
+  // which is the manual's "only an external RESET". Declared at the top of the
+  // module, because the stall logic reads it first.
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n)                 dbf_q <= 1'b0;
+    else if (fault_now && g0_q)      dbf_q <= 1'b1;
   end
   assign dbf = dbf_q;
 
@@ -3012,8 +3175,8 @@ module rd68031_seq #(
   logic at_boundary;
   assign at_boundary = retire && at_decode && !fault_now && !dbf_q;
 
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n) begin
       boot_q       <= 1'b1;
       sts_bound_q  <= 1'b0;
       sts_pend_q   <= 1'b0;
@@ -3023,7 +3186,8 @@ module rd68031_seq #(
       boot_q       <= 1'b0;
       sts_bound_q  <= at_boundary;
       sts_pend_q   <= at_boundary && (trace_take || irq_pending);
-      sts_exc_q    <= boot_q || (fault_now && !g0_q && !dbf_q);
+      sts_exc_q    <= boot_q || (fault_now && !g0_q && !dbf_q)
+                   || (commit && (`UF(MARK) == rd68031_ucode_pkg::U_MARK_EXC));
       sts_refill_q <= (pf_op == rd68031_ucode_pkg::U_PF_FLUSH);
     end
   end

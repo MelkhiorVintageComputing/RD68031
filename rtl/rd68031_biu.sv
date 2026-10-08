@@ -66,7 +66,7 @@ module rd68031_biu #(
     // CIOUT for this operand: the CI bit of the ATC entry or of the TTx register
     // that matched (UM 5.7.2). The MMU of M11 drives it; tied off today.
     input  logic        req_ciout,
-    // A posted write -- UM20 8.1.3, doc/checkpoint.md rule 9. It gets no
+    // A posted write -- UM 11.2.5.2, doc/checkpoint.md rule 9. It gets no
     // acknowledge: `req_taken` says it has been taken, the clock after, and
     // the requester goes on. `post_busy` says one is still outstanding, and a
     // fault on it is `req_fault` with `req_fault_post`.
@@ -75,6 +75,10 @@ module rd68031_biu #(
     output logic        post_busy,
     output logic        req_fault_post,
     output logic        req_ack,
+    // The request presented is taken on this rising edge, which starts its
+    // first bus cycle's S0. Combinational: for IPEND, which UM 8.1.9 negates
+    // "during state 0 (S0) of an interrupt acknowledge cycle".
+    output logic        req_start,
     output logic        req_last,
     // The data operand finishes cleanly at the rising edge that ends S5 -- no
     // bus error, no retry. A falling-edge register, valid for that half clock.
@@ -143,6 +147,11 @@ module rd68031_biu #(
     // Status -----------------------------------------------------------------
     input  logic        reset_req,
     output logic        reset_busy,
+    // The RESET pin, asserted from outside: the processor is being reset --
+    // UM 7.8, 8.1.1. Registered on a rising edge, and held for as long as the
+    // pin is; the sequencer and the fetch unit are held in their reset state
+    // by it, and so is everything in this unit but the arbiter.
+    output logic        crst,
     input  logic        dbf,
     // What the microsequencer tells the STATUS and REFILL pins -- UM 12.7.1.
     // Each a one-clock pulse, registered on a rising edge.
@@ -270,7 +279,7 @@ module rd68031_biu #(
   logic        rst_post_q;   // the operand RTE handed back is a posted write
   // A bus error on this CPU-space operand is a bus error and not an answer: a
   // coprocessor interface register other than the one that starts an
-  // instruction -- UM20 7.5.2.8.
+  // instruction -- UM 10.5.2.8.
   logic        op_cpflt;
   // A line fill may be asked for (req_burst / fetch_burst), and whether one has
   // been: UM 6.1.3.2 asserts CBREQ once, and a second read cycle for the rest of
@@ -285,6 +294,13 @@ module rd68031_biu #(
   // the declaration, and tools/src_lint.py holds `make lint` to that.
   logic        rst_pend_q;
   logic        rsto_q;
+  // The RESET pin's reset -- below, with the RESET instruction's counter --
+  // and the reset of everything in this unit but the arbiter: rst_n, or the
+  // pin. UM 7.8: "the external RESET signal resets the processor and the
+  // entire system".
+  logic        crst_q;
+  logic        eng_rst_n;
+  assign eng_rst_n = rst_n && !crst_q;
   logic [39:0] op_data;      // write data, or the read accumulator, right justified
 
   // The result of the last completed operand of each kind, held until the next
@@ -589,7 +605,11 @@ module rd68031_biu #(
       rd68031_pkg::ARB_IDLE: begin
         if (arb_a)
           arb_nxt = rd68031_pkg::ARB_HELD;
-        else if (arb_req && !(bus_is_idle && want_cycle && halt_sync_n))
+        // Nor has a processor held in reset by the RESET pin, whatever its
+        // sequencer is presenting -- UM 7.7, arbitration "during RESET
+        // assertion".
+        else if (arb_req && !(bus_is_idle && want_cycle && halt_sync_n
+                              && !crst_q))
           arb_nxt = rd68031_pkg::ARB_GRANT;
         else
           arb_nxt = rd68031_pkg::ARB_IDLE;
@@ -974,7 +994,7 @@ module rd68031_biu #(
 
   // A new operand may be taken when none is active, or at the very edge the
   // active one completes.
-  // UM20 6.2.3: RTE "reruns the faulted data access". It is the SAME operand, not
+  // UM 8.2.1: RTE "reruns the faulted data access". It is the SAME operand, not
   // a new one -- doc/checkpoint.md rule 3, the unit of restart is the operand --
   // so it comes in with the residual the frame carried and the bytes already
   // gathered, and outranks anything the sequencer or the pipe is asking for.
@@ -1008,12 +1028,13 @@ module rd68031_biu #(
   assign post_flt_end = op_finishing && op_posted && term_err;
   assign take_rst   = !op_continuing && !post_flt_end && rst_pend_q
                    && (req_valid || rst_post_q) && (rst_bytes != 3'd0);
+  assign req_start  = take_req && (st_p_nxt == rd68031_pkg::ST_S0);
   assign take_req   = !op_continuing && !post_flt_end && !rst_pend_q
                    && req_valid;
   assign take_fetch = !op_continuing && !post_flt_end && !req_valid && fetch_valid
                    && !rst_self;
 
-  // UM20 6.2.2: with DF cleared "it assumes that the data input buffer value on
+  // UM 8.2.1: with DF cleared "it assumes that the data input buffer value on
   // the stack is valid for a read or that the data has been correctly written
   // to memory for a write". The sequencer says so by handing back an operand
   // with nothing left of it, and the answer is the buffer out of the frame.
@@ -1177,8 +1198,41 @@ module rd68031_biu #(
   // ==========================================================================
   // Rising-edge domain
   // ==========================================================================
+  // The arbiter, on rst_n alone. UM 7.7: "bus arbitration requests are
+  // recognized during normal processing, RESET assertion, HALT assertion, and
+  // even when the processor has halted due to a double bus fault" -- so the
+  // RESET pin, which resets everything else in this unit, does not reset it.
+  // rst_n, which is not an MC68030 pin, does: doc/divergences.md records the
+  // user's decision that no arbitration happens under it.
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
+      arb   <= rd68031_pkg::ARB_IDLE;
+      hiz_q <= 1'b0;
+    end else begin
+      arb <= arb_nxt;
+      // "If T is true, the address, data, and control buses are placed in the
+      // high-impedance state after the next rising edge following the negation
+      // of AS and RMC" -- UM 7.7.4. Registered on the way up, so the release
+      // waits for that edge; combinational on the way down, because "the bus
+      // control signals (controlled by T) are driven by the processor,
+      // immediately following a state change, when bus mastership is
+      // returned".
+      //
+      // RMC holds the bus only while it locks it. Single-wire arbitration is
+      // the other exception: it "applies to all bus cycles of a
+      // read-modify-write sequence" -- "an alternate master forces the MC68030
+      // to release the bus by asserting BGACK and waits for AS to negate
+      // before taking the bus" (UM 7.7.4) -- so with A asserted the release
+      // does not wait for RMC.
+      hiz_q <= arb_t_of(arb_nxt) && !as_win && (!rmc_lock || arb_a);
+    end
+  end
+
+  // The bus engine, which the RESET pin resets: "resetting the processor
+  // causes any bus cycle in progress to terminate as if DSACKx, BERR, or STERM
+  // had been asserted" (UM 7.8).
+  always_ff @(posedge clk or negedge eng_rst_n) begin
+    if (!eng_rst_n) begin
       st_p       <= rd68031_pkg::ST_IDLE;
       op_active  <= 1'b0;
       op_addr    <= '0;
@@ -1230,8 +1284,6 @@ module rd68031_biu #(
       beat_port  <= rd68031_pkg::DSACK_32;
       beat_ciin  <= 1'b0;
       beat_fetch <= 1'b0;
-      arb        <= rd68031_pkg::ARB_IDLE;
-      hiz_q      <= 1'b0;
       rmc_hold   <= 1'b0;
       rmc_first_q <= 1'b0;
       halt_hold  <= 1'b0;
@@ -1255,7 +1307,7 @@ module rd68031_biu #(
         req_ciin   <= 1'b0;
         rdata_q    <= {8'd0, rst_dob};
       end else if (rst_pend_q && rst_post_q && (rst_bytes == 3'd0))
-        // The handler wrote it -- UM20 6.2.2 -- and there is nothing to run.
+        // The handler wrote it -- UM 8.2.2 -- and there is nothing to run.
         rst_pend_q <= 1'b0;
       else if (rst_cancel && !rst_post_q)
         rst_pend_q <= 1'b0;
@@ -1267,23 +1319,6 @@ module rd68031_biu #(
       fetch_fault  <= 1'b0;
       beat_valid   <= 1'b0;
       beat_err     <= 1'b0;
-
-      arb <= arb_nxt;
-
-      // "If T is true, the address, data, and control buses are placed in the
-      // high-impedance state after the next rising edge following the negation of
-      // AS and RMC" -- UM 7.7.4. Registered on the way up, so the release waits
-      // for that edge; combinational on the way down, because "the bus control
-      // signals (controlled by T) are driven by the processor, immediately
-      // following a state change, when bus mastership is returned".
-      //
-      // RMC holds the bus only while it locks it. Single-wire arbitration is
-      // the other exception: it "applies to all bus cycles of a
-      // read-modify-write sequence" -- "an alternate master forces the MC68030
-      // to release the bus by asserting BGACK and waits for AS to negate before
-      // taking the bus" (UM 7.7.4) -- so with A asserted the release does not
-      // wait for RMC.
-      hiz_q <= arb_t_of(arb_nxt) && !as_win && (!rmc_lock || arb_a);
 
       halt_hold <= (st_p_nxt == rd68031_pkg::ST_HALT);
 
@@ -1494,8 +1529,16 @@ module rd68031_biu #(
                  && (cyc_addr[19:16] == rd68031_pkg::CPUS_IACK);
   logic early_q;
 
+  // "The BG signal transitions on the falling edge of the clock after a state
+  // is reached during which G changes" -- UM 7.7.4. With the arbiter, on rst_n
+  // alone: arbitration goes on under the RESET pin (UM 7.7).
   always_ff @(negedge clk or negedge rst_n) begin
-    if (!rst_n) begin
+    if (!rst_n) bg_n_o <= 1'b1;
+    else        bg_n_o <= ~arb_g_of(arb);
+  end
+
+  always_ff @(negedge clk or negedge eng_rst_n) begin
+    if (!eng_rst_n) begin
       st_n      <= rd68031_pkg::ST_IDLE;
       dsack_q   <= rd68031_pkg::DSACK_WAIT;
       term_q    <= 1'b0;
@@ -1510,7 +1553,6 @@ module rd68031_biu #(
       ds_q      <= 1'b0;
       cbreq_q   <= 1'b0;
       d_latched <= '0;
-      bg_n_o    <= 1'b1;
       early_q   <= 1'b0;
       retry_clr_q <= 1'b1;
     end else begin
@@ -1543,10 +1585,6 @@ module rd68031_biu #(
       early_q <= (st_n_nxt == rd68031_pkg::ST_S5) && op_active && !op_isfetch
               && !op_posted && (beat_q == 3'd0)
               && !term_err && !term_rty && !berr_s && (op_rem == xfer_n);
-
-      // "The BG signal transitions on the falling edge of the clock after a state
-      // is reached during which G changes" -- UM 7.7.4.
-      bg_n_o <= ~arb_g_of(arb);
 
       beat_q <= beat_nxt;
 
@@ -1675,7 +1713,7 @@ module rd68031_biu #(
   assign dben_tn   = dben_fall ^ dben_q;
 
   rd68031_dedge_ff #(.RESET_VAL (1'b0)) u_dben (
-      .clk (clk), .rst_n (rst_n), .toggle_p (dben_tp), .toggle_n (dben_tn),
+      .clk (clk), .rst_n (eng_rst_n), .toggle_p (dben_tp), .toggle_n (dben_tn),
       .q (dben_q));
 
   assign dben_n_o = ~dben_q;
@@ -1706,9 +1744,10 @@ module rd68031_biu #(
   // Output enables.
   //
   // UM 7.8: "during the reset period, the entire bus three-states (except for
-  // non-three-statable signals, which are driven to their inactive state)". The
-  // reset this design has is rst_n -- doc/pinout.md -- and every enable below
-  // drops with it.
+  // non-three-statable signals, which are driven to their inactive state)".
+  // Both resets count: rst_n, the power-on initialisation that is not an
+  // MC68030 pin (doc/pinout.md), and the RESET pin from outside -- every
+  // enable below drops with eng_rst_n, which is either.
   //
   // The address group is driven from S0 and released at the rising edge that ends
   // S5 (specification 7) -- except while halted, where UM 7.5.3 says the address,
@@ -1722,7 +1761,7 @@ module rd68031_biu #(
   logic addr_drive;
   assign addr_drive = ADDR_HIZ_BETWEEN_CYCLES ? (cyc_drive || halt_hold) : 1'b1;
 
-  assign a_oe     = addr_drive && !bus_granted && rst_n;
+  assign a_oe     = addr_drive && !bus_granted && eng_rst_n;
   assign fc_oe    = a_oe;
   assign siz_oe   = a_oe;
   assign ciout_oe = a_oe;
@@ -1730,22 +1769,22 @@ module rd68031_biu #(
   // to high impedance between cycles -- ADDR_HIZ_BETWEEN_CYCLES -- and if RMC
   // followed it there, an external wrapper would three-state the one signal
   // whose job is to stay asserted in the gap.
-  assign rmc_oe = (addr_drive || rmc_hold) && !bus_granted && rst_n;
+  assign rmc_oe = (addr_drive || rmc_hold) && !bus_granted && eng_rst_n;
 
   // Write data is driven from the rising edge entering S2 and held through S5.
   // "When the processor completes a bus cycle with the HALT signal asserted, the
   // data bus is placed in the high-impedance state" -- so no halt term here.
-  assign d_oe = doe_q && !bus_granted && rst_n;
+  assign d_oe = doe_q && !bus_granted && eng_rst_n;
 
   // The control group is driven except on relinquish and reset. UM 7.5.3 is
   // explicit that halting drives these inactive rather than releasing them, and
   // 7.7.4's T is what releases them. CBREQ is in this group: specification 16
   // is "Clock High to AS, DS, R/W, DBEN, CBREQ High Impedance".
-  assign as_oe    = !bus_granted && rst_n;
-  assign ds_oe    = !bus_granted && rst_n;
-  assign rw_oe    = !bus_granted && rst_n;
-  assign dben_oe  = !bus_granted && rst_n;
-  assign cbreq_oe = !bus_granted && rst_n;
+  assign as_oe    = !bus_granted && eng_rst_n;
+  assign ds_oe    = !bus_granted && eng_rst_n;
+  assign rw_oe    = !bus_granted && eng_rst_n;
+  assign dben_oe  = !bus_granted && eng_rst_n;
+  assign cbreq_oe = !bus_granted && eng_rst_n;
 
   // RESET is open drain: the output value is a constant zero and the enable is
   // what asserts it. HALT is an input only on the MC68030 (Table 5-2); the
@@ -1788,8 +1827,8 @@ module rd68031_biu #(
     sts_take = (sts_pend_q > sts_code) ? sts_pend_q : sts_code;
   end
 
-  always_ff @(negedge clk or negedge rst_n) begin
-    if (!rst_n) begin
+  always_ff @(negedge clk or negedge eng_rst_n) begin
+    if (!eng_rst_n) begin
       sts_rem_q   <= 2'd0;
       sts_pend_q  <= 2'd0;
       sts_on_q    <= 1'b0;
@@ -1869,13 +1908,13 @@ module rd68031_biu #(
   // about the last of them.
   //
   // The address is the operand's residual address -- the next byte still to
-  // transfer -- and not the address the microword asked for. UM20 6.2.2 has the
-  // handler "transfer the properly sized data from the data output buffer on
-  // the stack frame to the location indicated by the data fault address", and
+  // transfer -- and not the address the microword asked for. UM 8.2.2 has the
+  // handler "transfer the properly sized data from the data output buffer (DOB)
+  // on the stack frame to the location indicated by the data fault address", and
   // what is left to transfer is what it has to move.
   // ==========================================================================
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
+  always_ff @(posedge clk or negedge eng_rst_n) begin
+    if (!eng_rst_n) begin
       flt_addr  <= '0;
       flt_bytes <= 3'd0;
       flt_fc    <= 3'd0;
@@ -1933,6 +1972,49 @@ module rd68031_biu #(
   end
 
   assign reset_busy  = rsto_q || (reset_req && rsto_arm_q);
+
+  // ==========================================================================
+  // The RESET pin as an input -- UM 7.8, 5.10.1 and 8.1.1
+  //
+  // "An external reset signal resets the MC68030 as well as all external
+  // devices. A reset signal from the processor (asserted as part of the RESET
+  // instruction) resets external devices only; the internal state of the
+  // processor is not altered" (UM 5.10.1). RESET alone does it: the MC68030
+  // asks for no HALT with it (UM 7.8, figure 7-64), and "asserting RESET for 10
+  // clock periods is sufficient for resetting the processor logic".
+  //
+  // The pin is open drain and this processor drives it for the RESET
+  // instruction, so its own pulse comes back on the input. UM 7.8: "an
+  // external RESET signal that is asserted to the processor during execution
+  // of a reset instruction must extend beyond the reset period of the
+  // instruction by at least eight clock cycles to reset the processor". So the
+  // input is not acted on while the instruction drives the pin, nor for
+  // RSTO_TAIL clocks after -- the two falling-edge ranks of the synchroniser
+  // and one rising edge, with a clock to spare -- and a RESET held on from
+  // outside past that resets the processor, inside the eight clocks the manual
+  // allows.
+  //
+  // crst_q is a rising-edge register, and is the reset the rest of the
+  // processor sees (`crst`): held for as long as the pin is, and released on a
+  // rising edge, after which reset exception processing begins exactly as it
+  // does after rst_n (UM 8.1.1, figure 8-1). What it resets, and what it
+  // leaves alone, is in rd68031_seq and doc/pinout.md.
+  // ==========================================================================
+  localparam logic [2:0] RSTO_TAIL = 3'd4;
+  logic [2:0] rsto_tail_q;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      rsto_tail_q <= 3'd0;
+      crst_q      <= 1'b0;
+    end else begin
+      if (rsto_q)                   rsto_tail_q <= RSTO_TAIL;
+      else if (rsto_tail_q != 3'd0) rsto_tail_q <= rsto_tail_q - 3'd1;
+      crst_q <= !reset_sync_n && !rsto_q && (rsto_tail_q == 3'd0);
+    end
+  end
+
+  assign crst = crst_q;
   assign bus_idle    = bus_is_idle;
 
   // ==========================================================================

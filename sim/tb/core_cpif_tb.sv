@@ -1354,7 +1354,7 @@ module core_cpif_tb;
     // ======================================================================
     // The MC68881's port: its sixteen-bit registers answer with DSACK1 alone,
     // on D31-D16 whatever A1 says (MC68881 UM 10.2). A word write to the command
-    // CIR at A1 = 1 then reaches it on the upper half, where UM20 table 5-7 has
+    // CIR at A1 = 1 then reaches it on the upper half, where UM Table 7-5 has
     // the processor duplicate it; a word read of the restore CIR at A1 = 1 comes
     // back on the upper half too, which is what a sixteen-bit port means.
     // ======================================================================

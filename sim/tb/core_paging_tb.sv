@@ -19,9 +19,13 @@
 //     operand size   1, 2 and 4 bytes
 //     alignment      A1A0 = 00, 01, 10, 11
 //     port size      8, 16 and 32 bits
-//     direction      read and write
+//     direction      read, write, and -- since M8-M9 -- read-modify-write
 //
-// is run with the operand straddling a page that is not there. The handler is
+// is run with the operand straddling a page that is not there. The
+// read-modify-write is CAS: its locked read faults part-way, the frame says RM
+// with the residual of the read, and RTE with DF set reruns the whole
+// instruction (UM 8.2.3) -- so the operand is read again from its first byte,
+// compared and written, all of it, once. The handler is
 // real code: it reads the data fault address out of the frame at +$10, hands
 // it to the pager, and returns with DF still set so that the processor reruns
 // the access itself -- UM 8.2.3.
@@ -55,6 +59,8 @@ module core_paging_tb;
   logic [31:0] page_at;
   logic [31:0] addr;
   logic [31:0] want;
+  logic [31:0] upd;
+  logic [31:0] spin;
   logic [31:0] mask;
   logic [15:0] got_w;
   bit          reached;
@@ -109,7 +115,7 @@ module core_paging_tb;
     faults    = 0;
     cases_run = 0;
 
-    for (idir = 0; idir < 2; idir = idir + 1)
+    for (idir = 0; idir < 3; idir = idir + 1)
     for (iport = 0; iport < 3; iport = iport + 1)
     for (isize = 0; isize < 3; isize = isize + 1)
     for (ialign = 0; ialign < 4; ialign = ialign + 1) begin
@@ -134,26 +140,39 @@ module core_paging_tb;
 
       setup();
       want = 32'h1234_5678 >> (8 * (4 - opsize));
+      upd  = 32'hA5C3_9E71 >> (8 * (4 - opsize));
+      spin = (idir == 2) ? CODE + 20 : CODE + 16;
 
       // The program. The operand goes to or from D0 through (A0).
       poke_w(CODE + 0, 16'h207C);                    // MOVEA.L #addr,A0
       poke_l(CODE + 2, addr);
       poke_w(CODE + 6, 16'h203C);                    // MOVE.L #want,D0
       poke_l(CODE + 8, want);
-      if (idir == 0)
+      if (idir == 0) begin
         // A write: MOVE.<size> D0,(A0)
         poke_w(CODE + 12, (opsize == 1) ? 16'h1080 :
                           (opsize == 2) ? 16'h3080 : 16'h2080);
-      else
+        poke_w(CODE + 14, 16'h7455);                 // MOVEQ #$55,D2
+        poke_w(CODE + 16, 16'h60FE);                 // BRA *
+      end else if (idir == 1) begin
         // A read into D1: MOVE.<size> (A0),D1
         poke_w(CODE + 12, (opsize == 1) ? 16'h1210 :
                           (opsize == 2) ? 16'h3210 : 16'h2210);
-      poke_w(CODE + 14, 16'h7455);                   // MOVEQ #$55,D2
-      poke_w(CODE + 16, 16'h60FE);                   // BRA *
+        poke_w(CODE + 14, 16'h7455);                 // MOVEQ #$55,D2
+        poke_w(CODE + 16, 16'h60FE);                 // BRA *
+      end else begin
+        // CAS.<size> D0,D3,(A0): the compare operand is what memory holds.
+        poke_w(CODE + 12, (opsize == 1) ? 16'h0AD0 :
+                          (opsize == 2) ? 16'h0CD0 : 16'h0ED0);
+        poke_w(CODE + 14, 16'h00C0);                 // Du = D3, Dc = D0
+        poke_w(CODE + 16, 16'h42C4);                 // MOVE.W CCR,D4
+        poke_w(CODE + 18, 16'h7455);                 // MOVEQ #$55,D2
+        poke_w(CODE + 20, 16'h60FE);                 // BRA *
+      end
 
       // For a read, put the answer where the instruction will look for it --
       // in memory that is about to be unmapped, which is the point.
-      if (idir == 1) begin
+      if (idir != 0) begin
         case (opsize)
           1: poke_w(addr & ~32'd1, (addr[0] ? {8'h00, want[7:0]}
                                             : {want[7:0], 8'h00}));
@@ -163,6 +182,7 @@ module core_paging_tb;
       end
 
       reset_dut();
+      dut.u_seq.dreg[3] = upd;
       berr_en   = 1'b1;
       berr_base = page_at;
       berr_mask = PAGE_MASK;
@@ -177,10 +197,11 @@ module core_paging_tb;
       // UM Table 7-2: SIZ1/SIZ0 00 is four bytes, 01 one, 10 two, 11 three.
       r_size = (r_bytes == 4) ? 2'b00 : r_bytes[1:0];
 
-      run_until(CODE + 16, 6000, reached);
+      run_until(spin, 6000, reached);
       cases_run = cases_run + 1;
       check(reached, $sformatf("%s size %0d at %08h (%s): the program finishes",
-                               what, opsize, addr, idir ? "read" : "write"));
+                               what, opsize, addr,
+                               (idir == 0) ? "write" : (idir == 1) ? "read" : "CAS"));
       check(dut.u_seq.dreg[2] === 32'h0000_0055,
             $sformatf("%s size %0d at %08h: the next instruction ran",
                       what, opsize, addr));
@@ -201,9 +222,9 @@ module core_paging_tb;
                       what, opsize, addr, f_dfa, r_addr));
       check(f_ssw[8] === 1'b1,
             $sformatf("%s size %0d at %08h: SSW DF -- UM figure 8-9", what, opsize, addr));
-      check(f_ssw[7] === 1'b0,
-            $sformatf("%s size %0d at %08h: SSW RM clear", what, opsize, addr));
-      check(f_ssw[6] === idir[0],
+      check(f_ssw[7] === (idir == 2),
+            $sformatf("%s size %0d at %08h: SSW RM -- UM figure 8-9", what, opsize, addr));
+      check(f_ssw[6] === (idir != 0),
             $sformatf("%s size %0d at %08h: SSW RW -- UM figure 8-9", what, opsize, addr));
       check(f_ssw[5:4] === r_size,
             $sformatf("%s size %0d at %08h: SSW SIZE %b, the %0d bytes left, want %b -- UM figure 8-9, Table 7-2",
@@ -213,7 +234,7 @@ module core_paging_tb;
       check((f_ssw & rd68031_frame_pkg::SSW_INTERNAL) === 16'h0,
             $sformatf("%s size %0d at %08h: SSW internal bits zero -- doc/ssw.md",
                       what, opsize, addr));
-      if (idir == 1)
+      if (idir != 0)
         check(f_pc === CODE + 12,
               $sformatf("%s size %0d at %08h: +$02 the read's own instruction", what, opsize, addr));
       else
@@ -232,12 +253,28 @@ module core_paging_tb;
           default: check({peek_w(addr), peek_w(addr + 2)} === want,
                    $sformatf("%s long at %08h: the long word landed", what, addr));
         endcase
-      end else begin
+      end else if (idir == 1) begin
         mask = (opsize == 1) ? 32'h0000_00FF
              : (opsize == 2) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
         check((dut.u_seq.dreg[1] & mask) === (want & mask),
               $sformatf("%s size %0d at %08h: the operand was read",
                         what, opsize, addr));
+      end else begin
+        // The whole CAS ran again: compared equal, and the update written,
+        // every byte, once -- UM 8.2.3.
+        check(dut.u_seq.dreg[4][2] === 1'b1,
+              $sformatf("CAS %s size %0d at %08h: Z, the compare was equal", what, opsize, addr));
+        case (opsize)
+          1: begin
+            got_w = peek_w(addr & ~32'd1);
+            check((addr[0] ? got_w[7:0] : got_w[15:8]) === upd[7:0],
+                  $sformatf("CAS %s byte at %08h: the update landed", what, addr));
+          end
+          2: check(peek_w(addr) === upd[15:0],
+                   $sformatf("CAS %s word at %08h: the update landed", what, addr));
+          default: check({peek_w(addr), peek_w(addr + 2)} === upd,
+                   $sformatf("CAS %s long at %08h: the update landed", what, addr));
+        endcase
       end
     end
 

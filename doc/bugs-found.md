@@ -706,3 +706,105 @@ it.
 **Fixed by:** `cas2_fail` writes Dc2 first and Dc1 last.
 
 **Stops it coming back:** `core_insn_tb`'s failed CAS2.L D3:D3.
+
+---
+
+## M8-M9 · Reset exception processing was not a double bus fault window
+
+**What:** UM 8.1.1 (figure 8-1) and 12.7.1: "the processor also halts if it
+receives a bus error or address error during the vector table read operations or
+the prefetch for the first instruction after an external reset". The window
+that makes a second fault a double bus fault, `g0_q`, came out of reset clear,
+so a bus error on the reset vector read took an ordinary bus error exception --
+a frame written below whatever the stack pointer happened to be, and a vector
+read through a VBR the reset had just made zero. And inside the window, only a
+data fault halted: a prefetch that faulted, or an odd program counter, during
+the exception processing of a bus error, an address error or reset left the
+sequencer waiting for a word that would never come, with no STATUS indication
+at all, where UM 12.7.1 counts "any additional bus error exception occurring
+before the execution of the first instruction of the bus error handler routine"
+and UM 8.1.3 an address error. Inherited from RD68021.
+
+**Found by:** reading figure 8-1 and 12.7.1 against `rd68031_seq` while making
+the RESET pin reset the processor.
+
+**Fixed by:** `g0_q` is set by both resets and cleared by the handler's first
+decode, and a double bus fault is any fault inside it, data or prefetch.
+
+**Stops it coming back:** `core_reset_tb` part 4 -- a bus error on the vector
+read, an odd initial program counter, a bus error on the first prefetch -- and
+`core_fault_tb`'s odd and missing bus error vectors.
+
+---
+
+## M8-M9 · A traced instruction that faulted traced the fault's handler
+
+**What:** UM 8.1.7: "if an instruction does not complete due to a bus error or
+address error exception, trace exception processing is deferred until after the
+execution of the suspended instruction is resumed and the instruction execution
+completes normally". The sequencer decides a trace at a boundary from the trace
+mode the instruction began with, and the boundary that ends a bus error's
+exception processing still had the faulted instruction's: with T1 set, a trace
+exception was taken there, its frame naming the bus error handler, before the
+handler's first instruction. The instruction itself was then traced again when
+RTE resumed and completed it. Inherited from RD68021.
+
+**Found by:** reading UM 8.1.7 against `trace_take` while covering the
+simultaneous-exception cases of UM 8.1.12.
+
+**Fixed by:** no trace at a boundary `g0_q` is still set at -- the end of
+exception processing for a bus or address error. The trace mode and the cancel
+bit go into the frame as they were and come back with the RTE.
+
+**Stops it coming back:** `core_fault_tb`'s traced MOVE whose read faults (two
+traces, the MOVE's after it completes, then the next instruction's), and the
+same with an interrupt arriving with the fault (handlers in the order I, B, T,
+T).
+
+---
+
+## M8-M9 · IPEND negated before the interrupt acknowledge
+
+**What:** UM 8.1.9: "if no higher priority interrupt has been synchronized, the
+IPEND signal is negated during state 0 (S0) of an interrupt acknowledge cycle".
+IPEND is the comparison of the level against the mask, and the interrupt
+exception raises the mask -- and, for level 7, consumes the transition -- a few
+microwords before the acknowledge, so the pin went inactive that much early:
+with a prefetch on the bus at the time, several clocks before S0.
+
+**Found by:** reading UM 8.1.9 and figure 8-4 while checking the interrupt
+details M3's registered IPEND left open.
+
+**Fixed by:** `iack_due_q` holds the pin from the step into the interrupt entry
+to the rising edge that starts the acknowledge's S0 (`req_start` from the bus
+unit); a higher level synchronised meanwhile keeps it asserted after that by the
+comparison alone.
+
+**Stops it coming back:** `core_excpri_tb` checks that IPEND negates on the
+rising edge half a clock before the acknowledge's AS.
+
+---
+
+## M8-M9 · RTE reran a read-modify-write from its faulted cycle
+
+**What:** UM 8.2.3: "the rerun operation, executed by the RTE instruction with
+the DF bit of the SSW set, reruns the entire instruction". RTE resumed a CAS,
+CAS2 or TAS at the microword whose access faulted, as for any other access: a
+fault on the write wrote the update it had decided on before the fault, without
+reading the operand again, so a value another master had written in the
+meantime was overwritten -- the one thing the locked sequence exists to
+prevent. For a fault on the first read the two are the same, which is the case
+the MC68030's MMU produces (it refuses an RMC cycle on its read, UM 8.2.3), and
+the one `core_cow_tb` had. Inherited from RD68021.
+
+**Found by:** reading UM 8.2.3 while implementing UM 8.2.2's completed
+read-modify-write.
+
+**Fixed by:** the long frame carries the micro-address the locked sequence
+starts at (`+$52`, `rmwupc`); RTE with RM and DF set resumes there and hands
+nothing back to the bus unit (`doc/checkpoint.md` rule 5).
+
+**Stops it coming back:** `core_fault_tb`: CAS whose write faults while the
+operand changes, CAS2 faulted on each of its four accesses, TAS whose write
+faults while the byte changes; `core_cow_tb`: CAS2 across two protected pages,
+rerun whole twice.

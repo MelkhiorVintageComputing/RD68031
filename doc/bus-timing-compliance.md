@@ -456,25 +456,36 @@ error with and without a fault, and a retry.
 
 "During the reset period, the entire bus three-states (except for
 non-three-statable signals, which are driven to their inactive state)" (7.8).
-The reset this design has is `rst_n` (`doc/pinout.md`): every output enable
-drops with it, and ECS, OCS, BG, STATUS and REFILL, which Table 5-2 lists as
-not three-stated, are driven inactive. "Once RESET negates, all control
-signals are driven to their inactive state, the data bus is in read mode" —
-R/W high, the data not driven — "and the address bus is driven": not with
-`ADDR_HIZ_BETWEEN_CYCLES` set, its default by the user's decision, which
+Since M8-M9 both resets do it: `rst_n`, which is not an MC68030 pin
+(`doc/pinout.md`), and the RESET pin from outside. Every output enable drops
+with either, and ECS, OCS, STATUS and REFILL, which Table 5-2 lists as not
+three-stated, are driven inactive; BG is the arbiter's, which runs under the
+RESET pin (7.7) and not under `rst_n` (`doc/divergences.md`). A bus cycle in
+progress when the pin goes low is abandoned -- "resetting the processor causes
+any bus cycle in progress to terminate as if DSACKx, BERR, or STERM had been
+asserted" -- and nothing starts while it is held. "Once RESET negates, all
+control signals are driven to their inactive state, the data bus is in read
+mode" -- R/W high, the data not driven -- "and the address bus is driven": not
+with `ADDR_HIZ_BETWEEN_CYCLES` set, its default by the user's decision, which
 releases it until the first cycle (`doc/divergences.md`).
 
-The RESET instruction drives RESET for 512 clocks — "the processor drives the
+The RESET instruction drives RESET for 512 clocks -- "the processor drives the
 RESET signal for 512 clock cycles ... the internal registers of the processor
-are unaffected" — open drain, from a request the microword holds; it is not
-restarted by a request still held when it ends. The external RESET input is
-synchronised and does not reset the core (`doc/divergences.md`); arbitration
-goes on under it, as 7.7 says it does.
+are unaffected" -- open drain, from a request the microword holds; it is not
+restarted by a request still held when it ends. Its own pulse comes back on
+the RESET input and does not reset the processor, and neither does a RESET
+from outside that ends within four clocks of it; "an external RESET signal that
+is asserted to the processor during execution of a reset instruction must
+extend beyond the reset period of the instruction by at least eight clock
+cycles to reset the processor" (7.8), and one that does, does.
 
-`sim/tb/bus_reset_tb.sv` (25 checks): the pins in reset, with BR asserted; the
-pins after it; the pulse's length, twice; arbitration during the RESET
-instruction and with RESET held low from outside; the bus unit working after
-its own RESET input read low for 512 clocks.
+`sim/tb/bus_reset_tb.sv` (38 checks): the pins in `rst_n`, with BR asserted;
+the pins after it; the pulse's length, twice, and that it resets nothing;
+arbitration during the RESET instruction; the RESET pin from outside --
+the bus three-stated, nothing started, BR granted and given back under it, a
+cycle in progress abandoned and its operand run again afterwards; and a RESET
+from outside overlapping the instruction's pulse by none, two and eight clocks.
+`core_reset_tb` has the processor's side of it.
 
 ## Cache control pins
 

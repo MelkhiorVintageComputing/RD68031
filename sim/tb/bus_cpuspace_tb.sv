@@ -359,7 +359,7 @@ module bus_cpuspace_tb;
 
     // Nobody answers CpID 3. A bus error there is the F-line exception's
     // business when the access starts an instruction, and a bus error
-    // exception otherwise: the requester says which (UM 10.5, UM20 7.5.2.8).
+    // exception otherwise: the requester says which (UM 10.5.2.8).
     fork
       exc_on_next(1'b0, 0);
       cpu_op(4'h2, {3'd3, 5'h00}, 2, 1'b0, 40'd0);

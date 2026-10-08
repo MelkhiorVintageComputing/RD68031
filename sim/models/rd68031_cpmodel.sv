@@ -151,7 +151,7 @@ module rd68031_cpmodel #(
   assign dsack_n_o = !selected ? 2'b11 : (port16 && word_reg) ? 2'b01 : 2'b00;
 
   // The bytes a write carried, right justified: a 32-bit port puts byte k of an
-  // access at lane (A1A0 + k) -- UM20 table 5-7.
+  // access at lane (A1A0 + k) -- UM Table 7-5.
   function automatic logic [31:0] wr_value(input logic [31:0] d,
                                            input logic [1:0] a10,
                                            input int unsigned n);

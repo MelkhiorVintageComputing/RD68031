@@ -203,6 +203,21 @@ A C++ machine that mirrors the Linux and QEMU m68k `virt` board, so that a stock
 | M14 | MAME Sun-3/80: the PROM to the monitor first; then, after the driver work above, NetBSD/sun3x and SunOS 4.1.1 | `make sun3x`, then `make netbsd-sun3x sunos3x` |
 | M15 | Performance and FPGA (Vivado/Quartus scripts carried over), plus `make cycles` against UM §11 | `doc/implementation.md` |
 
+**Status (M8–M9):** exception processing re-derived from UM section 8. The
+RESET pin resets the processor (UM 7.8, 8.1.1) and `rst_n` stays the power-on
+initialisation; RTE halts on a bus error while it loads a fault frame (UM
+8.1.13); a read-modify-write is completed or rerun whole, never resumed at its
+faulted access (UM 8.2.2, 8.2.3); STATUS gives every exception Table 12-4
+names its three clocks but the ATC miss. Carried forward to **M11**, which
+builds the MMU's registers: UM 8.1.1 step 7 -- the reset "clears the enable bit
+in the translation control register and the enable bits in both transparent
+translation registers" -- goes in the `crst` arm of `rd68031_seq`'s register
+process beside SR, VBR and CACR; PMOVE of an invalid TC, CRP or SRP jumps to
+`exc_mmu_config` in `tools/ucode/program.py`, vector 56, already built as the
+post-instruction format $2 frame UM 8.1.10 describes; and the ATC miss's three
+clocks of STATUS are a `mark = EXC` (or its own event) on the table search's
+first microword.
+
 **Known suspects when real software misbehaves (M13, M14):** the deliberate
 differences from the part that follow the manual instead -- `LINK A7` pushes the
 decremented stack pointer where the part pushes the value before it, and the

@@ -84,6 +84,15 @@ gives every flop a defined value; the architectural reset behaviour (RESET asser
 ISP fetched from $0 and the PC from $4) is a separate sequence driven by `reset_n_i`. Do
 not conflate them.
 
+Since M8-M9 the RESET pin is acted on, and how it reaches a register is part of this
+rule. The bus unit registers it as `crst`; a block whose registers the pin resets
+entirely is reset asynchronously by `rst_n && !crst` (`core_rst_n` in `rd68031_seq`,
+`eng_rst_n` in `rd68031_biu`, and the fetch unit's whole reset). The one process that
+also holds registers the pin must spare -- `rd68031_seq`'s, with D0-D7, A0-A6, USP, MSP,
+SFC, DFC and CAAR -- keeps `rst_n` as its asynchronous reset and takes `crst` as a
+synchronous arm below it that assigns only the rest. Every register still has its value
+from `rst_n`; `crst` only ever assigns the same constants again.
+
 The instruction cache is the one structure that looks like an exception and is not. UM
 §4.2: "during processor reset, the cache is cleared by resetting all of the valid bits."
 The valid bits are resettable flops; the tag and data arrays are an unreset RAM that the
@@ -219,6 +228,7 @@ A function whose result depends only on its arguments is still fine anywhere.
 | all of them | a testbench that *releases reset* on a rising edge races the design, because every register takes its reset value on that same edge and both are non-blocking assignments at the same time step. The tell is that adding a `$display` to the harness changes the result | a testbench changes an input the design samples on a rising edge only on a **falling** edge. Measured here: the first vector of a sweep behaved differently from the same vector replayed later |
 | Quartus | a macro expanding to a **package-scoped part-select** (`` `UF(EAPC) `` → `pkg::U_EAPC_LSB +: pkg::U_EAPC_W`) is fine in a procedural block and **not** in a port connection: Quartus reads both scoped names as undeclared identifiers, creates implicit nets and builds a netlist that does not match the source, exit code 0 | bind it to a named signal and pass that. Measured here on `u_eadec.pc_base`; iverilog, Verilator, yosys, Vivado and Questa all accepted it |
 | yosys | a variable **declared inside an `always_ff`** and assigned with `=` reads like a temporary and is not one: yosys gives it storage, and the flip-flops it makes have no reset because nothing in the reset branch mentions them | declare it outside and drive it with a continuous assignment. Measured here on a four-bit register select inside MOVEM's destination arm: `make lint` passed and `make audit` reported four flip-flops initialising outside reset |
+| yosys | the same for a **`for` loop's own index** (`for (int i ...)`) in an arm of an `always_ff` that is not the asynchronous reset's -- a synchronous reset arm, say: the `int` becomes thirty-two flip-flops with no reset. The same loop in the asynchronous reset branch makes none | write the assignments out. Measured at M8-M9 on the RESET pin's `crst` arm in `rd68031_seq`, clearing T0-T3: `make lint` passed and `make audit` reported 139 unreset flip-flops for 107 exempted |
 | Quartus, Vivado, Questa | a signal **used before it is declared** inside a module. iverilog, Verilator and yosys all accept it; Quartus creates an implicit net and builds a netlist that does not match the source, Vivado's `[Synth 8-6901]` says so, and Questa refuses with `Undefined variable` | declare every signal above its first use. Measured here on six signals the datapath's source multiplexers read from units written further down the file: three front-ends green, three refusing |
 
 Two of these are checked by `tools/src_lint.py`, which is part of `make lint`:

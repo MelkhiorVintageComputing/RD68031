@@ -215,6 +215,10 @@ INTERNAL = [
     (0x4A, 15,  0, 'cprim',     16,  'the coprocessor response primitive being served'),
     (0x08,  5,  5, 'posted',     1,  'the faulted access was a posted write, which RTE reruns by itself'),
     (0x08, 12, 10, 'irqlvl',     3,  'the level of the interrupt being taken'),
+    # M8-M9, out of its reservation: UM 8.2.3, RTE with DF set "reruns the
+    # entire instruction" of a read-modify-write, so the frame says where the
+    # locked sequence starts.
+    (0x52, 15,  0, 'rmwupc',    16,  'the micro-address the read-modify-write under way starts again at'),
 ]
 
 # --------------------------------------------------------------------------
@@ -237,8 +241,7 @@ RESERVED = [
     (0x50, 1, 'M10', 'the faulted operand\'s cache disposition, should an RTE '
                      'rerun need to know how the first attempt left the data '
                      'cache'),
-    (0x52, 1, 'M8-M9', 'exception-processing state, should the rework of '
-                       'exceptions need any beyond the working registers'),
+    # M8-M9's word, +$52, became `rmwupc` above.
 ]
 
 # --------------------------------------------------------------------------
@@ -302,6 +305,15 @@ FAULTS = [
     ('rte_access', 'M4', 'RTE on a $A or $B frame it cannot read at one of '
      'its two ends -- UM 8.1.13', 2, 0xB, 'as data, a read', '+$10 the end '
      'it could not read; the frame is left intact and nothing was restored'),
+    ('double', 'M8-M9', 'a bus or address error during exception processing '
+     'for a bus error, an address error or reset, up to the first instruction '
+     'of the handler -- the stacking, the vector read, the handler\'s first '
+     'prefetch (UM 8.1.2, 8.1.3, 12.7.1)', None, None,
+     'none: the processor halts, STATUS asserted continuously, and only a '
+     'reset restarts it (UM 7.5.4)', 'none'),
+    ('rte_load', 'M8-M9', 'a bus error while RTE loads a $A or $B frame it has '
+     'validated -- UM 8.1.13, "once the processor begins to load the frame"',
+     None, None, 'none: a double bus fault, as above', 'none'),
 ]
 
 # --------------------------------------------------------------------------
@@ -361,6 +373,7 @@ CHECKPOINT = [
     ('seq', 'sr_q',             16, 'sr',            'frame +$00'),
     ('seq', 'cprim_q',          16, 'cprim',         'UM 10.5.2.8: a bus error on any CIR access but the first, or on an operand a primitive moves, is an ordinary bus error, and RTE goes back to the primitive it interrupted'),
     ('seq', 'post_flt_q',        1, 'posted',        'doc/checkpoint.md rule 9: the faulted access belongs to no microword -- the write was posted and the instruction went on -- so RTE runs it on its own and resumes at the microword that was interrupted'),
+    ('seq', 'rmw_upc_q',        16, 'rmwupc',        'UM 8.2.3: with DF set, RTE "reruns the entire instruction" of a read-modify-write -- CAS, CAS2 or TAS -- so it resumes at the start of the locked sequence, which the microword marked RMW latched, and not at the faulted access'),
     ('seq', 'irq_taking_q',      3, 'irqlvl',        'the level of the interrupt being taken, from the dispatch to the acknowledge. A posted write\'s fault can land in between -- doc/checkpoint.md rule 9 -- and the acknowledge after RTE has to ask for the same level'),
 ]
 
@@ -424,6 +437,10 @@ EXEMPT = [
     ('biu', 'rsto_cnt',     '... for this many more clocks'),
     ('biu', 'rsto_arm_q',   '... and the request has been let go since, so the '
                             'count cannot restart itself'),
+    ('biu', 'rsto_tail_q',  '... and the clocks after it in which the pin is '
+                            'still read as the instruction\'s own -- UM 7.8'),
+    ('biu', 'crst_q',       'the RESET pin is resetting the processor -- UM 7.8, '
+                            '8.1.1. Nothing survives it to be restored'),
 
     # The live operand. What a fault frame carries is the SNAPSHOT above, taken
     # on the clock the fault is reported, because the frame is built by bus
@@ -545,6 +562,11 @@ EXEMPT = [
     ('seq', 'caar_q',       'architectural'),
     ('seq', 'ipend_q',      'the IPEND pin, registered: about the pins and '
                             'the mask, recomputed every clock'),
+    ('seq', 'iack_due_q',   '... held from the step into an interrupt to its '
+                            'acknowledge\'s S0 (UM 8.1.9). A fault in between '
+                            'clears it, and the acknowledge after RTE is from '
+                            'the frame\'s irqlvl, with the pin as the mask '
+                            'then says'),
     ('seq', 'irq_prev_q',   'the interrupt level at the last instruction '
                             'boundary. It is about the PINS, not about the '
                             'instruction: a fault does not change what the '

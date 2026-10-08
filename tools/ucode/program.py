@@ -152,8 +152,9 @@ u('no pattern for this opcode -- UM 8.1.5, vector 4',
 label('nop')
 opcode('0100111001110001', 'nop', 'NOP')
 # PRM 4: "the processor's pipeline is synchronized prior to the NOP instruction
-# being executed", so that a write before it has reached the bus -- UM20 8.1.4
-# relies on it to clear an interrupt before lowering the mask.
+# being executed", so that a write before it has reached the bus -- UM 7.6: "the
+# NOP instruction forces instruction and bus synchronization in that it freezes
+# instruction execution until all pending bus cycles have completed".
 u('nothing but the pipe, once the bus has caught up',
   pf='ADV', seq='DECODE', sync=1)
 
@@ -2049,8 +2050,9 @@ u('... in place',
 label('tas_mem')
 u('the address',
   call=1, seq='EAMODE', size='BYTE')
-u('read the byte, holding the bus',
-  bus='READ', fc='DATA', asel='EA', bytes=1, rmc=1)
+u('read the byte, holding the bus. RTE with DF set starts again here -- UM '
+  '8.2.3',
+  bus='READ', fc='DATA', asel='EA', bytes=1, rmc=1, mark='RMW')
 u('its codes come from what was there, before anything is set',
   asrc='RDATA', alu='A', dst='T1', ccr='LOGIC', size='BYTE', rmc=1)
 u('and bit 7 goes back, still holding the bus',
@@ -2524,8 +2526,9 @@ u('the address',
   call=1, seq='EAMODE', szsel='CAS')
 u('... and now the extension word can come back',
   asrc='T0', alu='A', dst='XW', size='WORD')
-u('read the destination, and hold the bus from here -- UM 7.5.2',
-  bus='READ', fc='DATA', asel='EA', szsel='CAS', rmc=1)
+u('read the destination, and hold the bus from here -- UM 7.5.2. RTE with DF '
+  'set starts the read-modify-write again here -- UM 8.2.3',
+  bus='READ', fc='DATA', asel='EA', szsel='CAS', rmc=1, mark='RMW')
 u('... held',
   asrc='RDATA', alu='A', dst='T1', szsel='CAS', rmc=1)
 u('the destination less the compare operand',
@@ -2548,8 +2551,10 @@ u('the first extension word',
   asrc='STG_C', alu='A', dst='T0', size='WORD', pf='CONSUME')
 u('the second',
   asrc='STG_C', alu='A', dst='T1', size='WORD', pf='CONSUME')
-u('the first one names the first address',
-  asrc='T0', alu='A', dst='XW', size='WORD')
+u('the first one names the first address. RTE with DF set starts the '
+  'read-modify-write again here -- UM 8.2.3 -- since T0 and T1 still hold '
+  'both extension words',
+  asrc='T0', alu='A', dst='XW', size='WORD', mark='RMW')
 u('... which is the register it names',
   asrc='XREG', alu='A', dst='EA', size='LONG')
 u('read it, and hold the bus from here to the end',
@@ -2794,7 +2799,7 @@ exception('exc_f2', 'F2', True)
 # words have been consumed -- the same thing BSR and JSR push, and true for the
 # same reason.
 # --------------------------------------------------------------------------
-def exc_here(stem, vec, executed=False):
+def exc_here(stem, vec, executed=False, mark='NONE'):
     """Format $0, stacking the address of the instruction that caused it.
 
     `executed` is false for the four that are raised INSTEAD of running an
@@ -2805,7 +2810,7 @@ def exc_here(stem, vec, executed=False):
     label(stem)
     u('the vector offset',
       asrc='VECOFF', alu='A', dst='T0', size='LONG', vec=vec,
-      notrace=(0 if executed else 1))
+      notrace=(0 if executed else 1), mark=mark)
     u('the frame carries the address of THIS instruction -- UM Table 8-6',
       asrc='PC_D', alu='A', dst='T1', size='LONG', next='exc_f0')
 
@@ -2827,6 +2832,12 @@ def exc_next(stem, vec, vecsrc='VECOFF', ccr='NONE'):
 exc_here('exc_illegal',   4)
 exc_here('exc_line_a',   10)
 exc_here('exc_line_f',   11)
+# The same exception, for a coprocessor instruction no coprocessor answered --
+# the bus error on the cycle that starts it (UM 10.5.2.2), or no interface
+# built at all. UM Table 12-4 gives that one, "F-line instruction (no
+# coprocessor responded)", the three clocks of STATUS that the start of
+# exception processing for reset, a bus error or an address error has.
+exc_here('exc_line_f_nocp', 11, mark='EXC')
 exc_here('exc_priv',      8)
 exc_next('exc_chk',       6)
 exc_next('exc_trapcc',    7)
@@ -2837,6 +2848,17 @@ exc_next('exc_trapcc',    7)
 # that clears C and leaves X. RD68021 left all four as they were
 # (doc/bugs-found.md, M6).
 exc_next('exc_divzero',   5, ccr='CLRNZVC')
+
+# The MMU configuration exception -- UM 8.1.10, vector 56. "When the MC68030
+# executes a PMOVE instruction that attempts to move invalid data into the TC,
+# CRP, or SRP register of the MMU, the PMOVE instruction causes an MMU
+# configuration exception. The exception is a post-instruction exception",
+# whose frame carries "the scanPC value (which points to the next
+# instruction)" and "the logical address of the PMOVE instruction": format $2,
+# which is what exc_next builds. The hook M11 jumps to from PMOVE, once the
+# MMU's registers exist to be refused a value; until then nothing can raise it
+# (doc/divergences.md, the MMU instructions' F-line stub).
+exc_next('exc_mmu_config', 56)
 
 # TRAP #n. PRM 4: vector 32 + n, and the frame carries the address of the next
 # instruction, which for a one-word instruction is simply the word after it.
@@ -2993,8 +3015,16 @@ FRAME_READS = {}
 
 def rte_fault(stem):
     label(stem)
-    u('the frame base, which is where the walk starts',
-      asrc='SP', alu='A', dst='EA_SAVE', size='LONG')
+    # UM 8.1.13: "once the processor begins to load the frame to restore its
+    # internal state, the assertion of the BERR signal causes the processor to
+    # enter the halted state with the continuous assertion of the STATUS
+    # signal". The frame has been validated by now -- format, both ends,
+    # version -- and from this microword to the RESUME a bus error is a double
+    # bus fault (UM 8.1.2: "while the processor is loading internal state
+    # information from the stack during the execution of an RTE instruction").
+    u('the frame base, which is where the walk starts -- and from here a bus '
+      'error is a double bus fault, UM 8.1.13',
+      asrc='SP', alu='A', dst='EA_SAVE', size='LONG', mark='LOAD')
 
     # The order is the frame's own, walking up, with one constraint that is not:
     # the queue DEPTH has to be back before the fill point is written, because
@@ -3029,6 +3059,8 @@ def rte_fault(stem):
         # transfer reads its length and direction from, and which a
         # handler's own coprocessor instructions have since overwritten.
         (0x4A, 2, 'CPRIM'),
+        # UM 8.2.3: where the read-modify-write under way starts again.
+        (0x52, 2, 'RMWUPC'),
     ]
 
     FRAME_READS[stem] = [(off, n, dst) for off, n, dst in fields if n]
@@ -3144,8 +3176,9 @@ rte_fault('rte_fault_long')
 label('rte_check_short')
 _far_end('FRAME_A_BYTES')
 label('rte_fault_short')
-u('the frame base, which is where the walk starts',
-  asrc='SP', alu='A', dst='EA_SAVE', size='LONG')
+u('the frame base, which is where the walk starts -- and, as for the long '
+  'frame, from here a bus error is a double bus fault, UM 8.1.13',
+  asrc='SP', alu='A', dst='EA_SAVE', size='LONG', mark='LOAD')
 u('+$00: the status register, held for the space stage D is read from',
   bus='READ', fc='DATA', asel='EA_SAVE', bytes=2)
 u('... held',
@@ -3198,6 +3231,20 @@ u('hand the posted write back, if there is one, and resume',
 label('rte_boundary')
 u('an instruction boundary: decode what stage D holds',
   seq='DECODE')
+
+# RTE out of a long frame whose special status word says RM with DF clear --
+# UM 8.2.2: the handler "must emulate this entire instruction ... because the
+# RTE instruction expects the entire operation to have been completed if the RM
+# bit is set and the DF bit is cleared. This is true even if the fault occurred
+# on the first read cycle." So nothing of the read-modify-write is run again:
+# the sequencer's RESUME comes here instead of to the faulted microword, and the
+# instruction ends. Every read-modify-write in this microcode -- CAS, CAS2, TAS
+# -- has taken all its extension words by the time it holds the bus, so stage C
+# is the next instruction's operation word and an ordinary end of instruction
+# is all there is left.
+label('rte_rmw_done')
+u('the read-modify-write was completed by the handler: the instruction ends',
+  pf='ADV', seq='DECODE')
 
 exc_here('exc_format', 14, executed=True)
 
@@ -3418,13 +3465,17 @@ u('... or nobody answered at all',
 u('the device supplied a vector number',
   asrc='IRQVEC', alu='A', dst='T0', size='LONG', next='exc_irq_go')
 
+# UM Table 12-4 gives "exception processing to begin for ... spurious interrupt
+# OR autovectored interrupt" three clocks of STATUS, after the two the boundary
+# had: both are known only once the acknowledge has ended, and are told here.
 label('exc_irq_auto')
 u('the autovector for this level -- UM Table 8-1, vectors 25 to 31',
-  asrc='AUTOVEC', alu='A', dst='T0', size='LONG', next='exc_irq_go')
+  asrc='AUTOVEC', alu='A', dst='T0', size='LONG', next='exc_irq_go',
+  mark='EXC')
 
 label('exc_irq_spurious')
 u('a spurious interrupt -- vector 24',
-  asrc='VECOFF', alu='A', dst='T0', size='LONG', vec=24)
+  asrc='VECOFF', alu='A', dst='T0', size='LONG', vec=24, mark='EXC')
 
 label('exc_irq_go')
 u('the frame carries the address of the next instruction -- UM Table 8-6',
@@ -3567,7 +3618,10 @@ def fault_frame(stem, long_frame):
         # as whatever the handler's stack held: a frame is copied and restored
         # by a task switch, and one that carries the previous owner's stack is
         # a leak with no upside.
-        fields += [(off, 4, 'ZERO') for off in range(0x4C, 0x5C, 4)]
+        fields += [(0x4C, 4, 'ZERO'), (0x50, 2, 'ZERO'),
+                   # UM 8.2.3: where a read-modify-write starts again.
+                   (0x52, 2, 'RMWUPC'),
+                   (0x54, 4, 'ZERO'), (0x58, 4, 'ZERO')]
     else:
         # UM Table 8-6 makes the short frame sixteen words. Its last two are
         # internal and this design has nothing to put in them: a format $A frame
@@ -3697,7 +3751,7 @@ u('M11 reads the command word here; until then every one is taken as a '
 label('cp_nocp_priv')
 u('privileged -- UM 10.2.3.3.2, 10.2.3.4',
   seq='COND', cond='USER', next='exc_priv')
-u('... and with no coprocessor, an F-line exception', next='exc_line_f')
+u('... and with no coprocessor, an F-line exception', next='exc_line_f_nocp')
 
 label('cp0_unimp')
 u('a CpID-0 word that is no MMU instruction: in user mode a privilege '
@@ -4398,7 +4452,7 @@ label('cp_gen')
 cir_write('the command word to the command CIR -- UM 10.3.6',
           CIR_COMMAND, 2, init=True, asrc='STG_C', pf='CONSUME')
 u('no coprocessor answered: UM 10.5.2.8, an F-line exception',
-  seq='COND', cond='BERR', next='exc_line_f')
+  seq='COND', cond='BERR', next='exc_line_f_nocp')
 u('the scanPC is the word after the command word -- UM 10.4.1',
   next='cp_resp')
 
@@ -4407,7 +4461,7 @@ u('the scanPC is the word after the command word -- UM 10.4.1',
 label('cp_bcc')
 cir_write('the operation word to the condition CIR -- UM 10.3.7',
           CIR_CONDITION, 2, init=True, asrc='STG_D')
-u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f')
+u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f_nocp')
 u('the dialogue', next='cp_resp')
 
 # cpScc, cpDBcc and cpTRAPcc -- UM 10.2.2.2 to 10.2.2.4. The condition selector is
@@ -4416,7 +4470,7 @@ for _stem in ('cp_scc', 'cp_dbcc', 'cp_trapcc'):
     label(_stem)
     cir_write('the condition selector word to the condition CIR',
               CIR_CONDITION, 2, init=True, asrc='STG_C', pf='CONSUME')
-    u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f')
+    u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f_nocp')
     u('the dialogue', next='cp_resp')
 
 # The end of a conditional dialogue: a null primitive with CA clear, and the
@@ -4502,7 +4556,7 @@ label('cp_save')
 u('privileged -- checked before any CIR is touched, UM 10.2.3.3.2',
   seq='COND', cond='USER', next='exc_priv')
 cir_read('the save CIR', CIR_SAVE, 2, init=True)
-u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f')
+u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f_nocp')
 u('the format word', asrc='RDATA', alu='A', dst='T0', size='WORD')
 u('not ready: "the main processor services any pending interrupts and then '
   'reads the save CIR again"',
@@ -4556,7 +4610,7 @@ u('the format word from memory, kept for its length -- UM figure 10-18 note 2',
   asrc='RDATA', alu='A', dst='T1', size='WORD')
 cir_write('... and written to the restore CIR', CIR_RESTORE, 2, init=True,
           asrc='T1')
-u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f')
+u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f_nocp')
 label('cp_rest_rd')
 cir_read('what the coprocessor makes of it, held', CIR_RESTORE, 2,
          asrc='RDATA', alu='A', dst='T0', size='WORD')
@@ -4604,7 +4658,7 @@ u('the format word, from the stream', asrc='STG_C', alu='A', dst='T1',
 u('... and its reserved word, eaten', pf='CONSUME')
 cir_write('... written to the restore CIR', CIR_RESTORE, 2, init=True,
           asrc='T1')
-u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f')
+u('no coprocessor', seq='COND', cond='BERR', next='exc_line_f_nocp')
 label('cp_resti_rd')
 cir_read('what the coprocessor makes of it', CIR_RESTORE, 2)
 u('... held', asrc='RDATA', alu='A', dst='T0', size='WORD')

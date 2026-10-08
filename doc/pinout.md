@@ -34,7 +34,7 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET)
 | Port | Dir | Notes |
 |---|---|---|
 | `clk` | in | Free-running. Both edges are used: one bus state S0–S5 per half period, so an asynchronous bus cycle with no wait states is three clocks, and a synchronous one two. |
-| `rst_n` | in | **Not an MC68030 pin.** Asynchronous hardware reset for simulation and FPGA bring-up, so that every register has a defined value without power-on initialisation. The architectural reset is `reset_n_i` below. |
+| `rst_n` | in | **Not an MC68030 pin.** Asynchronous hardware reset for simulation and FPGA bring-up, so that every register has a defined value without power-on initialisation, after which the processor runs reset exception processing. The architectural reset is `reset_n_i` below; `rst_n` resets everything it does and more -- the registers UM 8.1.1 leaves alone, and the arbiter (`doc/divergences.md`). |
 
 ### Function codes (§5.2)
 
@@ -109,7 +109,7 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET)
 | Port | Dir | Notes |
 |---|---|---|
 | `berr_n_i` | in | Bus error. With HALT, selects retry rather than exception. Sampled on falling edges only — the termination samples, the late window (specification 27A), and, at M3, the end of a retry too (`doc/bugs-found.md`). |
-| `reset_n_i` | in | External reset input. Unlike the MC68000 and MC68010 it does **not** need HALT asserted with it. |
+| `reset_n_i` | in | External reset input: resets the processor (UM 7.8, 8.1.1). Unlike the MC68000 and MC68010 it does **not** need HALT asserted with it. The processor's own RESET instruction pulse, which comes back on it through the wired pin, is ignored, as is a RESET from outside that ends within four clocks of that pulse (UM 7.8 asks eight to be sure of a reset). |
 | `reset_n_o`, `reset_n_oe` | out | Open drain. `reset_n_o` is constant 0; the `RESET` instruction asserts `reset_n_oe` for **512 clocks** (§7.8) to reset peripherals without disturbing the core. |
 | `halt_n_i` | in | Suspends bus activity at the end of the current cycle; with BERR, requests a retry. *Changed:* **input only** (Table 5-2). The MC68020 drove HALT on a double bus fault; the MC68030 shows the halted state on STATUS instead (§5.11.4). |
 
@@ -161,15 +161,14 @@ same values when the bus comes back.
 
 **Reset** (UM 7.8): "during the reset period, the entire bus three-states
 (except for non-three-statable signals, which are driven to their inactive
-state)". The reset this design has is `rst_n`, and every enable above is
-negated while it is asserted; ECS, OCS, BG, REFILL and STATUS are driven
-negated, and IPEND by the sequencer. "Once RESET negates, all control signals
-are driven to their inactive state, the data bus is in read mode, and the
-address bus is driven": the control group is driven at once, R/W high; the
-address group follows `ADDR_HIZ_BETWEEN_CYCLES` (`doc/divergences.md`). The
-external RESET input is synchronised but does not reset the core
-(`doc/divergences.md`), and does not three-state the bus either: it is `rst_n`
-that stands for it.
+state)". Both resets do it -- `rst_n`, and the RESET pin from outside -- and
+every enable above is negated while either is asserted; ECS, OCS, REFILL and
+STATUS are driven negated, and IPEND by the sequencer. BG is the arbiter's,
+which runs under the RESET pin (UM 7.7) and is held negated under `rst_n`.
+"Once RESET negates, all control signals are driven to their inactive state,
+the data bus is in read mode, and the address bus is driven": the control group
+is driven at once, R/W high; the address group follows
+`ADDR_HIZ_BETWEEN_CYCLES` (`doc/divergences.md`).
 
 `ecs_n_o`, `ocs_n_o`, `ipend_n_o`, `bg_n_o`, `refill_n_o` and `status_n_o` have
 no enable; they are always driven (Table 5-2).

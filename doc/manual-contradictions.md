@@ -351,3 +351,36 @@ agrees with it -- all 4 sampled tests of `UNLK A7` (`$4E5F`) expect A7 to be the
 long word loaded (`doc/m6-mismatches.md` Q3). RD68021 gave a third answer, the
 old stack pointer plus four (`doc/bugs-found.md`, M6). `core_insn_tb` checks
 UNLK A7.
+
+---
+
+## 17. When a trap's trace is taken
+
+**Followed: UM 8.1.12 -- straight after the trap's exception processing, before
+the trap handler runs.**
+
+UM 8.1.4, on TRAP, TRAPcc, TRAPV, cpTRAPcc, CHK, CHK2 and the zero divide: "If
+tracing is enabled for the instruction that caused the trap, a trace exception
+is taken after the RTE instruction from the trap handler is executed, and the
+trace corresponds to the trap instruction; the trap handler routine is not
+traced." Read literally, the trace handler runs once the trap handler has
+returned.
+
+UM 8.1.12, with Table 8-5 putting the traps in group 2 and the trace in group 4:
+"if simultaneous trap, trace, and interrupt exceptions are pending, the
+exception processing for the trap occurs first, followed immediately by
+exception processing for the trace and then for the interrupt. When the
+processor resumes normal instruction execution, it is in the interrupt handler,
+which returns to the trace handler, which returns to the trap exception
+handler." UM 8.1.7 says the same of an exception an instruction forces: "the
+forced exception processing occurs before the trace exception is processed". In
+this reading the trace handler runs first, and its frame's program counter is
+the trap handler's address.
+
+The two agree that the trap handler is not traced and that the trace is the
+trap instruction's; they disagree about when it is taken. This design follows
+8.1.12 and 8.1.7, which say it twice, give it a priority table and a worked
+example, and are what RD68021 did as well: the trace frame stacked straight
+after the trap's has +$08 the trap instruction and +$02 the trap handler.
+`core_excpri_tb` checks it for TRAP and CHK, and 8.1.12's own example with an
+interrupt.

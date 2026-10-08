@@ -11,7 +11,9 @@
 // table port, and a refused write does not reach memory -- `wr_protect` in the
 // harness. So is any cycle of a read-modify-write: UM 8.2.3, "the MMU of the
 // MC68030 treats any bus cycle with RMC asserted as a write operation for
-// protection checking, regardless of the state of R/W".
+// protection checking, regardless of the state of R/W". The CAS, the CAS2
+// across two pages and the TAS are rerun whole by RTE with DF set (UM 8.2.3);
+// the last CAS the kernel completes, and RTE retires it (UM 8.2.2).
 //
 // The kernel logs each frame -- the fault address, the special status word,
 // the stacked status register, the format word and the version word -- and
@@ -31,7 +33,7 @@ module core_cow_tb;
   localparam logic [31:0] PAGER   = 32'h0000_27F0;
   localparam logic [31:0] RESULTS = 32'h0000_6000;
   localparam logic [31:0] PTABLE  = 32'h0000_2600;
-  localparam int          NFAULT  = 19;
+  localparam int          NFAULT  = 23;
 
   string       image;
   int unsigned n;
@@ -133,6 +135,17 @@ module core_cow_tb;
     want_fault(16, 32'h0000_5CFC, 2'b00, "MOVEM.L D1-D4,-(SP) -- the third register");
     want_fault(17, 32'h0000_5AFC, 2'b00, "PEA");
     want_fault(18, 32'h0000_59FE, 2'b01, "MOVE.B D1,-(SP)");
+    // The read-modify-writes the MMU refuses on their reads (UM 8.2.3): RW = 1
+    // and RM = 1. CAS2 faults twice, once per page, and each RTE reruns the
+    // whole instruction; the last CAS the kernel completes itself (UM 8.2.2).
+    want_fault(19, 32'h0000_4D10, 2'b00, "CAS2.L -- its first read");
+    want_ssw[19] = 16'h01C1;
+    want_fault(20, 32'h0000_4E10, 2'b00, "CAS2.L rerun -- its second read");
+    want_ssw[20] = 16'h01C1;
+    want_fault(21, 32'h0000_4F10, 2'b01, "TAS -- its read");
+    want_ssw[21] = 16'h01C1;
+    want_fault(22, 32'h0000_5010, 2'b00, "CAS.L -- the kernel completes it");
+    want_ssw[22] = 16'h01C1;
 
     reset_dut();
     n = 0;
@@ -228,16 +241,27 @@ module core_cow_tb;
     got_w = peek_w(32'h59FE);
     check(got_w[15:8] === 8'h11, "MOVE.B D1,-(SP): the byte, at the even address");
     check(peek_l(RESULTS + 32'h22) === 32'h0000_59FE, "MOVE.B D1,-(SP): SP down 2, once");
+    check(peek_l(32'h4D10) === 32'hFEED_F00D && peek_l(32'h4E10) === 32'h1111_1111,
+          "CAS2.L across two pages: both updates written, after two reruns of the whole instruction");
+    check(peek_w(RESULTS + 32'h26) === 16'h0004, "CAS2.L: Z, both compares equal");
+    got_w = peek_w(32'h4F10);
+    check(got_w[15:8] === 8'h80, "TAS: bit 7 set, once");
+    check(peek_w(RESULTS + 32'h28) === 16'h0004, "TAS: Z, the byte was zero");
+    check(peek_l(32'h5010) === 32'hFEED_F00D,
+          "CAS.L the kernel completed: its update, and RTE did not run it again -- UM 8.2.2");
+    check(peek_w(RESULTS + 32'h2A) === 16'h0004, "CAS.L the kernel completed: the kernel's Z");
+    check(prot[5'((32'h5000 - 32'h4000) >> 8)] === 1'b1,
+          "CAS.L the kernel completed: its page was never mapped");
 
     // ------------------------------------------------------------------
-    // The user's registers came through eighteen trips to the kernel, one of
+    // The user's registers came through twenty-two trips to the kernel, one of
     // them two frames deep.
     // ------------------------------------------------------------------
     check(dut.u_seq.dreg[1] === 32'h1111_1111, "D1 as the user left it");
     check(dut.u_seq.dreg[2] === 32'h0000_00AB, "D2 as the user left it");
     check(dut.u_seq.dreg[3] === 32'hCAFE_BABE, "D3 as the user left it");
     check(dut.u_seq.dreg[4] === 32'hFEED_F00D, "D4 as the user left it");
-    check(dut.u_seq.areg[5] === RESULTS + 32'h26, "A5, the results pointer, stepped once per record");
+    check(dut.u_seq.areg[5] === RESULTS + 32'h2C, "A5, the results pointer, stepped once per record");
     check(dut.u_seq.usp_q === 32'h0000_59FE, "the user stack pointer");
 
     if (pipe_fails != 0)

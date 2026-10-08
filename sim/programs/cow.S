@@ -15,7 +15,10 @@
 | (UM 8.2.3). One page the kernel completes the write for instead, clearing DF
 | (UM 8.2.2). The MMU is the MC68030's in one respect that matters here: it
 | treats a read-modify-write cycle as a write for protection (UM 8.2.3), so the
-| CAS faults on its read, and RTE reruns the whole operation. And the page table the handler reads is not mapped the first time,
+| CAS faults on its read, and RTE reruns the whole operation -- as it does a
+| CAS2 across two protected pages, which faults once on each, and a TAS. One
+| more CAS the kernel completes itself, RM set and DF cleared (UM 8.2.2), and
+| RTE runs none of it again. And the page table the handler reads is not mapped the first time,
 | so the first fault's handler takes a fault of its own -- a supervisor read,
 | handled by the same code two frames deep, and returned from into the handler.
 |
@@ -36,6 +39,7 @@
         .equ    RESULTS, 0x6000         | what the user program records
         .equ    USTACK,  0x6000         | the user stack, growing down
         .equ    EMUL,    0x4C00         | the page whose writes the kernel does
+        .equ    EMUL2,   0x5000         | ... and whose CAS the kernel completes
         .equ    PTABLE,  0x2600         | the kernel's page table, itself paged
 
         .section .vectors, "a"
@@ -77,6 +81,9 @@ _start:
         move.l  #0x12345678, 0x4610     | BFINS's
         move.l  #0xCAFEBABE, 0x4710     | CAS's, equal to the compare operand
         move.l  #0x5EED5EED, 0x6080     | the memory-to-memory move's source
+        move.l  #0xCAFEBABE, 0x4D10     | CAS2's first operand, equal to D3
+        move.l  #0x000000AB, 0x4E10     | ... and its second, equal to D2
+        move.l  #0xCAFEBABE, EMUL2+0x10 | the CAS the kernel completes
 
         | Into user mode the way an operating system starts a process: a format
         | $0 frame naming the program with S clear, and RTE.
@@ -110,13 +117,35 @@ buserr:
         move.l  %d1, PAGER
         bra.s   9f
 1:      cmpi.l  #EMUL, %d1
-        bne.s   2f
+        bne.s   7f
         | This page's writes the kernel completes itself: the data output buffer
         | where the fault says, and DF cleared so that RTE does not rerun it. The
         | only write to this page is an aligned long word.
         move.l  %d0, %a0
         move.l  60+0x18(%sp), (%a0)
         andi.w  #0xFEFF, 60+0x0A(%sp)
+        bra.s   9f
+
+7:      cmpi.l  #EMUL2, %d1
+        bne.s   2f
+        | This page's read-modify-write the kernel completes itself -- UM 8.2.2:
+        | with RM set it emulates "this entire instruction", the CAS.L D3,D4,(A0)
+        | below, updates the condition codes in the stacked status register and
+        | the user's registers in their saved copies, and clears DF, because
+        | "the RTE instruction expects the entire operation to have been
+        | completed if the RM bit is set and the DF bit is cleared". The
+        | operand is at the fault address; D3 and D4 are 12 and 16 bytes into
+        | what the MOVEM saved.
+        move.l  %d0, %a0
+        move.l  (%a0), %d2
+        andi.w  #0xFFF0, 60+0x00(%sp)   | N, Z, V and C of the compare
+        cmp.l   12(%sp), %d2
+        bne.s   5f
+        move.l  16(%sp), (%a0)          | equal: the update operand to memory
+        ori.w   #4, 60+0x00(%sp)        | ... and Z
+        bra.s   6f
+5:      move.l  %d2, 12(%sp)            | not equal: memory to the compare register
+6:      andi.w  #0xFEFF, 60+0x0A(%sp)   | DF clear
         bra.s   9f
 
 2:      | Look the page up. The first time, this read faults.
@@ -230,6 +259,23 @@ user:
         move.l  #0x5A00, %sp
         move.b  %d1, -(%sp)             | A7 steps by two
         move.l  %sp, (%a5)+             | +$22: $59FE
+
+        | CAS2 across two protected pages. The MMU refuses its first locked
+        | read; the kernel copies the page and RTE, with DF set, reruns the
+        | whole instruction (UM 8.2.3) -- which then faults on its second read,
+        | on the other page, and is rerun whole again.
+        lea     0x4D10, %a0
+        lea     0x4E10, %a1
+        cas2.l  %d3:%d2, %d4:%d1, (%a0):(%a1)
+        move.w  %ccr, (%a5)+            | +$26: Z, both compares equal
+        | TAS: refused on its read, a byte.
+        lea     0x4F10, %a0
+        tas     (%a0)
+        move.w  %ccr, (%a5)+            | +$28: Z, the byte was zero
+        | A CAS the kernel completes: RM set, DF cleared -- UM 8.2.2.
+        lea     EMUL2+0x10, %a0
+        cas.l   %d3, %d4, (%a0)
+        move.w  %ccr, (%a5)+            | +$2A: Z, from the kernel
 
         | Still a user: this has to trap.
         move.w  #0x2700, %sr

@@ -18,7 +18,7 @@
 package rd68031_pkg;
 
   // ==========================================================================
-  // Address spaces -- UM20 Table 2-1
+  // Address spaces -- UM Table 4-1
   // ==========================================================================
   localparam logic [2:0] FC_RESERVED_0  = 3'b000;  // undefined, reserved
   localparam logic [2:0] FC_USER_DATA   = 3'b001;
@@ -44,7 +44,7 @@ package rd68031_pkg;
   localparam logic [2:0] CK_PC_D  = 3'd3;
   localparam logic [2:0] CK_FILL  = 3'd4;
   localparam logic [2:0] CK_FLAGS = 3'd5;
-  // Not a restore: the coprocessor writing the scanPC -- UM20 7.4.17. The queue
+  // Not a restore: the coprocessor writing the scanPC -- UM 10.4.17. The queue
   // behind stage D is emptied and refilled from the address, and stage D and
   // the program counter stay: they are the coprocessor instruction's own.
   localparam logic [2:0] CK_SCAN  = 3'd6;
@@ -155,7 +155,7 @@ package rd68031_pkg;
   } cycle_end_e;
 
   // ==========================================================================
-  // Status register -- UM20 Figure 1-4
+  // Status register -- UM Figure 1-4
   // ==========================================================================
   localparam int SR_C  = 0;
   localparam int SR_V  = 1;
@@ -172,11 +172,12 @@ package rd68031_pkg;
   localparam logic [15:0] SR_IMPLEMENTED = 16'b1111_0111_0001_1111;
 
   // Reset leaves the processor in the interrupt mode of the supervisor level with the
-  // mask at 7 (UM20 2.1.1: "the processor is in this mode after a reset operation").
+  // mask at 7 (UM 4.1.1: "the processor is in this mode after a reset operation";
+  // UM 8.1.1, steps 1-3).
   localparam logic [15:0] SR_RESET = 16'h2700;
 
   // ==========================================================================
-  // Exception stack frames -- UM20 Table 6-5
+  // Exception stack frames -- UM Table 8-6
   // ==========================================================================
   localparam logic [3:0] FMT_SHORT     = 4'h0;  // four words
   localparam logic [3:0] FMT_THROWAWAY = 4'h1;  // four words, interrupt stack switch
@@ -192,7 +193,7 @@ package rd68031_pkg;
   localparam int FRAME_WORDS_FAULT_S   = 16;
   localparam int FRAME_WORDS_FAULT_L   = 46;
 
-  // UM20 6.1.12: RTE compares the version number in bits 15-12 of the word at SP+$36 of
+  // UM 8.1.13: RTE compares the version number in bits 15-12 of the word at SP+$36 of
   // a long frame against its own, and takes a format error if they differ. That is
   // what makes this design's private encoding of the internal words legitimate, and
   // it is also why format $A -- which has no version field -- may carry no private
@@ -201,7 +202,7 @@ package rd68031_pkg;
   localparam logic [3:0] FRAME_VERSION     = 4'h1;
 
   // ==========================================================================
-  // Special status word -- UM20 Figure 6-8, at offset $0A of both fault frames
+  // Special status word -- UM Figure 8-9, at offset $0A of both fault frames
   // ==========================================================================
   localparam int SSW_FC   = 15;  // fault on stage C
   localparam int SSW_FB   = 14;  // fault on stage B
@@ -213,7 +214,7 @@ package rd68031_pkg;
   localparam int SSW_SIZE = 4;   // SIZE is bits 5:4
   // Bits 2:0 are the function code of the data cycle; bits 11:9 and 3 are reserved.
 
-  // UM20 6.2.2: "The only bits in the SSW that may be modified are DF, RB, and RC."
+  // UM 8.2.2: "The only bits in the SSW that may be modified are DF, RB, and RC."
   localparam logic [15:0] SSW_HANDLER_MASK = (16'b1 << SSW_DF)
                                            | (16'b1 << SSW_RB)
                                            | (16'b1 << SSW_RC);

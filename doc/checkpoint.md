@@ -72,6 +72,12 @@ the access level -- lived in memory and in the access-level hardware. No
 one M4 froze: 353 bits of 492, 64 reserved, four words spare. What the M4
 freeze already said of the special status word -- no CALLM state -- holds.
 
+**M8-M9 took its reservation, `+$52`,** for `rmwupc`: the micro-address a
+read-modify-write starts again at, which RTE needs to rerun "the entire
+instruction" (UM 8.2.3, rule 5). Nothing else in the rework of exceptions
+needed a home: the RESET pin's reset and the double bus fault are states no
+frame is ever built in, and IPEND's hold is about the pins.
+
 ---
 
 ## Which frame, and when
@@ -370,8 +376,9 @@ RTE accepts these six and no other: anything else is a format error, and so is a
 | `+$4A` | 15:0 | `cprim` | the coprocessor response primitive being served |
 | `+$08` | 5 | `posted` | the faulted access was a posted write, which RTE reruns by itself |
 | `+$08` | 12:10 | `irqlvl` | the level of the interrupt being taken |
+| `+$52` | 15:0 | `rmwupc` | the micro-address the read-modify-write under way starts again at |
 
-**492 bits available, 353 used, 64 reserved, 4 words spare** (`+$54`, `+$56`, `+$58`, `+$5A`).
+**492 bits available, 369 used, 48 reserved, 4 words spare** (`+$54`, `+$56`, `+$58`, `+$5A`).
 
 ### Reserved for the milestones still to come
 
@@ -379,7 +386,6 @@ RTE accepts these six and no other: anything else is a format error, and so is a
 |---|--:|---|---|
 | `+$4C` | 2 | M11 | MMU instruction state that has to outlive a posted write's fault -- PTEST, PLOAD, PFLUSH, PMOVE -- should one need more than T0-T3 and the extension word |
 | `+$50` | 1 | M10 | the faulted operand's cache disposition, should an RTE rerun need to know how the first attempt left the data cache |
-| `+$52` | 1 | M8-M9 | exception-processing state, should the rework of exceptions need any beyond the working registers |
 
 ### The frozen set
 
@@ -426,6 +432,7 @@ RTE accepts these six and no other: anything else is a format error, and so is a
 | `seq` | `sr_q` | 16 | `sr` | frame +$00 |
 | `seq` | `cprim_q` | 16 | `cprim` | UM 10.5.2.8: a bus error on any CIR access but the first, or on an operand a primitive moves, is an ordinary bus error, and RTE goes back to the primitive it interrupted |
 | `seq` | `post_flt_q` | 1 | `posted` | doc/checkpoint.md rule 9: the faulted access belongs to no microword -- the write was posted and the instruction went on -- so RTE runs it on its own and resumes at the microword that was interrupted |
+| `seq` | `rmw_upc_q` | 16 | `rmwupc` | UM 8.2.3: with DF set, RTE "reruns the entire instruction" of a read-modify-write -- CAS, CAS2 or TAS -- so it resumes at the start of the locked sequence, which the microword marked RMW latched, and not at the faulted access |
 | `seq` | `irq_taking_q` | 3 | `irqlvl` | the level of the interrupt being taken, from the dispatch to the acknowledge. A posted write's fault can land in between -- doc/checkpoint.md rule 9 -- and the acknowledge after RTE has to ask for the same level |
 
 ### Not checkpointed, and why
@@ -460,6 +467,8 @@ RTE accepts these six and no other: anything else is a format error, and so is a
 | `mmu_config` | M11 | PMOVE of an invalid configuration to TC, CRP or SRP: a postinstruction exception -- UM 8.1.10, 9.7.5.3 | 56 | `$2` | none | +$02 the next instruction, +$08 the PMOVE |
 | `rte_format` | M4 | RTE on a format other than $0 $1 $2 $9 $A $B, or on a $B whose version nibble is not this design's -- UM 8.1.8 | 14 | `$0` | none | +$02 the RTE; the frame it refused is left intact above |
 | `rte_access` | M4 | RTE on a $A or $B frame it cannot read at one of its two ends -- UM 8.1.13 | 2 | `$B` | as data, a read | +$10 the end it could not read; the frame is left intact and nothing was restored |
+| `double` | M8-M9 | a bus or address error during exception processing for a bus error, an address error or reset, up to the first instruction of the handler -- the stacking, the vector read, the handler's first prefetch (UM 8.1.2, 8.1.3, 12.7.1) | - | - | none: the processor halts, STATUS asserted continuously, and only a reset restarts it (UM 7.5.4) | none |
+| `rte_load` | M8-M9 | a bus error while RTE loads a $A or $B frame it has validated -- UM 8.1.13, "once the processor begins to load the frame" | - | - | none: a double bus fault, as above | none |
 
 <!-- end of generated tables -->
 
@@ -555,11 +564,28 @@ the MC68030's, written now for the milestones that will need them.
 
 5. **RMC sequences are atomic to the handler.** UM 8.2.2: if `RM` is set and
    `DF` cleared, "the RTE instruction expects the entire operation to have been
-   completed", "even if the fault occurred on the first read cycle". The
-   microcode therefore needs an entry point reachable from RESUME meaning "the
-   read-modify-write is already done, retire the instruction". **It does not
-   have one yet**: RTE resumes the faulted microword whatever `RM` says. That is
-   M8-M9's, and `doc/divergences.md` records it until then.
+   completed", "even if the fault occurred on the first read cycle"; UM 8.2.3:
+   with `DF` set, "the rerun operation ... reruns the entire instruction". So
+   RTE never resumes a read-modify-write at its faulted access, and never
+   hands the access back to the bus unit. Since M8-M9:
+   - `RM` set, `DF` clear: RESUME goes to `rte_rmw_done`, which ends the
+     instruction -- `pf = ADV`, `seq = DECODE`. Every read-modify-write here
+     has taken all its extension words before it holds the bus, so stage C is
+     the next operation word.
+   - `RM` set, `DF` set: RESUME goes to the first microword of the locked
+     sequence, which carries `mark = RMW` and is latched in `rmw_upc_q` every
+     clock it is presented -- a fault on it included -- and is saved at
+     `+$52`. That microword is the locked read for CAS and TAS, and for CAS2
+     the one before, which names the first address again out of the
+     extension word T0 still holds. Every cycle runs afresh, its reads
+     included, so the compare sees memory as it is when the rerun happens. A
+     CAS2 whose SECOND write faulted therefore reads its first update back
+     and fails its compare: what UM 8.2.3 says, and a handler that wants the
+     swap finished completes it and clears `DF` instead.
+   - What the handler is asked to emulate is the operation, not the addressing:
+     the effective address was evaluated before the locked sequence began, and
+     an `(An)+` or `-(An)` it named has already been stepped, once, when the
+     frame is built.
 
 6. **Only `DF`, `RB` and `RC` may have been modified** by the handler -- UM 8.2.2,
    "the only bits in the SSW that may be modified are DF, RB, and RC; all other
@@ -662,8 +688,17 @@ written. Four things about it are worth stating, because each is a decision:
 - **Resuming is a jump and nothing else.** Rule 2 is what buys that: the faulted
   microword committed nothing, so re-executing it reissues exactly the same
   request. `seq = RESUME` sets the micro-address from the frame -- or, out of a
-  short frame, to `rte_boundary` -- and there is no restart sequence to get
-  wrong.
+  short frame, to `rte_boundary`; for a read-modify-write, to the start of its
+  locked sequence or to the end of the instruction (rule 5) -- and there is no
+  restart sequence to get wrong.
+- **Loading is a double bus fault window.** UM 8.1.13: "once the processor
+  begins to load the frame to restore its internal state, the assertion of the
+  BERR signal causes the processor to enter the halted state". The validation
+  of rule 10 comes before it and faults the ordinary way; from the first
+  microword of the load (`mark = LOAD`) to the RESUME, a bus error halts the
+  processor with STATUS asserted continuously. That is also why nothing RTE
+  holds while it walks the frame -- `rs_*`, `rupc_q`, `ckpt_hold_q` and the
+  fetch unit's `ckpt_busy_q` -- needs a home in a frame.
 
 The status register is written last and the stack pointer is stepped before it,
 for the reason UM 8.1.13 gives the four-word frame: writing the status register
@@ -690,11 +725,12 @@ names its figure or paragraph.
 
 | Testbench | What |
 |---|---|
-| `core_fault_tb` | the long frame for a data write, a late-BERR write, a data read, a prefetch fault, an empty-pipe prefetch fault and an address error, every architecturally defined word of each: `+$00` SR, `+$02` PC, `+$06` format and vector, `+$0A` the SSW bit by bit and its internal bits zero, `+$0C`/`+$0E` the stage images against memory when their rerun bit is clear, `+$10`, `+$18`, `+$24`, `+$2C` and the version nibble; RTE continuation in every shape below; RTE refusing a long frame with another version (format error, the frame left intact, the RTE's address stacked); RTE meeting a frame whose far end is unmapped (a bus error before anything is restored, then completion); and RTE out of hand-built **short** frames -- images accepted, rerun bits honoured, a posted write rerun |
+| `core_fault_tb` | the long frame for a data write, a late-BERR write, a data read, a prefetch fault, an empty-pipe prefetch fault and an address error, every architecturally defined word of each: `+$00` SR, `+$02` PC, `+$06` format and vector, `+$0A` the SSW bit by bit and its internal bits zero, `+$0C`/`+$0E` the stage images against memory when their rerun bit is clear, `+$10`, `+$18`, `+$24`, `+$2C` and the version nibble; RTE continuation in every shape below; RTE refusing a long frame with another version (format error, the frame left intact, the RTE's address stacked); RTE meeting a frame whose far end is unmapped (a bus error before anything is restored, then completion); RTE out of hand-built **short** frames -- images accepted, rerun bits honoured, a posted write rerun; since M8-M9, RTE faulting while it loads a long and a short frame (double bus faults), the double bus faults of a bus error's own vector (odd, or on a missing page), CAS completed by its handler (rule 5), CAS rerun from its read after its write faulted, CAS2 faulted on each of its four accesses and on its first read completed by the handler, TAS faulted on its read and its write, and a traced instruction that faults -- with and without an interrupt arriving with the fault |
 | `core_exc_tb` | every four-word and six-word frame word by word -- illegal, A-line, F-line, privilege, TRAP #n, TRAPV, TRAPcc, CHK, zero divide, trace, the interrupts -- the throwaway frame, and RTE's format error for each of the ten format codes the MC68030 does not have |
 | `core_cpif_tb` | the coprocessor midinstruction frame (`$9`) word by word: SR, scanPC, format, instruction address, operation word, effective address |
 | `core_paging_tb` | every combination of operand size, alignment and port width faulted across a page boundary, the frame of each checked: format, SSW (DF, RW, SIZE = the residual, FC, internal bits), `+$10` = the residual's address, `+$18`, and the version |
 | `core_cow_tb` | a real kernel and user process (`sim/programs/cow.S`) through copy-on-write, its memory model refusing read-modify-write cycles as writes the way the MC68030's MMU does (UM 8.2.3); the kernel logs each frame's format, SSW, fault address, SR and version, and the testbench checks every one |
+| `core_reset_tb` | not a frame: the RESET pin, and the double bus faults of reset exception processing (UM 8.1.1, 12.7.1) |
 
 What each RTE case is really asking, because a check that cannot fail on the bug
 it is aimed at is not a check:
@@ -715,9 +751,12 @@ it is aimed at is not a check:
 | a double bus fault | `STATUS` is not asserted continuously, or the processor carries on |
 | every combination of operand size, alignment and port width faulted across a page boundary | anything above, in a shape the directed cases did not think of. Half the cases straddle and half do not, and the sweep counts its own faults so that it cannot pass by not faulting |
 | copy-on-write in every shape -- plain, `(An)+`, `-(An)`, memory to memory, `ADDQ`, `BSET`, `BFINS`, `CAS` faulting on its read, a misaligned long word part-written, one across two protected pages, `JSR`, `LINK`, `MOVEM` to `-(SP)` part-way down its list, `PEA`, a byte to `-(A7)` -- each handled by a kernel that saves registers with `MOVEM`, copies the page with a `DBF` loop, calls a subroutine that uses the bit-field unit and the multiplier, and returns with `DF` set; one page the kernel writes itself and clears `DF`; and the first handler taking a fault of its own, two frames deep | RTE does not put back what the handler's work overwrote, or reruns more than the faulted access, or returns to the wrong mode. The memory model refuses a faulted write, so each write has to land exactly once |
-
-`CAS2` is still without a faulting case, and so is rule 5 (`RM` set, `DF`
-cleared), which is not implemented.
+| a long frame whose `+$1C` cannot be read, with both ends and the version word readable | RTE takes a bus error mid-load and goes on with the machine half restored -- UM 8.1.13 halts it |
+| CAS on a missing page, its handler setting Z and clearing `DF` | RTE runs any of the CAS again: the page is still missing, so a rerun would fault a second time, and the testbench counts bus errors |
+| CAS whose write faults while the handler's side of the system changes the operand | RTE reruns the write alone. The rerun has to read the new value, fail the compare and write nothing |
+| CAS2 faulted on each of its four accesses | the rerun starts anywhere but the beginning of the locked sequence, or with the wrong address in `ea`; on the second write, the first update has to be read back |
+| TAS whose write faults while the byte is changed | the rerun writes `$80` with Z set instead of testing the new byte |
+| a traced `MOVE` whose read faults, with and without an interrupt arriving at the same time | the trace is taken at the end of the bus error's exception processing, or lost; the interrupt is taken anywhere but at the handler's first boundary |
 
 ---
 

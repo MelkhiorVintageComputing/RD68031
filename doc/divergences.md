@@ -22,12 +22,23 @@ responded)" or on an ATC miss, and continuously once halted by a double bus faul
 boundary with a trace or interrupt taken, the start of exception processing, a
 pipeline refill — as one-clock pulses registered on the rising edge after them, and
 the bus unit, which owns the pins, shows each as the table's number of clocks from
-the next falling edge:
+the next falling edge. Since M8–M9 every exception the table gives three clocks
+is told apart, and gets them:
 
-- **Three clocks** for reset and for a bus or address error (the fault entry).
-  The spurious and autovectored interrupts and the F-line with no coprocessor are
-  decided in microcode, after the interrupt or F-line has already been reported
-  as a boundary, and are not told apart yet; the ATC miss is M11.
+- reset, after `rst_n` and after the RESET pin, and a bus or address error (the
+  fault entry);
+- a spurious or an autovectored interrupt, once the acknowledge has ended with
+  BERR or AVEC (`mark = EXC` on the microword that takes the answer, in
+  `tools/ucode/program.py`) — after the two clocks the boundary itself showed;
+- an F-line instruction no coprocessor responded to (`exc_line_f_nocp`): the bus
+  error on the cycle that starts a coprocessor instruction, or, in a core built
+  without the coprocessor interface, the CpID-1-to-7 word itself. A CpID-0 word
+  that is no MMU instruction is an F-line exception that asked no coprocessor,
+  and shows none.
+
+What remains:
+
+- **The ATC miss** is M11's: there is no ATC yet.
 - **One negated clock between indications.** This core can finish an instruction
   every clock, which a real MC68030 does not, and two one-clock pulses on
   consecutive clocks would read as one two-clock pulse. An event that arrives
@@ -44,76 +55,73 @@ the next falling edge:
 
 **How it is checked:** `bus_status_tb` drives the events and checks the widths, the
 gap, the edges and the halted case; `core_status_tb` runs code and checks reset's
-three clocks, one-clock boundaries, a trace's two clocks, a bus error's three, and
-one REFILL per refill requested; `core_fault_tb` checks the double bus fault.
+three clocks, one-clock boundaries, a trace's two clocks, a bus error's three, a
+vectored, an autovectored and a spurious interrupt (two clocks at the boundary,
+and three more for the last two), an F-line instruction no coprocessor answers
+(three) against a CpID-0 one (none), and one REFILL per refill requested;
+`core_reset_tb` checks the three clocks after the RESET pin; `core_fault_tb` and
+`core_reset_tb` check the double bus fault.
 
 ---
 
-## The external RESET input does not reset the processor
+## `rst_n` is a pin of its own, and resets more than the RESET pin does
 
-**UM 7.8:** "the external RESET signal resets the processor and the entire system",
-and "during the reset period, the entire bus three-states".
+**UM 7.8, 5.10.1, 8.1.1:** "the external RESET signal resets the processor and the
+entire system", and the reset exception that follows does ten named things to the
+processor: T1 T0, S, M and the mask; VBR; CACR's enable, freeze, burst and
+write-allocate bits; both caches; TC.E, TT0.E and TT1.E; the ISP and the PC from
+the vector table. "During the reset period, the entire bus three-states."
 
-**What this design does:** `reset_n_i` is synchronised (`reset_sync_n`) and nothing
-consumes it. The processor is reset by `rst_n`, which is not an MC68030 pin
-(`doc/pinout.md`), and it is `rst_n` that three-states the bus. Inherited from
-RD68021, which never acted on the RESET input either; it belongs with the reset
-exception, in the M8–M9 rework of exception processing.
+**What this design does.** Since M8–M9 it has two resets.
 
-Two consequences on the bus:
+- **The RESET pin** (`reset_n_i`) resets the processor as the manual describes
+  it. The bus unit synchronises it, ignores its own RESET instruction's pulse
+  and the four clocks after it (UM 7.8: an external RESET during the instruction
+  "must extend beyond the reset period of the instruction by at least eight
+  clock cycles to reset the processor"), and registers the rest as `crst`.
+  While `crst` is asserted the bus three-states, a cycle in progress is
+  abandoned ("as if DSACKx, BERR, or STERM had been asserted"), the sequencer,
+  the fetch unit and the instruction cache are held reset, and SR, VBR and CACR
+  take their reset values; when it negates, reset exception processing begins
+  -- three clocks of STATUS, the ISP from $0 and the PC from $4 in supervisor
+  program space. What UM 8.1.1 does not name keeps its value: D0-D7, A0-A6,
+  USP, MSP, SFC, DFC and CAAR. The arbiter keeps running: "bus arbitration
+  requests are recognized during normal processing, RESET assertion, HALT
+  assertion" (UM 7.7). TC.E, TT0.E and TT1.E are M11's, which builds the
+  registers and adds them to the same reset (`doc/plan.md`).
+- **`rst_n`**, which is not an MC68030 pin (`doc/pinout.md`), is the power-on
+  initialisation ASIC needs: every register, the architectural ones included,
+  takes its value from it, and the processor then runs the same reset exception.
 
-- **Arbitration under `rst_n`.** "Bus arbitration requests are recognized during
-  normal processing, RESET assertion, HALT assertion, and even when the
-  processor has halted due to a double bus fault" (7.7). Under the RESET pin
-  they are — the arbiter does not see the pin either — but `rst_n` resets the
-  arbiter with everything else, and BG stays negated while it is asserted.
-  This is a deliberate choice, decided by the user after M2: arbitration
-  stays off while `rst_n` is asserted, and it is not to be revisited.
+Three differences from the part remain, all about `rst_n` or the edges of the
+pin:
+
+- **Arbitration under `rst_n`.** `rst_n` resets the arbiter with everything
+  else, and BG stays negated while it is asserted. This is a deliberate choice,
+  decided by the user after M2: arbitration stays off while `rst_n` is
+  asserted, and it is not to be revisited. Under the RESET pin it is on.
+- **A RESET shorter than the manual asks for.** "Asserting RESET for 10 clock
+  periods is sufficient for resetting the processor logic"; this design resets
+  on any assertion its synchroniser sees on two consecutive falling edges. The
+  manual says what is enough, not what is ignored.
 - **The address bus after reset.** "Once RESET negates, all control signals are
   driven to their inactive state, the data bus is in read mode, and the address
   bus is driven" (7.8, figure 7-64). With `ADDR_HIZ_BETWEEN_CYCLES` set, the
-  default, the address group is released between cycles, and so also from
-  `rst_n` negating to the first cycle; with it clear the address is driven
+  default, the address group is released between cycles, and so also from the
+  end of either reset to the first cycle; with it clear the address is driven
   there as the figure draws it. The default is the user's decision — see "The
   address group is released between bus cycles" below.
 
-**How it is checked:** `bus_status_tb` and `bus_reset_tb` check the three-stating
-under `rst_n` and the pins after it; `bus_reset_tb` checks that the RESET pin,
-held low from outside or by the RESET instruction, leaves the bus unit running
-and arbitration working.
-
----
-
-## A bus error while RTE reads its frame is not a double bus fault
-
-**UM 8.1.2:** "If a bus error occurs during the exception processing for a bus
-error, address error, or reset or while the processor is loading internal state
-information from the stack during the execution of an RTE instruction, a double
-bus fault occurs"; and 8.1.13, Return from Exception: "once the processor
-begins to load the frame to restore its internal state, the assertion of the
-BERR signal causes the processor to enter the halted state with the continuous
-assertion of the STATUS signal".
-
-**What this design does:** the sequencer declares a double bus fault for a bus
-error during exception processing for a bus error, address error or reset —
-the cases UM20 6.1.2 lists, which is where RD68021 took them from — and not
-during RTE's frame reads, which take an ordinary bus error exception. The
-halted state itself, STATUS asserted continuously, is as the MC68030 has it
-(7.5.4). The RTE case belongs with the M8–M9 rework of exception processing.
-
-Since M4 the difference is smaller. UM 8.1.13 has RTE read "both ends of the
-stack frame to make sure it is accessible" before it loads anything, and take a
-bus error — not a halt — if it is not; this design now does that for the
-`$A` and `$B` frames (`doc/checkpoint.md` rule 10), so a frame that is not all
-there faults before anything is restored, with a frame of its own that
-describes the RTE and from which it continues. What remains is a bus error
-*after* that check, half-way through the load, which the part halts on and
-this design takes as a bus error with the machine half restored.
-
-**How it is checked:** `core_fault_tb` checks the double bus fault that is
-implemented; `bus_arb_tb` checks STATUS and arbitration in it; `core_fault_tb`
-checks the far-end read, on a frame whose last word is on a missing page.
-Nothing checks a bus error later in the load, because it is not a halt yet.
+**How it is checked:** `bus_reset_tb` checks the three-stating under `rst_n` and
+the pins after it; the RESET instruction's own pulse resetting nothing; the pin
+from outside three-stating the bus, abandoning a cycle in progress, starting
+nothing while held, granting BR under it, and letting the abandoned operand run
+afterwards; and a RESET from outside during the instruction's pulse that ends
+with it, two clocks after it, and eight clocks after it -- only the last resets.
+`core_reset_tb` resets a running program and checks UM 8.1.1 step by step, the
+registers it spares, the cache invalidated, a restart from a double bus fault
+and from STOP, the double bus faults of reset exception processing, and the
+RESET instruction against a RESET from outside.
 
 ---
 
@@ -203,28 +211,6 @@ alone (`doc/checkpoint.md`, rule 1).
 **How it is checked:** `core_fault_tb`, `core_paging_tb` and `core_cow_tb`
 compare every fault frame's format word with `$B`; `core_fault_tb` runs RTE out
 of hand-built `$A` frames.
-
----
-
-## RTE does not treat RM set and DF clear as a completed read-modify-write
-
-**UM 8.2.2:** "the RTE instruction expects the entire operation to have been
-completed if the RM bit is set and the DF bit is cleared. This is true even if
-the fault occurred on the first read cycle."
-
-**What this design does:** RTE resumes the faulted microword whatever `RM`
-says, as it does for any other access with `DF` clear: the operand that
-microword asked for is satisfied out of the frame with no bus cycle, and the
-instruction goes on from there — so a CAS or TAS whose handler emulated it
-entire would run its remaining cycles again. The microcode has no entry point
-that means "the read-modify-write is done, retire it", which is what
-`doc/checkpoint.md` rule 5 asks for. Inherited from RD68021; it belongs with
-the M8–M9 rework of exceptions and restart. With `DF` left set — what a
-pager does, and what `core_cow_tb`'s CAS does — the whole operation is
-rerun, as UM 8.2.3 says.
-
-**How it is checked:** it is not, yet. Found by reading the microcode against UM
-8.2.2 at M4: no microword tests `RM`, and RESUME is unconditional.
 
 ---
 

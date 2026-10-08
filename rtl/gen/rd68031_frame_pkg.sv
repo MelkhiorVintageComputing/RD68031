@@ -98,7 +98,7 @@ package rd68031_frame_pkg;
   // ==========================================================================
   // This design's own state, in the long frame's internal words
   //
-  // 492 bits available, 353 used, 64 reserved for M8-M11, 4 words spare.
+  // 492 bits available, 369 used, 48 reserved for M8-M11, 4 words spare.
   // Recompute this whenever something is added: doc/checkpoint.md carries the
   // same table, printed from the same source.
   // ==========================================================================
@@ -174,6 +174,9 @@ package rd68031_frame_pkg;
   localparam int OFF_I_IRQLVL    = 'h08;   //  3 bits, the level of the interrupt being taken
   localparam int I_IRQLVL_HI     = 12;
   localparam int I_IRQLVL_LO     = 10;
+  localparam int OFF_I_RMWUPC    = 'h52;   // 16 bits, the micro-address the read-modify-write under way starts again at
+  localparam int I_RMWUPC_HI     = 15;
+  localparam int I_RMWUPC_LO     = 0;
 
 endpackage
 

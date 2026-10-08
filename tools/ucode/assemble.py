@@ -397,8 +397,9 @@ package rd68031_ucode_pkg;
     # the decoder's fall-through, and the trace exception, which the sequencer
     # puts in front of the decode arm at every instruction boundary.
     for lbl in ('reset', 'illegal', 'exc_trace', 'exc_irq',
-                'exc_fault_long', 'exc_line_f',
-                'exc_cp_irq', 'rte_boundary', 'cp_nocp_priv'):
+                'exc_fault_long', 'exc_line_f', 'exc_line_f_nocp',
+                'exc_cp_irq', 'rte_boundary', 'rte_rmw_done',
+                'cp_nocp_priv'):
         out.append('  localparam logic [UADDR-1:0] ENTRY_%s = %d\'d%d;'
                    % (lbl.upper().replace('EXC_', ''),
                       isa.UADDR_BITS,

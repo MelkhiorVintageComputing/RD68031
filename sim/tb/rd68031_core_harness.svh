@@ -42,6 +42,13 @@ logic        ipend_n_o;
 logic        bg_n_o;
 logic        reset_n_o, reset_n_oe;
 
+// The RESET pin is open drain and bidirectional (UM 5.10.1): the processor's
+// own RESET instruction pulls it low and reads that back, as a board's wired
+// pin would, and a testbench pulls it low from outside with `reset_in_n` to
+// reset the processor -- UM 7.8, 8.1.1.
+logic        reset_in_n;
+initial reset_in_n = 1'b1;
+
 // The asynchronous inputs, driven rather than tied, so a testbench can raise an
 // interrupt or answer an acknowledge cycle. Everything that does not care gets
 // the idle level and never touches them.
@@ -147,7 +154,8 @@ rd68031_top #(.ICACHE_ENTRIES (`TB_ICACHE_ENTRIES),
     .ipl_n_i (ipl_n_i), .ipend_n_o (ipend_n_o), .avec_n_i (avec_n_i),
     .br_n_i (1'b1), .bg_n_o (bg_n_o), .bgack_n_i (1'b1),
     .berr_n_i (berr_n_i),
-    .reset_n_i (1'b1), .reset_n_o (reset_n_o), .reset_n_oe (reset_n_oe),
+    .reset_n_i (reset_in_n & ~reset_n_oe), .reset_n_o (reset_n_o),
+    .reset_n_oe (reset_n_oe),
     .halt_n_i (1'b1),
     .cdis_n_i (cdis_n_i), .mmudis_n_i (mmudis_n_i),
     .refill_n_o (refill_n_o), .status_n_o (status_n_o)

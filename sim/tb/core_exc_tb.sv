@@ -87,7 +87,7 @@ module core_exc_tb;
     if (iack_now) begin
       case (iack_mode)
         // An eight-bit port, so the vector number arrives on D31-D24 --
-        // UM20 table 5-7, the only lane an eight-bit port ever drives.
+        // UM 7.2.1, the only lane an eight-bit port ever drives.
         IACK_VECTOR: begin
           dsack_ext = 2'b10;
           oe_ext    = 1'b1;
@@ -99,7 +99,7 @@ module core_exc_tb;
     end
   end
 
-  // The level the core asked about, latched when it asks. UM20 figure 5-31 puts
+  // The level the core asked about, latched when it asks. UM figure 7-42 puts
   // it on A3-A1.
   // Triggered on the acknowledge ITSELF and not on the falling edge of AS that
   // makes it true: `iack_now` is a continuous assignment, so reading it inside

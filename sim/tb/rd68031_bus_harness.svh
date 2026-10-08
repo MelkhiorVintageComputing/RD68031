@@ -149,6 +149,7 @@ logic bgack_drv;
 logic dbf_drv;
 logic reset_req_drv;  // the RESET instruction's request -- UM 7.8
 logic reset_in_drv;   // the RESET pin driven low from outside, active high here
+logic crst;           // ... and the bus unit's verdict: the processor is being reset
 
 // The three-state data bus.
 wire [31:0] dbus;
@@ -170,7 +171,7 @@ rd68031_biu dut (
     .req_rmc (req_rmc), .req_cpuspace (req_cpuspace), .req_cpuaddr (req_cpuaddr),
     .req_cpfault (req_cpfault), .req_burst (req_burst), .req_ciout (req_ciout),
     .req_post (1'b0), .req_taken (), .post_busy (), .req_fault_post (),
-    .req_ack (req_ack), .req_last (req_last), .req_early (), .req_rdata (req_rdata),
+    .req_ack (req_ack), .req_start (), .req_last (req_last), .req_early (), .req_rdata (req_rdata),
     .req_end (req_end), .req_fault (req_fault), .req_fault_wr (req_fault_wr),
     .req_dsack (req_dsack), .req_ciin (req_ciin),
     .flt_addr (flt_addr), .flt_bytes (flt_bytes), .flt_fc (flt_fc),
@@ -185,7 +186,8 @@ rd68031_biu dut (
     .beat_valid (beat_valid), .beat_err (beat_err), .beat_data (beat_data),
     .beat_addr (beat_addr), .beat_num (beat_num), .beat_port (beat_port),
     .beat_ciin (beat_ciin), .beat_fetch (beat_fetch),
-    .reset_req (reset_req_drv), .reset_busy (reset_busy), .dbf (dbf_drv),
+    .reset_req (reset_req_drv), .reset_busy (reset_busy), .crst (crst),
+    .dbf (dbf_drv),
     .sts_bound (sts_bound_drv), .sts_pend (sts_pend_drv), .sts_exc (sts_exc_drv),
     .sts_refill (sts_refill_drv),
     .ipl_sync_n (ipl_sync_n), .reset_sync_n (reset_sync_n),
