@@ -315,6 +315,13 @@ out as on the part.
 `LINK.W A7,#-8`. `core_cputest_tb` runs the corpus's LINK A7 tests and counts
 them as excluded, by encoding, rather than failed.
 
+**Watch for it with real software.** The user decided, after phase B of M6-M7,
+to follow the manual here -- and to keep this in mind. If Linux, NetBSD, SunOS
+or the Sun-3/80 PROM (M13, M14) ever misbehaves around a stack frame, or the
+lockstep run of `sim/virt/` diverges on a `LINK A7` (`$4E57`, `$480F`), suspect
+this first: the part pushes the value from *before* the decrement, and the fix
+is one microword.
+
 ---
 
 ## T1 and T0 both set trace every instruction
@@ -361,12 +368,19 @@ class c):
 | `SBCD D7,D2` | $FF - $24 - 0 | $7B, X = C = 1 | $DB, X = C = 0 |
 | `SBCD D6,D3` | $FF - $04 - 0 | $9B, X = N = C = 1 | $FB, X = C = 0 |
 
-**Why it is allowed:** the operands are outside the instructions' domain, and
+**Why it is allowed:** the user decided, after phase B of M6-M7, to follow the
+manual rather than match the part on these bytes. The operands are outside the
+instructions' domain, and
 every valid BCD operand gives the part's result -- the sweep feeds only decimal
 digits and passes, as does the rest of the corpus's ABCD, SBCD and NBCD sample.
 A program relying on the part's behaviour here relies on something the manual
 does not promise.
 
-**How it is checked:** it is not masked: `make cputest` reports these four as its
-only failures, by test number, and `doc/m6-mismatches.md` lists them. An
-exclusion needs the operands, which the bench does not decode.
+**How it is checked:** the sweep checks every decimal-digit operand.
+`tools/cputest/convert.py` excludes, before sampling, every ABCD, SBCD and NBCD
+test with an operand byte that is not BCD -- reading the register, or the byte at
+the predecremented address (computed from the registers, since with Ax = Ay the
+corpus records one address for both operands) -- and counts them as tests "whose
+result the manual leaves undefined". With `CPUTEST_SEL=ABCD,SBCD,NBCD`, 416 tests
+are excluded and the 61 sampled pass; the default `make cputest` then passes in
+full: 6,639 of 6,649, the other 10 being LINK A7, set aside above.

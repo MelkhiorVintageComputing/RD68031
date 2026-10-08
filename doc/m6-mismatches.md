@@ -39,7 +39,7 @@ directed check in `core_insn_tb`. After phase B:
 | Flow | Result |
 |---|---|
 | `make vectors-all` | 12,200 / 12,200 pass (the same 4 + 2 dropped) |
-| `make cputest` | 6,692 pass, 4 fail, 10 excluded, of 6,706. The 4 are SBCD on operands that are not BCD (class c, `doc/divergences.md`); the 10 are LINK A7 (Q2), run and set aside by encoding |
+| `make cputest` | after phase B, 6,692 pass, 4 fail, 10 excluded, of 6,706. The 4 were SBCD on operands that are not BCD (class c); following the user's decision to follow the manual, `convert.py` now excludes every non-BCD operand as undefined (`doc/divergences.md`). The 10 are LINK A7 (Q2), run and set aside by encoding |
 | `make ea` | 703 / 703 |
 | `make cosim` | arith 19,496 and corners 2,156 instructions: pass |
 | `make cache` | pass: directed testbenches at `ICACHE_ENTRIES=0`, the sweep 12,200 / 12,200 uncached, `make ea` 703 / 703, both programs with identical data cycles (fetches 16,347 -> 499 and 2,532 -> 170) |

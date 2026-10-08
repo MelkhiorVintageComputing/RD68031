@@ -203,6 +203,11 @@ A C++ machine that mirrors the Linux and QEMU m68k `virt` board, so that a stock
 | M14 | MAME Sun-3/80: the PROM to the monitor first; then, after the driver work above, NetBSD/sun3x and SunOS 4.1.1 | `make sun3x`, then `make netbsd-sun3x sunos3x` |
 | M15 | Performance and FPGA (Vivado/Quartus scripts carried over), plus `make cycles` against UM §11 | `doc/implementation.md` |
 
+**Known suspects when real software misbehaves (M13, M14):** the deliberate
+differences from the part that follow the manual instead -- `LINK A7` pushes the
+decremented stack pointer where the part pushes the value before it, and the
+decimal instructions on non-BCD bytes (`doc/divergences.md`). Check these first.
+
 Each milestone's commit follows RD68021's style: an `Mn:` prefix, a prose subject, a body explaining the reasoning and the coverage, and the attribution line. Every defect found goes into `doc/bugs-found.md`, and every disagreement with an oracle into `doc/divergences.md`.
 
 ## 4. Verification

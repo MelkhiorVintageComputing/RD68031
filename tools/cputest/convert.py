@@ -627,15 +627,59 @@ def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
     nrun = nskip = nsampled = ntrace = nundef = 0
     tid = tid0
 
+    def bcd_ok(b):
+        return (b & 0x0F) <= 9 and (b >> 4) <= 9
+
+    def byte_at(t, a):
+        """A byte as the test starts: the replay's memory (old values already
+        put back), with the runner's user-to-supervisor stack copy applied."""
+        if t["copy"]:
+            src, dst, n = t["copy"]
+            if dst <= a < dst + n:
+                a = src + (a - dst)
+        return t["mem"].read(a, 1)[0]
+
     def undefined(t):
-        """Tests whose result PRM 4 leaves undefined: MULU.L/MULS.L with a
-        64-bit product and Dh = Dl ("the results of the operation are
-        undefined")."""
+        """Tests whose result the manual leaves undefined:
+
+        - MULU.L/MULS.L with a 64-bit product and Dh = Dl ("the results of the
+          operation are undefined", PRM 4);
+        - ABCD, SBCD and NBCD with an operand byte that is not binary-coded
+          decimal. PRM 4 defines them on BCD digits only; the user decided to
+          follow the manual rather than match what the part does with other
+          bytes (doc/divergences.md), so these tests are not compared."""
         op = bytes.fromhex(t["opcode"])
-        if len(op) >= 4 and (int.from_bytes(op[0:2], "big") & 0xFFC0) == 0x4C00:
+        w0 = int.from_bytes(op[0:2], "big") if len(op) >= 2 else 0
+        if len(op) >= 4 and (w0 & 0xFFC0) == 0x4C00:
             ext = int.from_bytes(op[2:4], "big")
             if ext & 0x0400 and (ext >> 12) & 7 == ext & 7:
                 return True
+        d, a = t["init"]["D"], t["init"]["A"]
+        if (w0 & 0xB1F0) == 0x8100:             # ABCD $C1xx / SBCD $81xx
+            rx, ry = (w0 >> 9) & 7, w0 & 7
+            if w0 & 0x0008:                     # -(Ay),-(Ax)
+                try:
+                    # Computed from the registers, not from the corpus's
+                    # source/destination address fields, which record the same
+                    # address twice when Ax = Ay. Ay is decremented first, so
+                    # with Ax = Ay the destination is the byte below the source;
+                    # A7 steps by two.
+                    src = a[ry] - (2 if ry == 7 else 1)
+                    dst = (src if rx == ry else a[rx]) - (2 if rx == 7 else 1)
+                    ops = (byte_at(t, src & 0xFFFFFFFF), byte_at(t, dst & 0xFFFFFFFF))
+                except ValueError:
+                    return False
+            else:                               # Dy,Dx
+                ops = (d[ry] & 0xFF, d[rx] & 0xFF)
+            return not all(bcd_ok(b) for b in ops)
+        if (w0 & 0xFFC0) == 0x4800 and (w0 >> 3) & 7 != 1:    # NBCD <ea>
+            if (w0 >> 3) & 7 == 0:
+                return not bcd_ok(d[w0 & 7] & 0xFF)
+            if t["dstaddr"] != 0xFFFFFFFF:
+                try:
+                    return not bcd_ok(byte_at(t, t["dstaddr"]))
+                except ValueError:
+                    return False
         return False
 
     def emit_mem(f, writes):
@@ -679,8 +723,8 @@ def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
                     run = False
                     nsampled += 1
                 seen += 1
-            elif not t.get("final"):
-                nskip += 1
+            elif not t.get("final") and not t["run"]:
+                nskip += 1          # only the generator's own skips
             if not run:
                 for a in touched(t):
                     try:
