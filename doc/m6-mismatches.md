@@ -29,11 +29,29 @@ reads in data space (24), **A4** MOVEM to `-(An)` storing An (4), **A5** divide 
 leaves C set (1), **A7** `BTST Dn,#<data>` taken as illegal (12; found by cputest, then
 added to the sweep's `bit` group).
 
+### Phase B
+
+Every class (a) item is fixed (A1-A9, A11, and A12, which the corpus reached once
+A1 was fixed); A10 turned out to be a reserved trace encoding and is handled as
+class (c); Q2 and Q3 are settled. Each fix has a `doc/bugs-found.md` entry and a
+directed check in `core_insn_tb`. After phase B:
+
+| Flow | Result |
+|---|---|
+| `make vectors-all` | 12,200 / 12,200 pass (the same 4 + 2 dropped) |
+| `make cputest` | 6,692 pass, 4 fail, 10 excluded, of 6,706. The 4 are SBCD on operands that are not BCD (class c, `doc/divergences.md`); the 10 are LINK A7 (Q2), run and set aside by encoding |
+| `make ea` | 703 / 703 |
+| `make cosim` | arith 19,496 and corners 2,156 instructions: pass |
+| `make cache` | pass: directed testbenches at `ICACHE_ENTRIES=0`, the sweep 12,200 / 12,200 uncached, `make ea` 703 / 703, both programs with identical data cycles (fetches 16,347 -> 499 and 2,532 -> 170) |
+| `make check`, `make sim COPROCESSOR=1` | pass |
+
 ---
 
 ## Class (a): likely RTL bugs
 
 ### A1. CAS: the compare operand is loaded at 32 bits, not at the operand's size
+
+**Resolved (phase B).** `DST_DREG_XR` writes at the operand size (`rd68031_seq`). The `cas` group and the corpus pass; `core_insn_tb` checks CAS.B, CAS.W and CAS2.W. The corpus then reached a second CAS2 defect, a shared compare register (A12).
 
 - **Instructions:** `CAS.B Dc,Du,<ea>` and `CAS.W Dc,Du,<ea>`, when the comparison fails
   (encodings `0AD1 0142`, `0CD1 0142`: `CAS.x D2,D5,(A1)`, and every other memory mode).
@@ -54,6 +72,8 @@ expected $C300FFAD).
 
 ### A2. BFFFO with a register offset returns the offset modulo 32
 
+**Resolved (phase B).** `BF_FFO` is the whole offset plus the position, register or memory field. RD68021's reading of the gap is withdrawn: `doc/manual-contradictions.md` entry 14.
+
 - **Instruction:** `BFFFO <ea>{Dn:w},Dn` with the offset in a data register (`EDC3 3820`:
   `BFFFO D3{D0:32},D3`; also `3925`, `38A0`). 18 vectors.
 - **Inputs (vector $24D8):** D0 = $FEB7AFF7 (the offset), D3 = $F0962F87 (the field
@@ -68,6 +88,8 @@ expected $C300FFAD).
 
 ### A3. CMP2 and CHK2 read their bounds through `(d16,PC)` in data space
 
+**Resolved (phase B).** The bounds reads take `fc = EASP`. The same fixed data space was on the memory read of BFTST, BFEXTU, BFEXTS and BFFFO, which take the PC-relative modes too and which no flow exercises that way; fixed with it, and `core_insn_tb` checks both from the access recorder.
+
 - **Instructions:** `CMP2/CHK2.B/.W/.L (d16,PC),Rn` (`00FA`, `02FA`, `04FA`), 24 vectors.
 - **Inputs (vector $29E0):** `CMP2.B (d16,PC),D2` with d16 = $10FC, so the bounds are at
   $2100 and $2101.
@@ -80,6 +102,8 @@ expected $C300FFAD).
 
 ### A4. MOVEM to `-(An)` stores An's initial value when An is in the list
 
+**Resolved (phase B).** `REGNR` gives An less the operand size for the addressing register (`rd68031_seq`).
+
 - **Instructions:** `MOVEM.W/.L <list>,-(An)` with An in the list (`48A3 FFFF`,
   `48E3 FFFF`: all sixteen registers to `-(A3)`). 4 vectors.
 - **Inputs (vector $2B60):** `MOVEM.L D0-A7,-(A3)`, A3 = $219E.
@@ -91,6 +115,8 @@ expected $C300FFAD).
   initial register value (not decremented)." The core does the MC68000's.
 
 ### A5. A divide by zero leaves C as it was
+
+**Resolved (phase B).** `exc_divzero` clears N, Z, V and C (`CLRNZVC`) before the status register is copied; X is kept.
 
 - **Instruction:** `DIVU.W #0,D1` (`82FC 0000`), the traps group's divide by zero.
 - **Inputs (vector $2F3E):** SR = $2719 (X, N and C set).
@@ -148,6 +174,8 @@ names them. The corpus confirms A1 (CAS.B, CAS.W, CAS2.W, CAS2.L), A2 (BFFFO) an
 
 ### A6. A byte operation through `-(A7)` or `(A7)+`: the "keep A7 even" rule is applied to the wrong register, or not at all
 
+**Resolved (phase B).** A second operand-size source, `OPSIZEW`, applies the rule from Ax (bits 11:9); ADDX, SUBX, CMPM and the BCD pair step Ax by it, and the BCD pair steps Ay by `OPSIZE` instead of a constant one.
+
 - **Instructions:** the two-register forms — `ABCD`, `SBCD`, `ADDX.B`, `SUBX.B`
   `-(Ay),-(Ax)` and `CMPM.B (Ay)+,(Ax)+` — with A7 as one of the two.
 - **Inputs and results** (USP = $8400, A6 = $BF00):
@@ -165,6 +193,8 @@ names them. The corpus confirms A1 (CAS.B, CAS.W, CAS2.W, CAS2.L), A2 (BFFFO) an
 
 ### A7. `BTST Dn,#<data>` is taken as an illegal instruction
 
+**Resolved (phase B).** A pattern for `0000 ddd1 0011 1100` ahead of BTST Dn,<ea>, and three microwords (`btst_d_imm`).
+
 - **Instruction:** `BTST Dn,#imm` (`0D3C 2AFD`, `0F3C 21C2`, `013C 152C`).
 - **Expected:** the instruction executes (Z from the immediate byte's bit Dn mod 8) and
   the test ends at the sentinel, $C004. **Got:** vector 4 at $C000.
@@ -177,6 +207,8 @@ names them. The corpus confirms A1 (CAS.B, CAS.W, CAS2.W, CAS2.L), A2 (BFFFO) an
 
 ### A8. cpSAVE/cpRESTORE in user mode take the F-line exception, not a privilege violation
 
+**Resolved (phase B).** Without the coprocessor interface, cpSAVE and cpRESTORE with a valid effective address go to `cp_nocp_priv`: privilege violation in user mode, F-line exception in supervisor mode. (With it built, the S bit was already tested first.)
+
 - **Instruction:** `$F557` (cpRESTORE, coprocessor ID 2, `(A7)`), in user mode, with no
   coprocessor 2.
 - **Expected:** vector 8, privilege violation, stacked PC $C000. **Got:** vector 11.
@@ -188,6 +220,8 @@ names them. The corpus confirms A1 (CAS.B, CAS.W, CAS2.W, CAS2.L), A2 (BFFFO) an
   addressed at all.
 
 ### A9. Two illegal encodings: one has side effects, one hangs the core
+
+**Resolved (phase B).** `tools/ucode/program.py` (`_refuse_modes`) puts refusal patterns in front of the opcode patterns: PC-relative modes for every instruction whose operand is written, MOVE's non-existent destinations (and An for MOVE.B), (An)+ and -(An) for the control-mode instructions (the corpus's `BFCLR -(A3)`, `$ECE3`, which hung the core, surfaced once A1-A11 were fixed), and An as a byte operand of ADD, SUB, CMP, ADDQ, SUBQ.
 
 - `$1BDA` — MOVE.B `(A2)+` to destination mode 7, register 5, which does not exist.
   **Expected:** vector 4, nothing changed. **Got:** vector 4, but A2 incremented ($7FF0
@@ -202,6 +236,8 @@ names them. The corpus confirms A1 (CAS.B, CAS.W, CAS2.W, CAS2.L), A2 (BFFFO) an
 
 ### A10. A status-register write that sets T1 does not trace the next instruction
 
+**Resolved (phase B) -- reclassified.** `$C534` sets T1 *and* T0, which UM table 8-3 calls "Undefined, Reserved": not a class (a) item but class (c). With T1 alone the core already traced the next instruction (now checked by `core_insn_tb`). For 11 the core now does what the corpus records -- T1 decides (`trace_take`) -- and `doc/divergences.md` records the choice.
+
 - **Instruction:** `ORI #$C534,SR` (`007C C534`) in supervisor mode; the sentinel NOP
   (`MOVEA.L A0,A0`) follows.
 - **Expected:** the NOP is traced: vector 9, format $2, PC $C006, address $C004.
@@ -214,6 +250,8 @@ names them. The corpus confirms A1 (CAS.B, CAS.W, CAS2.W, CAS2.L), A2 (BFFFO) an
 
 ### A11. CHK2.B through A7 reads the wrong upper bound (likely)
 
+**Confirmed and resolved (phase B).** A bug: the step from the lower to the upper bound used `OPSIZE`, which carries the A7 byte rule, so any CHK2.B/CMP2.B whose effective-address register field is 7 read the upper bound at A7+2. `core_insn_tb`'s CHK2.B (A7),D0 failed before the fix. The step is now `OPBYTES`, the operand size with no A7 rule.
+
 - **Instructions:** `CHK2.B (A7),D0` (`00D7 0800`) and `CHK2.B (d16,A7),D0`
   (`00EF 0800 744D`), user mode.
 - **Inputs:** USP = $8400, the bytes at $8400 are $31, $4F, $74; D0 = $6A.
@@ -225,6 +263,18 @@ names them. The corpus confirms A1 (CAS.B, CAS.W, CAS2.W, CAS2.L), A2 (BFFFO) an
 - **Manual:** PRM 4, CHK2: the bounds are "a pair of bounds ... the lower bound first",
   at consecutive locations of the operand's size.
 
+### A12. CAS2 with Dc1 = Dc2 keeps memory operand 2 (found in phase B)
+
+- **Instruction:** `CAS2.L D3:D3,D2:D6,(A7):(A6)` (`0EFC F083 E183`), the
+  comparison failing. Reached once A1 was fixed.
+- **Expected:** D3 = memory operand 1 ($314F7457, at USP). **Got:** memory
+  operand 2 ($401D0000).
+- **Manual:** PRM 4, CAS2, the Dc1 and Dc2 fields: "If Dc1 and Dc2 specify the
+  same data register and the comparison fails, memory operand 1 is stored in
+  the data register."
+
+**Resolved (phase B).** `cas2_fail` writes Dc2 first and Dc1 last.
+
 ### Class (b) found by cputest
 
 | | What differed | Done |
@@ -235,10 +285,15 @@ names them. The corpus confirms A1 (CAS.B, CAS.W, CAS2.W, CAS2.L), A2 (BFFFO) an
 
 ### Class (c) found by cputest
 
+- **T1 = T0 = 1** (A10, reclassified in phase B): UM table 8-3, "Undefined,
+  Reserved". The core takes it as T1 alone, as the corpus records the part
+  doing (`doc/divergences.md`).
 - **MULU.L/MULS.L with a 64-bit product and Dh = Dl** (`4C27 05D0`): PRM 4: "If Dh = Dl
   and size is one, the results of the operation are undefined." Excluded by `convert.py`
   (80 tests, before sampling).
-- **SBCD/ABCD on operands that are not BCD** (`8906`, SBCD D6,D4 with the destination
+- **SBCD/ABCD on operands that are not BCD** -- *phase B: left failing, as 4
+  SBCD tests now (one was hidden behind A6 before); recorded in
+  `doc/divergences.md` with the core's result for each.* The original note: (`8906`, SBCD D6,D4 with the destination
   byte $D5): the corpus's operands are random; PRM 4 defines the decimal instructions on
   BCD digits only (the sweep feeds them valid digits). The value and X/C differ. Left in
   the list, not masked: an exclusion needs the operands, and there are 3.
@@ -255,12 +310,23 @@ names them. The corpus confirms A1 (CAS.B, CAS.W, CAS2.W, CAS2.L), A2 (BFFFO) an
   and core agree; b4 is a quirk of the Hatari copy, and the harness's correction stands.
   (No TRAPcc/TRAPV test with a trap was in the sample.)
 
-- **Q2.** `LINK An,#d` with An = A7 (`480F`, `4E57`): the value pushed. The core pushes
+- **Q2 (settled, phase B).** Follow PRM 4's operation: LINK A7 pushes the
+  decremented stack pointer, which the core already did. The corpus's value is
+  likely the silicon's, and the difference is recorded in
+  `doc/manual-contradictions.md` entry 15 and `doc/divergences.md`;
+  `core_cputest_tb` runs the 10 tests and counts them as excluded by encoding
+  (`$4E57`, `$480F`), not failed. Original question:
+  `LINK An,#d` with An = A7 (`480F`, `4E57`): the value pushed. The core pushes
   A7 after the decrement ($83FC for USP = $8400); the corpus expects the value before it
   ($8400). PRM 4's operation, read literally ("SP − 4 → SP; An → (SP)"), gives the
   core's answer; the oracle -- whose tester was written against real processors --
   the other. Not a register any compiler would use; LINK.W and LINK.L both, 10 tests.
-- **Q3.** `UNLK A7` (`4E5F`): the corpus expects A7 = the long word loaded from the stack
+- **Q3 (settled, phase B).** The manual contradicts itself: the operation line
+  gives the long word plus four, the description ("loads the address register
+  with the long word pulled from the top of the stack") the long word. The
+  core now follows the description, which the corpus agrees with; the core's
+  old answer matched neither (`doc/manual-contradictions.md` entry 16,
+  `doc/bugs-found.md`). Original question: `UNLK A7` (`4E5F`): the corpus expects A7 = the long word loaded from the stack
   ($314F7457); the core leaves the incremented stack pointer ($8404). PRM 4's operation
   ("An → SP; (SP) → An; SP + 4 → SP") read literally gives neither (the loaded value plus
   four). The manual does not settle it; the oracle's answer is the natural one for "the

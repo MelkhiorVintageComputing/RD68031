@@ -416,6 +416,18 @@ BSRC = enc(
     'TWENTY',    # the length of a midinstruction frame -- UM figure 10-43
     'VEROFF',    # $36, where the long frame's version word is -- UM 8.1.13,
                  # from rd68031_frame_pkg
+    # OPSIZE for the register bits 11:9 name, rather than the effective
+    # address's: the destination of ADDX, SUBX, ABCD, SBCD -(Ay),-(Ax) and of
+    # CMPM (Ay)+,(Ax)+. UM 2.4.4 and 2.4.5 step a byte through the stack
+    # pointer by two, and that rule belongs to whichever of the two registers
+    # is A7 -- OPSIZE alone applied it to Ax when Ay was A7.
+    'OPSIZEW',
+    # ... and the operand size with no A7 rule at all, for stepping between
+    # two operands of one effective address that is neither (An)+ nor -(An):
+    # CMP2 and CHK2's bounds pair, "the upper bound following the lower" (PRM
+    # 4) at consecutive operand-sized locations, through A7 as through any
+    # other register.
+    'OPBYTES',
 )
 
 ALU = enc(

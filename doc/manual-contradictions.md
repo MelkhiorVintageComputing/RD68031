@@ -280,3 +280,74 @@ operation words, in which the CpID is zero, are not coprocessor instructions
 for the MC68030" -- so section 10's rules about types 110 and 111 are about
 CpIDs 1 to 7. `core_m030_tb` checks a type-001 and a type-111 CpID-0 word in
 each mode.
+
+---
+
+## 14. Which offset BFFFO adds, when the field is in a data register
+
+**Followed: the literal reading -- the instruction's whole offset, reduced modulo
+32 only to locate the field.**
+
+PRM 4, BFFFO: "The bit offset of that bit (the bit offset in the instruction plus
+the offset of the first one bit) is placed in Dn. If no bit in the bit field is
+set to one, the value in Dn is the field offset plus the field width." A register
+offset is "in the range of -2^31 to 2^31 - 1". For a field in a data register
+the manual never says what happens to an offset outside 0-31 -- UM 2.2.1 only
+says the field "wraps around within the register" -- so it leaves open whether
+the sum uses the register's value or the value reduced modulo 32 that the field
+was actually found at. The two are congruent modulo 32 and address the same
+field when fed back.
+
+RD68021 took the reduced one (its own `doc/manual-contradictions.md`, "What
+BFFFO adds to its scan result"). This design withdraws that reading: the
+sentence names "the bit offset in the instruction", which for a register offset
+is the register's value, and nothing in the paragraph reduces it. The two
+instruction-level oracles of M6 agree with the literal reading -- the sweep's
+oracle and the cputest corpus, whose generator was validated against real
+processors (`doc/m6-mismatches.md` A2) -- which is evidence about the part, not
+the reason. `core_insn_tb` checks offsets 37 and -27 and an empty field.
+
+---
+
+## 15. What LINK A7 pushes
+
+**Followed: PRM 4's operation -- the stack pointer after the decrement.**
+
+PRM 4, LINK: "Operation: SP - 4 → SP; An → (SP); SP → An; SP + dn → SP." With
+An = A7 the second step stores the decremented stack pointer. The description --
+"Pushes the contents of the specified address register onto the stack. Then
+loads the updated stack pointer into the address register" -- does not say which
+value of A7 "the contents" are, so it does not contradict the operation, but it
+does not confirm it either.
+
+The cputest corpus records the other value: in all 10 sampled tests of
+`LINK.W A7` (`$4E57`) and `LINK.L A7` (`$480F`) the long word pushed is A7 from
+before the decrement ($8400 for A7 = $8400, where the operation gives $83FC).
+The corpus's generator was validated against real processors, so this is likely
+what the silicon does: the part reads An before it steps the stack pointer. It
+is still not what the manual writes, and nothing about it is needed by code a
+compiler produces (A7 as a frame pointer makes no sense), so this design follows
+the manual. `doc/divergences.md` records the difference from the part, and
+`core_cputest_tb` sets the two encodings aside, by name, as excluded rather than
+failed. `core_insn_tb` checks the manual's value.
+
+---
+
+## 16. What UNLK A7 leaves in A7
+
+**Followed: PRM 4's description -- A7 is the long word pulled from the stack.**
+
+PRM 4, UNLK: "Operation: An → SP; (SP) → An; SP + 4 → SP." Read literally with
+An = A7, the last step adds four to the long word just loaded. The description
+says the opposite order: "Loads the stack pointer from the specified address
+register, then loads the address register with the long word pulled from the
+top of the stack" -- the stack pointer is stepped as part of the pull, and the
+address register is loaded last. For any An but A7 the two are the same; for A7
+they differ by four, and the manual contradicts itself.
+
+The description is followed, for two reasons: it is the sentence that says what
+ends up in the address register, which is the question; and the cputest corpus
+agrees with it -- all 4 sampled tests of `UNLK A7` (`$4E5F`) expect A7 to be the
+long word loaded (`doc/m6-mismatches.md` Q3). RD68021 gave a third answer, the
+old stack pointer plus four (`doc/bugs-found.md`, M6). `core_insn_tb` checks
+UNLK A7.

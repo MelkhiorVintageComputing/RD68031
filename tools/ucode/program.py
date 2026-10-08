@@ -881,7 +881,10 @@ def link(name, long_disp):
     label(name)
     # PRM 4: "SP - 4 -> SP; An -> (SP); SP -> An; SP + d -> SP". The stack
     # pointer is stepped first and the push goes through it, so LINK A7 pushes
-    # the decremented stack pointer, as the operation says.
+    # the decremented stack pointer, as the operation says. The cputest corpus
+    # records the part pushing the value from before the decrement; this core
+    # follows the manual, and doc/manual-contradictions.md (entry 15) and
+    # doc/divergences.md record the difference.
     u('the stack pointer, four lower',
       asrc='SP', bsrc='FOUR', alu='SUB', dst='SP', size='LONG')
     u('push the address register',
@@ -907,16 +910,24 @@ def link(name, long_disp):
 link('link_w', False)
 link('link_l', True)
 
+# UNLK An. PRM 4's description: "loads the stack pointer from the specified
+# address register, then loads the address register with the long word pulled
+# from the top of the stack" -- so the address register is written LAST, and for
+# UNLK A7 the result is the long word, not the stack pointer stepped past it.
+# The operation line ("An -> SP; (SP) -> An; SP + 4 -> SP") read literally ends
+# on the step instead; doc/manual-contradictions.md (entry 16) records the two
+# and why this follows the description. RD68021 stepped the stack pointer last,
+# which matched neither (doc/bugs-found.md, M6).
 label('unlk')
 u('the stack pointer becomes the frame pointer',
   asrc='AREG', alu='A', dst='T1', size='LONG')
-u('read the frame pointer that was saved there',
-  bus='READ', fc='DATA', asel='T1', bytes=4)
-u('... back into the address register',
+u('the stack pointer is the four bytes past it',
+  asrc='T1', bsrc='FOUR', alu='ADD', dst='SP', size='LONG')
+u('read the frame pointer that was saved there, back into the address '
+  'register -- written only if the read completes',
+  bus='READ', fc='DATA', asel='T1', bytes=4,
   asrc='RDATA', alu='A', dst='AREG_EA', size='LONG')
-u('and the stack pointer is the four bytes past it',
-  asrc='T1', bsrc='FOUR', alu='ADD', dst='SP', size='LONG',
-  pf='ADV', seq='DECODE')
+u('done', pf='ADV', seq='DECODE')
 
 # ==========================================================================
 # BKPT -- PRM 4 and UM 7.4.2
@@ -1060,8 +1071,9 @@ def extend_pair(stem, alu, ccr):
       bus='READ', fc='DATA', asel='T0', szsel='IR76')
     u('and hold it',
       asrc='RDATA', alu='A', dst='T2', szsel='IR76')
-    u('the destination register, stepped back',
-      asrc='AREGW', bsrc='OPSIZE', alu='SUB', dst='T1', szsel='IR76')
+    u('the destination register, stepped back -- by two for a byte through '
+      'A7, which is decided by THIS register: UM 2.4.5',
+      asrc='AREGW', bsrc='OPSIZEW', alu='SUB', dst='T1', szsel='IR76')
     u('... which is its new value',
       asrc='T1', alu='A', dst='AREG', size='LONG')
     u('read the destination',
@@ -1119,8 +1131,8 @@ u('and hold it',
   asrc='RDATA', alu='A', dst='T2', szsel='IR76')
 u('the destination address, and its register stepped on',
   asrc='AREGW', alu='A', dst='T1', szsel='IR76')
-u('... likewise',
-  asrc='AREGW', bsrc='OPSIZE', alu='ADD', dst='AREG_ADDR', szsel='IR76')
+u('... likewise, by two for a byte if it is A7 -- UM 2.4.4',
+  asrc='AREGW', bsrc='OPSIZEW', alu='ADD', dst='AREG_ADDR', szsel='IR76')
 u('read the destination',
   bus='READ', fc='DATA', asel='T1', szsel='IR76')
 # Held before it is used: the microword that compares also advances the pipe,
@@ -1679,6 +1691,21 @@ opcode('0000---101001---', 'movep_lr', 'MOVEP.L (d16,Ay),Dx')
 opcode('0000---110001---', 'movep_wm', 'MOVEP.W Dx,(d16,Ay)')
 opcode('0000---111001---', 'movep_lm', 'MOVEP.L Dx,(d16,Ay)')
 
+# BTST Dn,#<data>. PRM 4, BTST: the dynamic form's addressing-mode table lists
+# #<data> (mode 111, register 100) -- the only bit instruction that has it, since
+# the other three write their operand back. The operand is a byte, the low half
+# of the word after the opcode (PRM 2, immediate data), so the bit number is
+# taken modulo eight as for any byte operand. RD68021 had no pattern for it and
+# took it as an illegal instruction (doc/bugs-found.md, M6). Claimed before
+# BTST Dn,<ea>, whose pattern covers it.
+label('btst_d_imm')
+u('the immediate byte, in the low half of the word after the opcode',
+  asrc='STG_C', alu='A', dst='T1', size='WORD', pf='CONSUME')
+u('the bit the register names, modulo eight',
+  asrc='T1', bsrc='BITMASK', alu='AND', ccr='ZBIT', size='BYTE', bitimm=0)
+u('BTST changes nothing', pf='ADV', seq='DECODE')
+opcode('0000---100111100', 'btst_d_imm', 'BTST Dn,#imm')
+
 for _n, _op, _stem in (('BTST', '00', 'btst'), ('BCHG', '01', 'bchg'),
                        ('BCLR', '10', 'bclr'), ('BSET', '11', 'bset')):
     opcode('0000---1' + _op + '000---', _stem + '_d_dn',  _n + ' Dn,Dn')
@@ -1977,17 +2004,20 @@ def bcd_pair(stem, alu):
       asrc='DREGW', bsrc='DREG', alu=alu, dst='DREG', ccr='BCD', size='BYTE',
       pf='ADV', seq='DECODE')
 
+    # UM 2.4.5: "If the address register is the stack pointer and the operand
+    # size is byte, the address is decremented by two" -- for either register.
+    # RD68021 stepped both by one (doc/bugs-found.md, M6).
     label(stem + '_mm')
-    u('the source register, stepped back a byte',
-      asrc='AREG', bsrc='ONE', alu='SUB', dst='T0', size='LONG')
+    u('the source register, stepped back a byte, or two if it is A7',
+      asrc='AREG', bsrc='OPSIZE', alu='SUB', dst='T0', size='BYTE')
     u('... which is its new value',
       asrc='T0', alu='A', dst='AREG_EA', size='LONG')
     u('read the source',
       bus='READ', fc='DATA', asel='T0', bytes=1)
     u('and hold it',
       asrc='RDATA', alu='A', dst='T2', size='BYTE')
-    u('the destination register, stepped back a byte',
-      asrc='AREGW', bsrc='ONE', alu='SUB', dst='T1', size='LONG')
+    u('the destination register, stepped back a byte, or two if it is A7',
+      asrc='AREGW', bsrc='OPSIZEW', alu='SUB', dst='T1', size='BYTE')
     u('... which is its new value',
       asrc='T1', alu='A', dst='AREG', size='LONG')
     u('read the destination',
@@ -2279,14 +2309,18 @@ u('the address of the bounds pair',
   call=1, seq='EAMODE', szsel='IR109')
 u('... and now the extension word can come back',
   asrc='T0', alu='A', dst='XW', size='WORD')
-u('the lower bound',
-  bus='READ', fc='DATA', asel='EA', szsel='IR109')
+u('the lower bound -- in program space when the mode is PC relative, UM 2.4.11',
+  bus='READ', fc='EASP', asel='EA', szsel='IR109')
 u('... widened to thirty-two bits -- PRM 4',
   asrc='RDATA', alu='SX', dst='T1', szsel='IR109')
+# By the operand size and nothing else: the A7 byte rule of UM 2.4.4 and 2.4.5
+# is for stepping the register through (A7)+ and -(A7), and this steps the
+# address between the two bounds of one operand. OPSIZE applied it, and read
+# CHK2.B (A7)'s upper bound at A7+2 (doc/bugs-found.md, M6).
 u('step past it',
-  asrc='EA', bsrc='OPSIZE', alu='ADD', dst='EA', size='LONG', szsel='IR109')
-u('the upper bound',
-  bus='READ', fc='DATA', asel='EA', szsel='IR109')
+  asrc='EA', bsrc='OPBYTES', alu='ADD', dst='EA', size='LONG', szsel='IR109')
+u('the upper bound, in the same space',
+  bus='READ', fc='EASP', asel='EA', szsel='IR109')
 u('... likewise',
   asrc='RDATA', alu='SX', dst='T2', szsel='IR109')
 u('an address register is compared whole',
@@ -2405,8 +2439,12 @@ def bitfield(stem, ttt, ins=None, result=None, ccr='BF'):
               asrc='T0', alu='A', dst='XW', size='WORD')
             u('the first byte the field touches -- PRM 4, the offset over eight',
               asrc='EA', bsrc='BF_BYTEOFF', alu='ADD', dst='EA', size='LONG')
+            # In program space when the base is the program counter: BFTST,
+            # BFEXTU, BFEXTS and BFFFO take the PC-relative modes, and UM
+            # 2.4.11-2.4.15 make every one of them a program space reference.
+            # The four that write the field back cannot have them.
             u('read every byte it touches, and no others',
-              bus='READ', fc='DATA', asel='EA', szsel=sz)
+              bus='READ', fc='EASP', asel='EA', szsel=sz)
         else:
             u('the extension word: the field, and where its offset comes from',
               asrc='STG_C', alu='A', dst='XW', size='WORD', pf='CONSUME')
@@ -2567,14 +2605,21 @@ label('cas2_fail')
 # "If either comparison fails, the instruction writes the memory operands to
 # the compare operands." Both of them, whichever comparison it was that failed,
 # which is why both were read before either was compared.
-u('one of them differed: the first extension word again',
-  asrc='T0', alu='A', dst='XW', size='WORD')
-u('the first destination goes into the first compare register',
-  asrc='T2', alu='A', dst='DREG_XR', szsel='CAS')
-u('and the second extension word',
+#
+# The SECOND goes first. PRM 4, CAS2, the Dc1 and Dc2 fields: "If Dc1 and Dc2
+# specify the same data register and the comparison fails, memory operand 1 is
+# stored in the data register" -- so operand 1 is the write that lands last.
+# RD68021 wrote them in the operation line's order and left operand 2 there
+# (doc/bugs-found.md, M6).
+u('one of them differed: the second extension word',
   asrc='T1', alu='A', dst='XW', size='WORD')
-u('the second destination into the second compare register',
-  asrc='T3', alu='A', dst='DREG_XR', szsel='CAS', pf='ADV', seq='DECODE')
+u('the second destination goes into the second compare register',
+  asrc='T3', alu='A', dst='DREG_XR', szsel='CAS')
+u('and the first extension word',
+  asrc='T0', alu='A', dst='XW', size='WORD')
+u('the first destination into the first compare register, last, so that it is '
+  'the one a shared register keeps',
+  asrc='T2', alu='A', dst='DREG_XR', szsel='CAS', pf='ADV', seq='DECODE')
 
 # CAS2 is an immediate-mode encoding of CAS, which CAS cannot use, so it is
 # claimed first -- PRM 8.
@@ -2765,11 +2810,14 @@ def exc_here(stem, vec, executed=False):
       asrc='PC_D', alu='A', dst='T1', size='LONG', next='exc_f0')
 
 
-def exc_next(stem, vec, vecsrc='VECOFF'):
-    """Format $2: the next instruction, and this one at +$08."""
+def exc_next(stem, vec, vecsrc='VECOFF', ccr='NONE'):
+    """Format $2: the next instruction, and this one at +$08.
+
+    `ccr` is what the instruction leaves in the codes before the frame copies
+    the status register -- the zero divide's, below."""
     label(stem)
     u('the vector offset',
-      asrc=vecsrc, alu='A', dst='T0', size='LONG', vec=vec)
+      asrc=vecsrc, alu='A', dst='T0', size='LONG', vec=vec, ccr=ccr)
     u('the address of the instruction that caused it',
       asrc='PC_D', alu='A', dst='T2', size='LONG')
     u('and the frame carries the address of the NEXT one',
@@ -2782,7 +2830,13 @@ exc_here('exc_line_f',   11)
 exc_here('exc_priv',      8)
 exc_next('exc_chk',       6)
 exc_next('exc_trapcc',    7)
-exc_next('exc_divzero',   5)
+# PRM 4, DIVS and DIVU: "C -- Always cleared", with no exception for a zero
+# divisor, while N, Z and V are "undefined if ... divide by zero". The frame
+# stacks the status register as the instruction left it (UM 8.1), so C is
+# cleared here, before the copy, and N, Z and V with it -- the one encoding
+# that clears C and leaves X. RD68021 left all four as they were
+# (doc/bugs-found.md, M6).
+exc_next('exc_divzero',   5, ccr='CLRNZVC')
 
 # TRAP #n. PRM 4: vector 32 + n, and the frame carries the address of the next
 # instruction, which for a one-word instruction is simply the word after it.
@@ -3627,6 +3681,23 @@ u('an MMU instruction is privileged -- UM 8.1.6, PRM 6 "else TRAP"',
 u('M11 reads the command word here; until then every one is taken as a '
   'command word this part does not define -- UM 8.1.5, an F-line exception',
   next='exc_line_f')
+
+# cpSAVE and cpRESTORE in a core built without the coprocessor interface. The
+# instruction is privileged before it is a coprocessor's: UM 10.2.3.3 and
+# 10.2.3.4, "if the MC68030 attempts to execute a cpRESTORE instruction while at
+# the user privilege level ... it initiates privilege violation exception
+# processing without accessing any of the coprocessor interface registers" --
+# so the privilege check does not depend on there being an interface to
+# access, and a core with none still makes it. rd68031_seq sends the two
+# operation words here, when their effective address is one the instruction
+# allows, in place of the F-line exception every other CpID word takes without
+# an interface. In supervisor mode the result is the F-line exception the
+# missing coprocessor's bus error would give (UM 10.5.2.2). RD68021 took the
+# F-line exception in user mode too (doc/bugs-found.md, M6).
+label('cp_nocp_priv')
+u('privileged -- UM 10.2.3.3.2, 10.2.3.4',
+  seq='COND', cond='USER', next='exc_priv')
+u('... and with no coprocessor, an F-line exception', next='exc_line_f')
 
 label('cp0_unimp')
 u('a CpID-0 word that is no MMU instruction: in user mode a privilege '
@@ -4819,6 +4890,125 @@ def _merge_tails():
 
 
 MERGED_TAILS = _merge_tails()
+
+
+# ==========================================================================
+# EFFECTIVE ADDRESSES AN INSTRUCTION DOES NOT HAVE -- decided at decode
+#
+# UM 8.1.5: an illegal instruction is detected when the operation word is
+# decoded, and nothing is executed. The addressing-mode table above refuses
+# the modes no instruction can compute an address from (Dn, An, immediate,
+# 111/101-111), but it is consulted only when the instruction asks for its
+# address, which is too late in two cases (doc/bugs-found.md, M6):
+#
+#   * a destination that is not alterable -- the two program-counter-relative
+#     modes, which UM 2.4.11-2.4.15 allow "only for reads". The table computes
+#     the address and the instruction wrote there; EOR.B D7,(d8,PC,Xn) never
+#     came back at all.
+#   * MOVE, which evaluates its source before its destination. A destination
+#     that does not exist (PRM 4, MOVE: data alterable only, and no MOVEA.B)
+#     was found after the source had been read and an (An)+ stepped.
+#
+# So the operation words are refused here, by opcode patterns put in front of
+# the ones that would otherwise claim them. First match wins, so a pattern
+# inserted immediately before an instruction's wildcard takes only encodings
+# that wildcard would have taken.
+# ==========================================================================
+
+# Every instruction whose <ea> is written: PRM 4 and 6 give each of them a data,
+# memory or control ALTERABLE operand, none of which includes (d16,PC) or
+# (d8,PC,Xn) and their full-format relatives. CMPI, TST, BTST, CHK, CMP2/CHK2
+# and the read-only bit-field instructions are not here: on the MC68020 and
+# MC68030 they take the program-counter-relative modes (PRM 4).
+_ALTERABLE = (
+    'clr_mem', 'neg_mem', 'negx_mem', 'not_mem', 'nbcd_mem', 'tas_mem',
+    'add_to_mem', 'sub_to_mem', 'and_to_mem', 'or_to_mem', 'eor_to_mem',
+    'ori_immw_mem', 'ori_imml_mem', 'andi_immw_mem', 'andi_imml_mem',
+    'subi_immw_mem', 'subi_imml_mem', 'addi_immw_mem', 'addi_imml_mem',
+    'eori_immw_mem', 'eori_imml_mem',
+    'addq_mem', 'subq_mem', 'scc_mem', 'shift_mem',
+    'bchg_d_mem', 'bchg_s_mem', 'bclr_d_mem', 'bclr_s_mem',
+    'bset_d_mem', 'bset_s_mem',
+    'move_from_ccr_mem', 'move_from_sr_mem', 'movem_to_ctl', 'moves',
+    'bfchg_mem', 'bfclr_mem', 'bfset_mem', 'bfins_mem', 'cas', 'cp_scc',
+)
+
+
+# Every instruction whose <ea> is a CONTROL address (PRM 2.2: no Dn, An, (An)+,
+# -(An) or immediate): JMP, JSR, LEA, PEA, CMP2/CHK2, the eight bit-field
+# instructions in memory, and MOVEM's control forms, whose (An)+ or -(An) slot
+# the other direction of MOVEM owns. The table refuses Dn, An and immediate on
+# its own; (An)+ and -(An) it would compute, stepping the register, so they are
+# refused here. `BFCLR -(A3)` ran into the weeds instead of taking vector 4.
+_CONTROL = (
+    'jmp', 'jsr', 'lea', 'pea', 'cmp2',
+    'bftst_mem', 'bfextu_mem', 'bfchg_mem', 'bfexts_mem',
+    'bfclr_mem', 'bfffo_mem', 'bfset_mem', 'bfins_mem',
+    'movem_to_ctl', 'movem_from_ctl',
+)
+
+
+def _cube_minus(a, b):
+    """The cubes covering a but not b -- assemble.py's, for the check below."""
+    for i in range(len(a)):
+        if a[i] != '-' and b[i] != '-' and a[i] != b[i]:
+            return [a]
+    out, cur = [], list(a)
+    for i in range(len(a)):
+        if b[i] != '-' and a[i] == '-':
+            piece = list(cur)
+            piece[i] = '1' if b[i] == '0' else '0'
+            out.append(''.join(piece))
+            cur[i] = b[i]
+    return out
+
+
+def _refuse_modes():
+    bad = [l for l in _ALTERABLE + _CONTROL if l not in LABELS]
+    if bad:
+        raise SystemExit('program: _ALTERABLE names no label %s' % ', '.join(bad))
+    out = []
+
+    def add(pat, what):
+        # Only where it takes something: a refusal every earlier pattern
+        # already shadows would be refused by assemble.py.
+        cubes = [pat]
+        for q, _t, _m in out:
+            cubes = [c for x in cubes for c in _cube_minus(x, q)]
+        if cubes:
+            out.append((pat, 'exc_illegal', what))
+
+    moved = set()
+    for p, t, m in PATTERNS:
+        if t in _ALTERABLE and p[10:] == '------':
+            add(p[:10] + '11101-', m + ', a PC-relative destination -- illegal')
+        # An is a word or long operand only -- PRM 4, ADD, SUB, CMP ("word and
+        # long operations only" for An), ADDQ and SUBQ ("word and long only"
+        # for an address register destination). The byte encodings are not
+        # instructions.
+        if t in ('add_an', 'sub_an', 'cmp_an') and p[8:10] == '--':
+            add(p[:8] + '00' + p[10:], m + ', byte size -- illegal')
+        if t in ('addq_an', 'subq_an') and p[8:10] == '00':
+            out.append((p, 'exc_illegal', m + ' -- no byte form, illegal'))
+            continue
+        if t in _CONTROL and p[10:] == '------':
+            add(p[:10] + '011---', m + ', (An)+ is not a control mode -- illegal')
+            add(p[:10] + '100---', m + ', -(An) is not a control mode -- illegal')
+        # MOVE's destination is bits 11:6, register first. PRM 4, MOVE: data
+        # alterable; and MOVEA has no byte form (PRM 4, MOVEA), so An is not a
+        # destination of MOVE.B. Put in front of the first pattern of each size.
+        sz = p[:4]
+        if sz in ('0001', '0011', '0010') and sz not in moved:
+            moved.add(sz)
+            add(sz + '01-111------', 'MOVE, destination 111/010-011 -- illegal')
+            add(sz + '1--111------', 'MOVE, destination 111/100-111 -- illegal')
+            if sz == '0001':
+                add(sz + '---001------', 'MOVEA.B -- no such instruction')
+        out.append((p, t, m))
+    PATTERNS[:] = out
+
+
+_refuse_modes()
 
 
 # ==========================================================================

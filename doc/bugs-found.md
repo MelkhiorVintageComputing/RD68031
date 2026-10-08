@@ -452,3 +452,257 @@ names; the instruction cache's are where they were.
 
 **Stops it coming back:** `core_m030_tb`'s three CACR round trips.
 
+
+---
+
+## M6 · CAS and CAS2 wrote a failed compare into the whole data register
+
+**What:** when the comparison failed, `CAS.B`, `CAS.W` and `CAS2.W` put the
+memory operand into the compare register Dc through `DST_DREG_XR`, which wrote
+all thirty-two bits: D2 = $3E05A9F4 and a byte $19 left $00000019. PRM 4, CAS:
+"Destination → Compare Operand", at the operation's size, and UM 2.2.1: a byte or
+word operation changes "only the appropriate low-order byte or word" of a data
+register. Inherited from RD68021.
+
+**Found by:** `make vectors-all` (the `cas` group: 45 CAS.B, 45 CAS.W, 9 CAS2.W)
+and the cputest corpus (CAS.B, CAS.W, CAS2.W) -- `doc/m6-mismatches.md` A1.
+
+**Fixed by:** `DST_DREG_XR` writes at the effective size, as `DST_DREG` does. Its
+other users -- the long multiplies and divides -- are long word microwords.
+
+**Stops it coming back:** the `cas` group of the sweep; `core_insn_tb`'s CAS.B,
+CAS.W and CAS2.W failed compares, which check the upper bits.
+
+---
+
+## M6 · BFFFO summed the register offset modulo 32
+
+**What:** `BFFFO <ea>{Dn:w},Dm` with the field in a data register returned the
+offset modulo 32 plus the bit position: D0 = $FEB7AFF7 gave $00000017 where PRM 4
+gives "the bit offset in the instruction plus the offset of the first one bit",
+and a register offset is "in the range of -2^31 to 2^31 - 1". RD68021 chose the
+reduced offset on purpose, reading a gap in the manual (its
+`doc/manual-contradictions.md`); `doc/manual-contradictions.md` entry 14 here
+says why that reading is withdrawn.
+
+**Found by:** `make vectors-all` (18 vectors of the `bitfield` group) and the
+cputest corpus -- A2.
+
+**Fixed by:** `BF_FFO` is the whole offset plus the position, register field or
+memory field; the reduction stays where it belongs, in locating the field.
+
+**Stops it coming back:** the `bitfield` group; `core_insn_tb`'s BFFFO with
+offsets 37 and -27 and with an empty field.
+
+---
+
+## M6 · CMP2, CHK2 and the read-only bit fields read (d16,PC) in data space
+
+**What:** CMP2 and CHK2 read their bounds pair with the function code fixed at
+data space, so `CMP2.B (d16,PC),D2` read program-relative bounds as FC 5. UM
+2.4.11-2.4.15: every program-counter-relative reference "is a program space
+reference". Reading the microcode for it found the same fixed code on the memory
+read of BFTST, BFEXTU, BFEXTS and BFFFO, which PRM 4 also allows PC-relative.
+Inherited from RD68021.
+
+**Found by:** `make vectors-all` (24 vectors of the `cmp2` group) -- A3; the bit
+fields by reading the microcode while fixing it, since the sweep's bit-field
+groups do not use the PC-relative modes.
+
+**Fixed by:** those reads take `fc = EASP`, the space of the effective address
+under way, as every other read-only operand does.
+
+**Stops it coming back:** the `cmp2` group; `core_insn_tb` checks, from the
+operand-access recorder, that CMP2.B (d16,PC) and BFTST (d16,PC) read in program
+space.
+
+---
+
+## M6 · MOVEM to -(An) stored An's initial value
+
+**What:** with An in the list, MOVEM to -(An) wrote An as it was before the
+instruction. PRM 4, MOVEM: "For the MC68020, MC68030, MC68040, and CPU32, if the
+addressing register is also moved to memory, the value written is the initial
+register value decremented by the size of the operation. The MC68000 and MC68010
+write the initial register value (not decremented)." The core did the MC68010's.
+Inherited from RD68021.
+
+**Found by:** `make vectors-all` (4 vectors of the `movem` group) and the cputest
+corpus -- A4.
+
+**Fixed by:** the register source the predecrement form walks with (`REGNR`)
+gives An less the operand size when the register it names is the addressing
+register; An is not written until the loop is over, so that is the initial value
+less two or four.
+
+**Stops it coming back:** the `movem` group; `core_insn_tb`'s MOVEM.L and MOVEM.W
+D0-A7,-(A3).
+
+---
+
+## M6 · A divide by zero left C as it was
+
+**What:** DIVU and DIVS with a zero divisor took the zero-divide exception with
+the condition codes untouched, so the stacked SR carried a C that was set before
+the instruction. PRM 4: "C -- Always cleared", with no exception for a zero
+divisor (only N, Z and V are "undefined" then). Inherited from RD68021.
+
+**Found by:** `make vectors-all` (the `traps` group's DIVU.W #0) -- A5.
+
+**Fixed by:** the first microword of `exc_divzero`, before the status register is
+copied, clears N, Z, V and C and leaves X (`CLRNZVC`).
+
+**Stops it coming back:** the `traps` group; `core_insn_tb`'s DIVU.W #0 with C set
+reads the stacked SR.
+
+---
+
+## M6 · The A7 byte rule was applied to the wrong register, or to none
+
+**What:** UM 2.4.4 and 2.4.5 step the stack pointer by two for a byte through
+(A7)+ or -(A7). In the two-register memory forms the rule belongs to whichever of
+Ax and Ay is A7. ABCD and SBCD -(Ay),-(Ax) stepped both registers by one; ADDX.B,
+SUBX.B and CMPM.B stepped Ax by two when Ay was A7 and by one when Ax was. So
+`ABCD -(A6),-(A7)` left A7 odd and `ADDX.B -(A7),-(A6)` moved A6 by two. The
+operand-size source applied the rule from the effective-address register field
+(Ay), and the BCD forms did not use it. Inherited from RD68021.
+
+**Found by:** the cputest corpus (ABCD, SBCD, ADDX.B, SUBX.B, CMPM.B with A7) --
+A6. The sweep's `extend` and `bcd` groups never use A7 in these forms.
+
+**Fixed by:** a second operand-size source, `OPSIZEW`, which applies the rule from
+the register bits 11:9 name (Ax); every Ax step uses it, and the BCD forms step
+by the operand size instead of a constant one.
+
+**Stops it coming back:** `core_insn_tb` runs ABCD, ADDX.B, CMPM.B both ways and
+SBCD -(A7),-(A7), and checks each register's step.
+
+---
+
+## M6 · BTST Dn,#<data> was an illegal instruction
+
+**What:** PRM 4, BTST: the dynamic form's addressing-mode table lists #<data> --
+the only bit instruction that has it. The decoder sent it to the memory form,
+whose addressing-mode dispatch has no immediate, so it took vector 4. Inherited
+from RD68021.
+
+**Found by:** the cputest corpus -- A7; the sweep's `bit` group did not emit it
+and now does.
+
+**Fixed by:** a pattern for `0000 ddd1 0011 1100` ahead of BTST Dn,<ea>, and
+three microwords: the immediate byte from the low half of the extension word,
+the bit modulo eight, the end.
+
+**Stops it coming back:** the `bit` group (12 vectors); `core_insn_tb`'s two
+BTST Dn,#$A5.
+
+---
+
+## M6 · cpSAVE and cpRESTORE took an F-line exception in user mode without a coprocessor interface
+
+**What:** built without the interface (`COPROCESSOR=0`, the default), every
+F-line word with a CpID other than zero went to the F-line exception -- including
+cpSAVE and cpRESTORE in user mode, which UM 10.2.3.3 and 10.2.3.4 make a
+privilege violation "without accessing any of the coprocessor interface
+registers": the check comes first, and does not depend on there being an
+interface. Inherited from RD68021.
+
+**Found by:** the cputest corpus (`$F557`, cpRESTORE (A7), user mode) -- A8.
+
+**Fixed by:** with no interface built, the two operation words go, when the
+decode table accepts their effective address, to `cp_nocp_priv`: a privilege
+violation in user mode and the F-line exception in supervisor mode. With the
+interface built, `cp_save` and `cp_restore` already tested the S bit first.
+
+**Stops it coming back:** `core_insn_tb`'s user-mode cpSAVE -(A7) and cpRESTORE
+(A7), in both builds (`make sim` and `make sim COPROCESSOR=1`).
+
+---
+
+## M6 · Effective addresses an instruction does not have were found too late
+
+**What:** the opcode patterns took every mode, and the addressing-mode table --
+consulted when the instruction asks for its address -- refused only the modes no
+instruction computes an address from. Two kinds of illegal word therefore ran:
+an alterable destination given a PC-relative mode computed the address and wrote
+there (`EOR.B D7,(d8,PC,Xn)` never came back at all), and MOVE, which evaluates
+its source first, found a non-existent destination only after the source had
+been read and an (An)+ stepped (`$1BDA` incremented A2 and set Z before taking
+vector 4). UM 8.1.5: an illegal instruction is found at decode and nothing is
+executed. Inherited from RD68021.
+
+**Found by:** the cputest corpus -- A9.
+
+**Fixed by:** `tools/ucode/program.py` puts refusal patterns, to `exc_illegal`, in
+front of each pattern that would otherwise claim the words: the two PC-relative
+modes for every instruction whose <ea> is written (PRM 4 and 6: data, memory or
+control alterable), and for MOVE the destinations 111/010-111 and, for MOVE.B,
+An. A refusal is inserted only where it takes something no earlier pattern
+claims, so TRAPcc and cpTRAPcc, which own the Scc and cpScc PC-relative slots,
+are untouched.
+
+The same mechanism refuses (An)+ and -(An) for the instructions whose operand
+is a control address (PRM 2.2) -- JMP, JSR, LEA, PEA, CMP2/CHK2, the bit fields
+in memory and MOVEM's control forms -- which the table would otherwise compute,
+stepping the register: `BFCLR -(A3)` (`$ECE3`, from the corpus's ILLEGAL set)
+never came back. And it refuses An as a byte operand of ADD, SUB, CMP, ADDQ and
+SUBQ, which PRM 4 gives word and long forms only.
+
+**Stops it coming back:** `core_insn_tb` runs `$1BDA`, `EOR.B D7,(d8,PC,Xn)`, a
+MOVE.B to An, `BFCLR -(A3)`, `LEA (A3)+,A0`, `ADDQ.B #1,A3` and `ADD.B A3,D0`,
+and checks the frame and that no register was touched.
+
+---
+
+## M6 · CHK2.B and CMP2.B through A7 read the upper bound at A7+2
+
+**What:** the step from the lower to the upper bound used the operand size with
+the A7 byte rule, so through any mode based on A7 -- (A7), (d16,A7) -- a byte
+pair was read at A7 and A7+2. The rule is for stepping the register through
+(A7)+ and -(A7) (UM 2.4.4, 2.4.5); PRM 4 puts the bounds at consecutive
+operand-sized locations. Inherited from RD68021.
+
+**Found by:** the cputest corpus (`CHK2.B (A7),D0`, `CHK2.B (d16,A7),D0`) -- A11,
+confirmed by `core_insn_tb`, which failed on it before the fix.
+
+**Fixed by:** a third operand-size source, `OPBYTES`, with no A7 rule; CMP2 and
+CHK2 step between the bounds by it.
+
+**Stops it coming back:** `core_insn_tb`'s CHK2.B (A7),D0, in and out of bounds.
+
+---
+
+## M6 · UNLK A7 left the stack pointer stepped past the long word
+
+**What:** UNLK read the saved frame pointer into An and then wrote SP = An + 4.
+For UNLK A7 the last write won, so A7 ended as the old stack pointer plus four.
+PRM 4's description makes the address register the last thing loaded -- "loads
+the address register with the long word pulled from the top of the stack" --
+and its operation line, read literally, ends on the long word plus four; the
+core gave neither. Inherited from RD68021.
+
+**Found by:** the cputest corpus (`$4E5F`) -- `doc/m6-mismatches.md` Q3, settled
+in `doc/manual-contradictions.md` entry 16.
+
+**Fixed by:** UNLK steps the stack pointer first and loads An last, from the read
+itself.
+
+**Stops it coming back:** `core_insn_tb`'s UNLK A7.
+
+---
+
+## M6 · CAS2 with one compare register for both kept memory operand 2
+
+**What:** a failed CAS2 wrote memory operand 1 into Dc1 and then memory operand 2
+into Dc2, the order of the operation line, so with Dc1 = Dc2 the register ended
+holding operand 2. PRM 4, CAS2, on the Dc1 and Dc2 fields: "If Dc1 and Dc2
+specify the same data register and the comparison fails, memory operand 1 is
+stored in the data register." Inherited from RD68021.
+
+**Found by:** the cputest corpus (`CAS2.L D3:D3,D2:D6,(A7):(A6)`, `0EFC F083
+E183`), once A1 was fixed and the comparison of the compare registers reached
+it.
+
+**Fixed by:** `cas2_fail` writes Dc2 first and Dc1 last.
+
+**Stops it coming back:** `core_insn_tb`'s failed CAS2.L D3:D3.

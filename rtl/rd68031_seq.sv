@@ -177,8 +177,19 @@ module rd68031_seq #(
     if (COPROCESSOR) begin : g_cp_dec
       assign dec_entry = dec_rom_entry;
     end else begin : g_nocp_dec
-      assign dec_entry = ((dec_ir[15:12] == 4'hF) && (dec_ir[11:9] != 3'b000))
-                         ? rd68031_ucode_pkg::ENTRY_LINE_F : dec_rom_entry;
+      // ... except that cpSAVE and cpRESTORE (types 100 and 101) are
+      // privileged first, and make the check with or without an interface to
+      // talk to: UM 10.2.3.3 and 10.2.3.4. One whose effective address the
+      // table accepts -- its entry is not the F-line one -- goes to
+      // cp_nocp_priv, which takes the privilege violation in user mode and the
+      // F-line exception in supervisor mode.
+      logic nocp_fline, nocp_save_rest;
+      assign nocp_fline     = (dec_ir[15:12] == 4'hF) && (dec_ir[11:9] != 3'b000);
+      assign nocp_save_rest = (dec_ir[8:7] == 2'b10)
+                              && (dec_rom_entry != rd68031_ucode_pkg::ENTRY_LINE_F);
+      assign dec_entry = !nocp_fline     ? dec_rom_entry
+                       : nocp_save_rest  ? rd68031_ucode_pkg::ENTRY_CP_NOCP_PRIV
+                       :                   rd68031_ucode_pkg::ENTRY_LINE_F;
     end
   endgenerate
 
@@ -479,12 +490,22 @@ module rd68031_seq #(
 
   // The operand size in bytes. PRM 2: a byte access through A7 steps it by two,
   // so that the stack pointer stays even.
-  logic [31:0] opsize_bytes;
+  //
+  // UM 2.4.4 and 2.4.5 tie that rule to the register being stepped, so there
+  // are two of these: for the register the effective-address field names
+  // (rsel), and for the one bits 11:9 name (wsel) -- Ax of the two-register
+  // memory forms, -(Ay),-(Ax) and (Ay)+,(Ax)+ (doc/bugs-found.md, M6).
+  logic [31:0] opsize_bytes, opsize_bytes_w;
   always_comb begin
     unique case (eff_size)
       rd68031_ucode_pkg::U_SIZE_BYTE: opsize_bytes = (rsel == 3'd7) ? 32'd2 : 32'd1;
       rd68031_ucode_pkg::U_SIZE_WORD: opsize_bytes = 32'd2;
       default:                        opsize_bytes = 32'd4;
+    endcase
+    unique case (eff_size)
+      rd68031_ucode_pkg::U_SIZE_BYTE: opsize_bytes_w = (wsel == 3'd7) ? 32'd2 : 32'd1;
+      rd68031_ucode_pkg::U_SIZE_WORD: opsize_bytes_w = 32'd2;
+      default:                        opsize_bytes_w = 32'd4;
     endcase
   end
 
@@ -665,14 +686,14 @@ module rd68031_seq #(
       // BFFFO: "the bit offset in the instruction plus the offset of the first
       // one bit", and the field's width when there is none.
       //
-      // For a DATA REGISTER the offset that goes into that sum is the one the
-      // field was actually taken at -- the low five bits -- and not the whole
-      // register. The two are congruent modulo 32, so either serves equally as
-      // an offset into the same field, and doc/manual-contradictions.md records
-      // that the manual does not choose between them.
+      // The offset in that sum is the instruction's whole offset, for a field
+      // in a data register as for one in memory: PRM 4 gives a register offset
+      // the range -2^31 to 2^31-1 and reduces it modulo 32 only to locate the
+      // field. RD68021 summed the reduced offset for a register field; that was
+      // a reading of a gap in the manual, and doc/manual-contradictions.md
+      // (entry 14) records why this one takes the literal reading instead.
       rd68031_ucode_pkg::U_ASRC_BF_FFO:
-        bf_a = ((`UF(SZSEL) == rd68031_ucode_pkg::U_SZSEL_BFREG)
-                ? {27'd0, bf_offset[4:0]} : bf_offset) + {26'd0, bf_ffo};
+        bf_a = bf_offset + {26'd0, bf_ffo};
       rd68031_ucode_pkg::U_ASRC_BF_MERGED:  bf_a = bf_merged_reg;
       rd68031_ucode_pkg::U_ASRC_MULLO:      bf_a = mul_full[31:0];
       rd68031_ucode_pkg::U_ASRC_MULHI:      bf_a = mul_full[63:32];
@@ -718,6 +739,10 @@ module rd68031_seq #(
       rd68031_ucode_pkg::U_BSRC_STG_C_U: b_bus = {16'd0, stg_c};
       rd68031_ucode_pkg::U_BSRC_STG_C_S: b_bus = {{16{stg_c[15]}}, stg_c};
       rd68031_ucode_pkg::U_BSRC_OPSIZE:  b_bus = opsize_bytes;
+      rd68031_ucode_pkg::U_BSRC_OPSIZEW: b_bus = opsize_bytes_w;
+      rd68031_ucode_pkg::U_BSRC_OPBYTES: b_bus = (eff_size == rd68031_ucode_pkg::U_SIZE_BYTE) ? 32'd1
+                                               : (eff_size == rd68031_ucode_pkg::U_SIZE_WORD) ? 32'd2
+                                               : 32'd4;
       rd68031_ucode_pkg::U_BSRC_INDEX:   b_bus = xw_index;
       rd68031_ucode_pkg::U_BSRC_XWDISP8: b_bus = {{24{xw_q[7]}}, xw_q[7:0]};
       rd68031_ucode_pkg::U_BSRC_EA:      b_bus = ea_q;
@@ -781,10 +806,22 @@ module rd68031_seq #(
     else                        regn_val = areg[regn[2:0]];
   end
 
+  // REGNR's only reader is MOVEM to -(An), and there the addressing register
+  // itself is the one exception to "the register's value". PRM 4: "For the
+  // MC68020, MC68030, MC68040, and CPU32, if the addressing register is also
+  // moved to memory, the value written is the initial register value
+  // decremented by the size of the operation. The MC68000 and MC68010 write the
+  // initial register value (not decremented)." The loop does not write An until
+  // it is over, so the register still holds its initial value here, and the
+  // operand size is IR6's two or four. RD68021 stored the MC68010's value
+  // (doc/bugs-found.md, M6).
+  logic [31:0] regnr_reg;
   always_comb begin
-    if (!regnr[3])               regnr_val = dreg[regnr[2:0]];
-    else if (regnr[2:0] == 3'd7) regnr_val = sp_read;
-    else                         regnr_val = areg[regnr[2:0]];
+    if (!regnr[3])               regnr_reg = dreg[regnr[2:0]];
+    else if (regnr[2:0] == 3'd7) regnr_reg = sp_read;
+    else                         regnr_reg = areg[regnr[2:0]];
+    if (regnr[3] && (regnr[2:0] == rsel)) regnr_val = regnr_reg - opsize_bytes;
+    else                                  regnr_val = regnr_reg;
   end
 
   // Which of the two the destination names. Worked out HERE and not inside the
@@ -1582,8 +1619,13 @@ module rd68031_seq #(
   // it has changed the flow yet is what trace-on-change-of-flow asks.
   assign cp_int = {11'd0, notrace_q, pc_kept_q, flow_q, trace_mode_q};
 
+  // UM table 8-3: T1 T0 = 10 traces every instruction, 01 a change of flow,
+  // and 11 is "undefined, reserved". This core takes 11 as 10 -- T1 decides,
+  // T0 matters only without it -- which is what the cputest corpus, generated
+  // by a tester validated against real processors, records the part doing
+  // (doc/divergences.md). RD68021 traced nothing under 11.
   assign trace_take = !notrace_q
-                   && ((trace_mode_q == 2'b10)
+                   && (trace_mode_q[1]
                        || ((trace_mode_q == 2'b01) && flow_eff));
 
   // ==========================================================================
@@ -2478,7 +2520,18 @@ module rd68031_seq #(
             end
           end
           rd68031_ucode_pkg::U_DST_DREG_XQ: dreg[xw_q[14:12]] <= y_reg;
-          rd68031_ucode_pkg::U_DST_DREG_XR: dreg[xw_q[2:0]]   <= y_reg;
+          // At the operand size. CAS and CAS2 are the byte and word users:
+          // PRM 4, "Destination -> Compare Operand", and a byte or word
+          // operation on a data register changes only its low-order part (UM
+          // 2.2.1). Writing the whole register lost the compare register's
+          // upper bits whenever the comparison failed (doc/bugs-found.md, M6).
+          rd68031_ucode_pkg::U_DST_DREG_XR: begin
+            unique case (eff_size)
+              rd68031_ucode_pkg::U_SIZE_BYTE: dreg[xw_q[2:0]][7:0]  <= y_reg[7:0];
+              rd68031_ucode_pkg::U_SIZE_WORD: dreg[xw_q[2:0]][15:0] <= y_reg[15:0];
+              default:                        dreg[xw_q[2:0]]       <= y_reg;
+            endcase
+          end
           rd68031_ucode_pkg::U_DST_CCR:
             sr_q[4:0] <= y[4:0];
           rd68031_ucode_pkg::U_DST_AREG: begin

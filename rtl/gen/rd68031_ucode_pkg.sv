@@ -306,6 +306,8 @@ package rd68031_ucode_pkg;
   localparam logic [5:0] U_BSRC_CPLEN = 6'd35;
   localparam logic [5:0] U_BSRC_TWENTY = 6'd36;
   localparam logic [5:0] U_BSRC_VEROFF = 6'd37;
+  localparam logic [5:0] U_BSRC_OPSIZEW = 6'd38;
+  localparam logic [5:0] U_BSRC_OPBYTES = 6'd39;
 
   localparam logic [5:0] U_ALU_A = 6'd0;
   localparam logic [5:0] U_ALU_B = 6'd1;
@@ -461,12 +463,13 @@ package rd68031_ucode_pkg;
   // Named entry points.
   localparam logic [UADDR-1:0] ENTRY_RESET = 12'd0;
   localparam logic [UADDR-1:0] ENTRY_ILLEGAL = 12'd4;
-  localparam logic [UADDR-1:0] ENTRY_TRACE = 12'd1257;
-  localparam logic [UADDR-1:0] ENTRY_IRQ = 12'd1260;
-  localparam logic [UADDR-1:0] ENTRY_FAULT_LONG = 12'd1288;
-  localparam logic [UADDR-1:0] ENTRY_LINE_F = 12'd1091;
-  localparam logic [UADDR-1:0] ENTRY_CP_IRQ = 12'd1879;
+  localparam logic [UADDR-1:0] ENTRY_TRACE = 12'd1259;
+  localparam logic [UADDR-1:0] ENTRY_IRQ = 12'd1262;
+  localparam logic [UADDR-1:0] ENTRY_FAULT_LONG = 12'd1290;
+  localparam logic [UADDR-1:0] ENTRY_LINE_F = 12'd1093;
+  localparam logic [UADDR-1:0] ENTRY_CP_IRQ = 12'd1883;
   localparam logic [UADDR-1:0] ENTRY_RTE_BOUNDARY = 12'd3;
+  localparam logic [UADDR-1:0] ENTRY_CP_NOCP_PRIV = 12'd1353;
 
 endpackage
 

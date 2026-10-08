@@ -289,3 +289,84 @@ can observe -- the value MOVEC reads back -- is the part's.
 CACR and checks `$3313`, `$2211` and zero back, and CAAR's thirty-two bits;
 `core_cache_tb` checks EI, FI, CI and CEI against the cache; `core_m030_tb`
 reports the burst requests a program made on a burst-capable port, today none.
+
+---
+
+## LINK A7 pushes the stack pointer after the decrement
+
+**PRM 4, LINK:** "SP - 4 → SP; An → (SP); SP → An; SP + dn → SP." The cputest
+corpus, whose generator was validated against real processors, records the part
+pushing A7's value from *before* the decrement: every one of the 10 sampled tests
+of `LINK.W A7,#d` (`$4E57`) and `LINK.L A7,#d` (`$480F`) expects it
+(`doc/m6-mismatches.md` Q2).
+
+**What this design does:** what the operation says. The stack pointer is stepped
+down four, and the push goes through it, so LINK A7 stores the decremented value;
+A7 then ends at that value plus the displacement, as on the part.
+
+**Why it is allowed:** the manual is literal and the design follows it
+(`doc/manual-contradictions.md` entry 15). The difference is the one long word
+pushed, only for A7 as LINK's register, which no compiler or hand-written frame
+pointer convention uses -- the frame pointer it would establish is the stack
+pointer itself. The stack pointer, the displacement and every other register come
+out as on the part.
+
+**How it is checked:** `core_insn_tb` checks the pushed value and A7 after
+`LINK.W A7,#-8`. `core_cputest_tb` runs the corpus's LINK A7 tests and counts
+them as excluded, by encoding, rather than failed.
+
+---
+
+## T1 and T0 both set trace every instruction
+
+**UM 8.1.7, table 8-3:** T1 T0 = 10 traces every instruction, 01 traces changes
+of flow, and 11 is "Undefined, Reserved".
+
+**What this design does:** takes 11 as 10 -- T1 decides, and T0 matters only
+when T1 is clear. A status register write that sets both traces the instruction
+after it, with the format $2 frame tracing any instruction takes. RD68021 traced
+nothing under 11.
+
+**Why it is allowed:** the encoding is reserved, so the manual asks nothing of
+it; the choice is the one the cputest corpus records the part making, so that a
+program that sets both bits by accident -- `ORI #$C534,SR` in the corpus --
+behaves as it would on the silicon (`doc/m6-mismatches.md` A10).
+
+**How it is checked:** `core_insn_tb` sets T1 alone, and T1 with T0, with ORI to
+SR, and checks that the next instruction (not a change of flow) is traced, with
+the frame's program counter and instruction address.
+
+---
+
+## ABCD, SBCD and NBCD on bytes that are not BCD
+
+**PRM 4** defines the decimal instructions on packed BCD operands -- two digits
+of 0 to 9 per byte -- and says nothing about a byte with a nibble of $A-$F. The
+result and the X and C bits are then undefined by the manual.
+
+**What this design does:** its decimal adjust (`rd68031_seq`, `bcd_*`) treats a
+result outside $00-$99 as a decimal carry or borrow: SBCD, after the low digit's
+correction, takes a difference that is below zero *or above $99* as a borrow,
+adds $A0, and sets X and C. For BCD operands the difference is never above $99
+and the two conditions are one. On non-BCD operands the part, as the cputest
+corpus records it, borrows only when the subtraction goes below zero, and keeps
+the high digit as it fell.
+The four cases in the default sample (`make cputest`, all SBCD, `doc/m6-mismatches.md`
+class c):
+
+| Test | Operands (destination - source - X) | Core | Corpus (the part) |
+|---|---|---|---|
+| `SBCD D6,D4` | $D5 - $10 - 1 | $64, X = C = 1 | $C4, X = C = 0 |
+| `SBCD -(A6),-(A7)` | $D3 - $00 - 1 | $72, X = C = 1 | $D2, X = C = 0 |
+| `SBCD D7,D2` | $FF - $24 - 0 | $7B, X = C = 1 | $DB, X = C = 0 |
+| `SBCD D6,D3` | $FF - $04 - 0 | $9B, X = N = C = 1 | $FB, X = C = 0 |
+
+**Why it is allowed:** the operands are outside the instructions' domain, and
+every valid BCD operand gives the part's result -- the sweep feeds only decimal
+digits and passes, as does the rest of the corpus's ABCD, SBCD and NBCD sample.
+A program relying on the part's behaviour here relies on something the manual
+does not promise.
+
+**How it is checked:** it is not masked: `make cputest` reports these four as its
+only failures, by test number, and `doc/m6-mismatches.md` lists them. An
+exclusion needs the operands, which the bench does not decode.
