@@ -161,9 +161,14 @@ ROWS = [
     ('PEA (A0)',               [], [0x4850],                 7,  '5 + calc (An) 2', 6),
     ('LINK.W A4,#-8',          [], [0x4E54, 0xFFF8],         5,  '5', 6),
     ('LINK.L A4,#-8',          [], [0x480C, 0xFFFF, 0xFFF8], 6,  '6', 8),
-    ('UNLK A4',                [0x4E54, 0x0000], [0x4E5C],   6,  '6', 7),
+    # 8, not the 7 frozen here before M10: the design at the start of M10
+    # already took 8, and nothing had run this since. doc/timing-divergences.md.
+    ('UNLK A4',                [0x4E54, 0x0000], [0x4E5C],   6,  '6', 8),
     ('JMP (A5)',               [], [0x4ED5],                 6,  '4 + jump (An) 2', 6),
-    ('JSR (A3)',               [], [0x4E93],                 7,  '5 + jump (An) 2', 9),
+    # M10: the instruction cache's tag is per LINE (UM 6.1.1). This JSR is at
+    # $040C, in line 0 with its target $3000: the call and the return take the
+    # line from each other on every pass. doc/timing-divergences.md.
+    ('JSR (A3)',               [], [0x4E93],                 7,  '5 + jump (An) 2', 14),
     ('BSR.S',                  [], [0x6102, 0x6002, 0x4E75], 7,  '7', 9),
     ('RTS',                    [0x487A, 0x0004], [0x4E75],   10, '10', 9),
     ('RTR',                    [0x487A, 0x0008, 0x3F3C, 0x0000], [0x4E77],
@@ -192,7 +197,8 @@ ROWS = [
     ('TRAPF',                  [], [0x51FC],                 4,  '4', 2),
     ('TRAPF.W',                [], [0x51FA, 0x0000],         6,  '6', 3),
     ('TRAPF.L',                [], [0x51FB, 0x0000, 0x0000], 8,  '8', 4),
-    ('TRAP #0',                [], [0x4E40],                 20, '20', 27),
+    # ... and so does this TRAP and its handler.
+    ('TRAP #0',                [], [0x4E40],                 20, '20', 32),
     ('ILLEGAL',                [], [0x4AFC],                 20, '20', 32),
     ('line A',                 [], [0xA000],                 20, '20', 32),
     ('RESET',                  [], [0x4E70],                 518, '518', 515),

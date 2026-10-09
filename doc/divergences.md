@@ -248,33 +248,63 @@ of each.
 
 ---
 
-## CACR's data-cache and burst bits are stored and do nothing (until M10)
+## The caches: where the manual is silent, and what this design chose
 
-**UM 6.3.1 and figure 6-14:** WA selects write allocation, DBE and IBE enable
-burst filling of the data and instruction caches, ED and FD enable and freeze
-the data cache, and CD and CED clear all of it or the entry CAAR names.
+*Closes M5's "CACR's data-cache and burst bits are stored and do nothing (until
+M10)": every CACR bit now acts (`doc/caches.md`), both caches have the MC68030's
+organisation, and both ask for bursts.*
 
-**What this design does:** a MOVEC to CACR keeps WA, DBE, FD, ED, IBE, FI and EI
-and reads them back, and reads every reserved bit and the four clear bits as
-zero, as the figure says. EI, FI, CI and CEI act on the instruction cache, with
-the meanings the MC68020's E, F, C and CE had in the same bit positions (UM20
-figure 4-2) -- CEI clears the one long word CAAR's index names, which is the
-MC68030's granularity too (UM 6.3.1.9). The other seven do nothing yet: there is
-no data cache, and neither cache asks for a burst (`req_burst` and `fetch_burst`
-are tied off in `rd68031_top`), so CBREQ is never asserted by a running program.
-The instruction cache is still the MC68020's 64 long words rather than the
-MC68030's 16 lines of four. M10 builds the data cache, reorganises the
-instruction cache and connects the burst requests.
+**UM section 6** describes the caches' architecture and their bus traffic, and
+the design follows it -- the organisation, every CACR bit, write-through, every
+case of figure 6-4, the single-entry fills of figures 6-5 to 6-10 cycle for
+cycle, the burst requests of 6.1.3.2 and what CIIN, CBACK and BERR do to them.
+Where the manual says nothing, this design had to choose, and each choice is
+one that can never leave the caches holding something memory does not:
 
-**Why it is allowed:** a disabled or absent data cache is architecturally a
-cache that never hits, and the part's caches are allowed to be disabled; a
-program that set ED or DBE runs correctly and only more slowly. What a handler
-can observe -- the value MOVEC reads back -- is the part's.
+- **A hit shows nothing on the bus.** UM 7.2.7: the part "may also initiate an
+  external bus cycle in case the requested item is not resident", so a hit can
+  show as an ECS -- even several in a row -- with no AS after it. Here the
+  lookup is combinational and decides before the bus unit is asked, so a hit
+  never starts a cycle and never asserts ECS. ECS is an indication of an
+  internal decision, not part of any cycle a device answers.
+- **The read of a read-modify-write gets no completing cycles.** UM 6.1.2.2 has
+  its data "update a matching entry ... or create a new entry", and 6.1.3.1 has a
+  narrow port's entry completed by extra cycles; neither says whether the
+  locked sequence includes them. Here it does not: from a 32-bit port the read
+  fills its entry, and from a narrower one the entry is left invalid, so a stale
+  copy cannot survive the read.
+- **A CACR clear stops a fill in flight.** The rest of a burst, or a long word
+  the pipe asked for before the MOVEC, is not written into a cache CI, CEI, CD or
+  CED has just cleared. The manual does not say which side of the clear such a
+  long word lands on; this side cannot leave stale data behind.
+- **A prefetch abandoned before the bus took it asks for no burst.** Its own long
+  word is still cached when it arrives (it is a cachable prefetch, in the space
+  it was asked in), but nothing is waiting for the rest of the line.
+- **An operand whose last long word hits starts with SIZ for the whole
+  operand.** UM 6.1.2 treats the two halves independently but shows no cycle for
+  this case; the first cycle is the one the operand would have started with,
+  SIZ counting what it would have counted, and the bus unit stops after it. The
+  case where the FIRST long word hits is UM 7.2.7's, and its cycle has OCS.
+- **RTE's rerun of a faulted operand is not cached** (`doc/checkpoint.md` rule
+  12): it is the frame's operand, run on the bus as it stands.
+- **A read the bus unit would take on the edge a data-cache fill lands is held
+  one clock and looked up again**, so that it never reads from the bus a long
+  word the cache is being given on that edge. The part's microsequencer "must
+  wait for the burst operation to complete before requesting the second
+  portion" (UM 6.1.3.2); this is the same wait, one clock long, and it moves no
+  cycle a device sees except in time.
 
-**How it is checked:** `core_m030_tb` writes all ones, a mixture, and zero to
-CACR and checks `$3313`, `$2211` and zero back, and CAAR's thirty-two bits;
-`core_cache_tb` checks EI, FI, CI and CEI against the cache; `core_m030_tb`
-reports the burst requests a program made on a burst-capable port, today none.
+**Why it is allowed:** each is a choice among behaviours the manual permits or
+does not describe, and none changes a value a program can read. The caches stay
+invisible -- `make cache` holds a core with them to the same writes as one
+without.
+
+**How it is checked:** `core_cache_tb` checks that every ECS starts a cycle,
+TAS on the 8-bit port (one read, one write, the entry left invalid), and both
+half hits cycle for cycle; the clear landing mid-fill, the abandoned prefetch,
+the rerun and the one-clock hold are not provoked by any bench, and are argued
+in `doc/caches.md`. `core_m030_tb` and `make cache` hold the caches to
+invisibility.
 
 ---
 

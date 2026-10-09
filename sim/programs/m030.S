@@ -57,7 +57,7 @@
 _start:
         move.l  #STACK, %sp
         move.l  #LOG, LOGP
-        moveq   #1, %d0                 | EI: run cached, like a real system
+        move.l  #0x3111, %d0            | WA DBE ED IBE EI: run cached, like a real system
         movec   %d0, %cacr
         lea     SCRATCH, %a0
         lea     SCRATCH + 0x10, %a1
@@ -143,7 +143,7 @@ s_cp1:
         movec   %msp, %d1
         movec   %isp, %d1
         move.l  %d1, (%a2)+             | RES+$14: the ISP, which is A7 here
-        moveq   #1, %d0
+        move.l  #0x3111, %d0            | both caches on again
         movec   %d0, %cacr
 
         | Control registers the MC68030 does not have: illegal, UM 8.1.5.

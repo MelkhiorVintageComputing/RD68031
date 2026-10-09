@@ -238,10 +238,12 @@ RESERVED = [
     (0x4C, 2, 'M11', 'MMU instruction state that has to outlive a posted '
                      "write's fault -- PTEST, PLOAD, PFLUSH, PMOVE -- should "
                      'one need more than T0-T3 and the extension word'),
-    (0x50, 1, 'M10', 'the faulted operand\'s cache disposition, should an RTE '
-                     'rerun need to know how the first attempt left the data '
-                     'cache'),
     # M8-M9's word, +$52, became `rmwupc` above.
+    # M10's word, +$50 -- "the faulted operand's cache disposition, should an
+    # RTE rerun need to know how the first attempt left the data cache" -- is
+    # released: no rerun needs to. A faulted read filled nothing it did not
+    # complete, a faulted write has already updated the cache as UM 6.1.2 says
+    # it does, and a rerun takes the bus again (doc/caches.md, rule 12).
 ]
 
 # --------------------------------------------------------------------------
@@ -402,8 +404,39 @@ EXEMPT = [
     ('ifu', 'fetch_fc2_q',  '... and the space, for the cache tag. Likewise.'),
     ('icache', 'valid_q',   'the instruction cache. A cache, not context: a '
                             'fault leaves it alone and RTE has nothing to put '
-                            'back: what it holds is a copy of memory.'),
-    ('icache', 'mem',       '... its tags and data, which the valid bits gate'),
+                            'back: what it holds is a copy of memory -- rule 12.'),
+    ('icache', 'tag_q',     '... its tags'),
+    ('icache', 'mem',       '... and its data, which the valid bits gate'),
+    ('ifu', 'fetch_fill_q', 'whether the prefetch in flight may be cached. '
+                            'Derived like fetch_addr_q: decided again when RTE\'s '
+                            'refill asks for the long word'),
+    ('ifu', 'fetch_burst_q', '... and whether it asks for a burst. Likewise.'),
+    ('ifu', 'ib_ok_q',      '... and whether the rest of its burst may be. A '
+                            'burst is cycle-level: it ends before any fault is '
+                            'taken (rule 12)'),
+    ('dcache', 'valid_q',   'the data cache. A cache, not context, and '
+                            'write-through: it never holds the only copy of '
+                            'anything, a fault leaves it as it is, and RTE has '
+                            'nothing to put back -- rule 12, doc/caches.md'),
+    ('dcache', 'tag_q',     '... its tags'),
+    ('dcache', 'm',         '... and its data, which the valid bits gate'),
+    ('dcache', 'asm_v_q',   'a long word being gathered from a narrow port. '
+                            'Cycle-level: a new operand starts afresh'),
+    ('dcache', 'asm_ent_q', '... which long word'),
+    ('dcache', 'asm_fc_q',  '... in which space'),
+    ('dcache', 'asm_mask_q', '... which of its bytes have come'),
+    ('dcache', 'asm_data_q', '... and what they are'),
+    ('dcache', 'dkill_q',   'a CACR clear landed while a fill was in flight: the '
+                            'rest of the fill is not cached. Cycle-level'),
+    ('dcache', 'dw_v_q',    'a write the bus unit took last clock, applied to '
+                            'the cache this clock. Lives one clock, between two '
+                            'edges at which no fault is taken'),
+    ('dcache', 'dw_addr_q', '... its address'),
+    ('dcache', 'dw_fc_q',   '... its space'),
+    ('dcache', 'dw_bytes_q', '... its size'),
+    ('dcache', 'dw_data_q', '... its data'),
+    ('dcache', 'dw_en_q',   '... whether the cache takes part'),
+    ('dcache', 'dw_wa_q',   '... and whether it allocates'),
     ('ifu', 'ckpt_busy_q',  'RTE is in the middle of putting this pipe back, '
                             'so it does not fetch. It cannot be live across a '
                             'fault: a fault while RTE reads its own frame is a '
@@ -451,6 +484,22 @@ EXEMPT = [
     ('biu', 'op_fc',        'its function code'),
     ('biu', 'op_rw',        'its direction'),
     ('biu', 'op_rmc',       'whether RMC is held across it'),
+
+    # What the data cache said about the operand, and the cycles that complete
+    # a cache entry from a narrow port (M10). Cycle-level: they carry none of
+    # the operand, and a fault frame describes the operand -- rule 12.
+    ('biu', 'op_dfill',     'the operand\'s reads may fill the data cache'),
+    ('biu', 'op_fillc',     '... and complete a long word from a narrow port'),
+    ('biu', 'op_tail',      'its last bytes hit in the data cache: the bus stops '
+                            'short of them. A rerun reads them from the bus'),
+    ('biu', 'fl_on',        'a cycle completing a cache entry is due'),
+    ('biu', 'fl_addr',      '... at this address'),
+    ('biu', 'fl_rem',       '... with this many bytes of the entry to come'),
+    ('biu', 'ent_q',        'the long word the last read cycle carried'),
+    ('biu', 'ent_got',      '... the bytes of it read so far'),
+    ('biu', 'ent_bad',      '... and whether CIIN or BERR met one of them'),
+    ('biu', 'cyc_fill',     'the cycle now running completes a cache entry'),
+    ('biu', 'burst_tail',   'a burst is landing past its first long word'),
 
     ('biu', 'st_p',         'the bus state machine, rising-edge half'),
     ('biu', 'st_n',         '... and falling-edge half'),
@@ -659,11 +708,13 @@ NOT_CHECKPOINTED = [
                       'commits nothing (rule 2)'),
     ('the instruction cache', 'a cache. What it holds is a copy of memory, and a '
                               'fault neither needs it nor disturbs it'),
-    ('the data cache (M10)', 'a cache, write-through. A faulted write has already '
-                             'updated it -- UM 6.1.2, "the cache contains the '
-                             'new value even if the external write terminates in '
-                             'a bus error" -- and RTE\'s rerun writes the same '
-                             'bytes again, so the rerun is idempotent'),
+    ('the data cache', 'a cache, write-through. A faulted write has already '
+                       'updated it -- UM 6.1.2, "the cache contains the '
+                       'new value even if the external write terminates in '
+                       'a bus error" -- and RTE\'s rerun writes the same '
+                       'bytes to memory again and leaves the cache alone, so '
+                       'the rerun is idempotent. A faulted read filled nothing '
+                       'it did not complete (doc/caches.md)'),
     ('the ATC (M11)', 'a cache of the tables. A table search\'s descriptor '
                       'updates (U, M) and its ATC entry stand whether or not the '
                       'access then faults -- UM 9.5.2 -- and a rerun searches '
@@ -845,7 +896,7 @@ def check():
 # --------------------------------------------------------------------------
 # The check that reads the RTL
 # --------------------------------------------------------------------------
-_MODULES = ('ifu', 'icache', 'biu', 'seq', 'divider', 'shifter', 'sync', 'dedge_ff', 'top')
+_MODULES = ('ifu', 'icache', 'dcache', 'biu', 'seq', 'divider', 'shifter', 'sync', 'dedge_ff', 'top')
 
 
 def _unparen(text):

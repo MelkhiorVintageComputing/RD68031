@@ -37,10 +37,20 @@
 // and "operand" there is exactly this handshake.
 //
 // A burst fills a cache line, which is not an operand: its beats are reported one
-// by one on the beat_* port, for the caches of M10, and the operand that asked for
-// it completes as soon as its own bytes have arrived (UM 6.1.3.2, "when data from
-// the first cycle is returned, it is immediately available for the execution
-// unit"), while the burst runs on.
+// by one -- on the bnow_* port as the edge that ends each is reached, for the
+// data cache, and on the registered beat_* port a clock later, for the
+// instruction cache -- and the operand that asked for it completes as soon as
+// its own bytes have arrived (UM 6.1.3.2, "when data from the first cycle is
+// returned, it is immediately available for the execution unit"), while the
+// burst runs on.
+//
+// THE DATA CACHE SITS IN FRONT OF THE OPERAND ENGINE (M10, doc/caches.md). A
+// read the data cache holds whole is answered from it, with no bus cycle and
+// whatever the bus is doing; one it holds half of starts its bus cycles at the
+// half it does not -- "misaligned data transfers may span two data cache
+// entries ... the hit and miss are treated independently" (UM 6.1.2); and a
+// cachable read from a port narrower than 32 bits runs the extra cycles that
+// complete each long word it touches (UM 6.1.3.1, figures 6-5 to 6-10).
 
 module rd68031_biu #(
     parameter bit ADDR_HIZ_BETWEEN_CYCLES = 1'b1
@@ -59,10 +69,28 @@ module rd68031_biu #(
     input  logic  [3:0] req_cpuspace,
     input  logic  [7:0] req_cpuaddr,
     input  logic        req_cpfault,
+    input  logic        req_cpuraw,   // MOVES: the address is the request's own
     // A line fill may be requested for this operand: CBREQ is asserted on the
-    // cycle that qualifies (UM 7.3.7, 6.1.3.2). The caches of M10 drive it;
-    // today's requesters tie it off.
+    // cycle that qualifies (UM 7.3.7, 6.1.3.2). The data cache drives it.
     input  logic        req_burst,
+    // What the data cache says about the request presented -- rd68031_dcache.
+    // `req_dfill`: what the bus reads for it may be cached, so it reports its
+    // beats as the data cache's and, unless it is a read-modify-write, runs the
+    // cycles that complete a long word from a narrow port. `dc_on`: it is a
+    // read the cache is looked up for; `dc_hit_a`/`dc_hit_b` which of its
+    // (at most two) long words hit, `dc_span` whether there are two, `dc_nb`
+    // how many of its bytes are in the second, and `dc_data` the bytes that hit,
+    // in place in the right-justified operand.
+    input  logic        req_dfill,
+    input  logic        dc_on,
+    input  logic        dc_span,
+    input  logic        dc_hit_a,
+    input  logic        dc_hit_b,
+    input  logic  [2:0] dc_nb,
+    input  logic [39:0] dc_data,
+    // The presented request is a write, and is taken on this rising edge: the
+    // data cache captures it here and updates itself a clock later.
+    output logic        dc_wr_take,
     // CIOUT for this operand: the CI bit of the ATC entry or of the TTx register
     // that matched (UM 5.7.2). The MMU of M11 drives it; tied off today.
     input  logic        req_ciout,
@@ -143,6 +171,23 @@ module rd68031_biu #(
     output logic  [1:0] beat_port,    // the DSACK encoding; a synchronous beat is 32
     output logic        beat_ciin,
     output logic        beat_fetch,   // the operand was an instruction prefetch
+
+    // ... and the same beat, combinationally, for the rising edge that ends it:
+    // what the data cache writes on that edge. Valid while beat_end is.
+    output logic        bnow_valid,
+    output logic        bnow_err,
+    output logic [31:0] bnow_data,
+    output logic [31:0] bnow_addr,
+    output logic  [1:0] bnow_num,
+    output logic  [1:0] bnow_port,
+    output logic        bnow_ciin,
+    output logic  [2:0] bnow_fc,
+    output logic        bnow_dfill,   // its operand may fill the data cache
+    output logic        bnow_brq,     // the cycle asserted CBREQ
+    output logic        bnow_first,   // the first cycle of its operand
+    // A burst is under way past its first long word: from the rising edge after
+    // that long word to the one that ends the last. Registered.
+    output logic        burst_tail,
 
     // Status -----------------------------------------------------------------
     input  logic        reset_req,
@@ -288,6 +333,19 @@ module rd68031_biu #(
   logic        op_brq_used;
   logic        op_ciout;
   logic        op_ciin;      // CIIN seen on a cycle that carried operand bytes
+  // The data cache's part in the operand -- doc/caches.md.
+  logic        op_dfill;     // its reads may fill the data cache
+  logic        op_fillc;     // ... and a long word from a narrow port is completed
+  logic  [2:0] op_tail;      // its last bytes hit in the data cache: stop short
+  // The cycles that complete a cache entry from a narrow port -- UM 6.1.3.1.
+  // They carry none of the operand: op_addr and op_rem stand still while they
+  // run, and only the data cache keeps what they read.
+  logic        fl_on;        // the next cycle is one of them
+  logic [31:0] fl_addr;      // ... at this address
+  logic  [2:0] fl_rem;       // ... with this many bytes of the entry still to come
+  logic [29:0] ent_q;        // the long word the last read cycle carried
+  logic  [3:0] ent_got;      // ... the bytes of it read so far, by offset
+  logic        ent_bad;      // ... and CIIN or BERR on one of them
 
   // Declared here, above the logic that reads them, rather than beside the
   // logic that drives them: Quartus, Vivado and Questa all refuse a use above
@@ -322,6 +380,7 @@ module rd68031_biu #(
   logic  [2:0] cyc_n;        // bytes this cycle asks for: min(op_rem, 4)
   logic        cyc_rw;
   logic        cyc_brq;      // CBREQ is asserted for this cycle
+  logic        cyc_fill;     // a cycle that completes a cache entry -- UM 6.1.3.1
   logic        cyc_ciout;
 
   // ==========================================================================
@@ -453,8 +512,15 @@ module rd68031_biu #(
   // Nothing new starts on the edge a posted write ends in a bus error: the
   // sequencer is about to take it, and with nothing taken the state machine
   // would go to S0 by its retry arm and run the faulted write again.
+  //
+  // A read the data cache answers whole (`hit_take`) wants no cycle, and nor
+  // does one held back for a clock while the data cache is being written
+  // (`rd_block`); neither lets a prefetch past it, because the second is still
+  // the sequencer's next bus operand. `req_bus` is the request as the bus sees
+  // it. All three are assigned with the data cache's logic below.
+  logic hit_take, rd_block, req_bus, fetch_go;
   assign want_cycle = op_continuing
-                   || (!post_flt_end && (req_valid || fetch_valid || rst_self));
+                   || (!post_flt_end && (req_bus || fetch_go || rst_self));
 
   logic bus_is_idle;
   assign bus_is_idle = (st_p == rd68031_pkg::ST_IDLE)
@@ -783,6 +849,125 @@ module rd68031_biu #(
   end
 
   // ==========================================================================
+  // The data cache -- UM 6.1.2, 6.1.3; doc/caches.md
+  // ==========================================================================
+  // A read the data cache holds whole is answered from it on the next edge,
+  // with no bus cycle, while the bus does whatever else it is doing -- the hit
+  // path below. Not a read-modify-write's (forced to miss, UM 6.1.2.2), nor
+  // CPU space, nor while CACR or CDIS disable the cache: `dc_on` says all of
+  // that. Not the operand RTE is handing back either, which is the frame's
+  // business (doc/checkpoint.md rule 3), nor on the edge a posted write's bus
+  // error is being reported.
+  logic dc_full, dc_pa, dc_pb;
+  assign dc_full = dc_hit_a && (dc_hit_b || !dc_span);
+  assign dc_pa   = dc_hit_a && dc_span && !dc_hit_b;
+  assign dc_pb   = !dc_hit_a && dc_hit_b;
+
+  // The data cache is written on the rising edge a cachable read cycle ends,
+  // and a lookup made before that edge has not seen it: a read taken to the bus
+  // on that edge could miss on the very long word being written, and read it
+  // again. So a read the cache is looked up for waits that one edge and is
+  // looked up again.
+  logic bnow_dc;
+  assign bnow_dc  = beat_end && cyc_rw && op_dfill;
+
+  // ... and only a request the bus has not already taken: the sequencer holds
+  // its request up until it is acknowledged, and a read whose first long word
+  // the bus has just brought in may hit whole in the middle of its own second
+  // cycle. A posted write in flight is not the sequencer's current request.
+  logic seq_op_busy;
+  assign seq_op_busy = op_active && !op_isfetch && !op_posted;
+  assign hit_take = req_valid && dc_full && !rst_pend_q && !post_flt_end
+                 && !seq_op_busy;
+  assign rd_block = req_valid && dc_on && !rst_pend_q && bnow_dc;
+  assign req_bus  = req_valid && !hit_take && !rd_block;
+  // Data beats instruction fetch, a held-back read included.
+  assign fetch_go = fetch_valid && !(req_valid && !hit_take);
+
+  // The cycles that complete a cache entry -- UM 6.1.3.1: "if the port size of
+  // the responding device is smaller than 32 bits, the MC68030 executes all
+  // bus cycles necessary to fill the long word". Figure 6-5 (a byte at $03 from
+  // an 8-bit port: $03, then the 3-byte remainder from $00, $01, $02), 6-6 (a
+  // 16-bit port: the word at $02, then $00), 6-8 and 6-9 (a long word at $06:
+  // $06, $07, then $04 and $05 to fill that entry, then $08 and $09 of the
+  // operand, then $0A and $0B) all say the same thing: once the operand's
+  // bytes in a long word have been read, the rest of that long word is read
+  // from the byte after the last one received, wrapping within it, SIZ giving
+  // the bytes still missing; and only then the operand's next long word.
+  //
+  // Not on a cycle that ended in a bus error, or that had CIIN -- the entry is
+  // not going to be cached, so there is nothing to complete; not for a
+  // read-modify-write, whose locked sequence is the operand's cycles and no
+  // others; and never on a 32-bit port, which supplies the whole long word in
+  // one cycle (UM 7.2.7).
+  int unsigned i_fl;
+  logic  [3:0] rcv_m;        // the bytes of the long word this cycle brought
+  logic        same_ent;
+  logic  [3:0] got_now;
+  logic        bad_now;
+  logic [31:0] nx_addr;
+  logic  [2:0] nx_rem;
+  logic        ent_done;
+  logic        need_fill;
+  logic  [1:0] fl_start;
+  logic  [2:0] fl_count;
+  logic        fill_end;
+  logic        fl_on_n;
+  logic [31:0] fl_addr_n;
+  logic  [2:0] fl_rem_n;
+
+  always_comb begin
+    unique case (port_code)
+      rd68031_pkg::DSACK_8:  rcv_m = 4'b0001 << bt_addr[1:0];
+      rd68031_pkg::DSACK_16: rcv_m = bt_addr[1] ? 4'b1100 : 4'b0011;
+      default:               rcv_m = 4'b1111;
+    endcase
+  end
+
+  assign same_ent  = !op_first && (cyc_addr[31:2] == ent_q);
+  assign got_now   = (same_ent ? ent_got : 4'b0000)
+                   | ((term_err || term_rty || term_bfe) ? 4'b0000 : rcv_m);
+  assign bad_now   = (same_ent && ent_bad) || ciin_q || term_err || term_bfe;
+  assign nx_addr   = op_addr + {29'd0, xfer_done};
+  assign nx_rem    = op_rem - xfer_done;
+  assign ent_done  = (nx_rem == op_tail) || (nx_addr[31:2] != cyc_addr[31:2]);
+  assign need_fill = op_fillc && !cyc_fill && ent_done && !bad_now && !term_rty
+                  && (got_now != 4'b1111);
+
+  // Where the completion starts, and how much of it there is: the first byte
+  // missing after the run received, and the bytes missing.
+  always_comb begin
+    fl_start = 2'd0;
+    for (i_fl = 0; i_fl < 4; i_fl = i_fl + 1)
+      if (!got_now[i_fl] && got_now[(i_fl + 3) % 4]) fl_start = i_fl[1:0];
+    fl_count = 3'd4 - ({2'b00, got_now[0]} + {2'b00, got_now[1]}
+                       + {2'b00, got_now[2]} + {2'b00, got_now[3]});
+  end
+
+  // A completing cycle ends the completion when it brings the last byte, and
+  // abandons it on a bus error or CIIN -- UM 6.1.3.1, "the occurrence of a bus
+  // error while attempting to load a cache entry aborts the entry fill
+  // operation but does not necessarily cause a bus error exception": none, for
+  // a cycle that carries none of the operand.
+  assign fill_end = term_err || ciin_q || (fl_rem == xfer_done);
+
+  always_comb begin
+    fl_on_n   = fl_on;
+    fl_addr_n = fl_addr;
+    fl_rem_n  = fl_rem;
+    if (need_fill) begin
+      fl_on_n   = 1'b1;
+      fl_addr_n = {cyc_addr[31:2], fl_start};
+      fl_rem_n  = fl_count;
+    end else if (cyc_fill && !term_rty) begin
+      fl_on_n   = !fill_end;
+      fl_addr_n = {fl_addr[31:2], fl_addr[1:0] + xfer_done[1:0]};
+      fl_rem_n  = fl_rem - xfer_done;
+    end
+  end
+
+
+  // ==========================================================================
   // Read: which lane each byte arrives on -- UM Table 7-4
   //
   // The most significant byte still owed lands on the lane the address selects
@@ -837,6 +1022,21 @@ module rd68031_biu #(
     end
     rd_merged = {rdv[4], rdv[3], rdv[2], rdv[1], rdv[0]};
   end
+
+  // The combinational view of the beat ending on this edge, for the data cache.
+  // A burst's later beats are not "the first cycle of the operand", whatever
+  // op_first has gone back to once the operand finished.
+  assign bnow_valid = beat_end && cyc_rw && !term_rty && !term_err && !term_bfe;
+  assign bnow_err   = beat_end && cyc_rw && (term_err || term_bfe);
+  assign bnow_data  = d_latched;
+  assign bnow_addr  = bt_addr;
+  assign bnow_num   = bt_k;
+  assign bnow_port  = port_code;
+  assign bnow_ciin  = ciin_q;
+  assign bnow_fc    = cyc_fc;
+  assign bnow_dfill = op_dfill;
+  assign bnow_brq   = cyc_brq;
+  assign bnow_first = op_first && (bt_k == 2'd0);
 
   // ==========================================================================
   // Write: the internal-to-external multiplexer -- UM Table 7-5
@@ -991,6 +1191,7 @@ module rd68031_biu #(
   logic        next_burst;
   logic        next_ciout;
   logic        next_spent;
+  logic        next_fill;    // the cycle about to start completes a cache entry
 
   // A new operand may be taken when none is active, or at the very edge the
   // active one completes.
@@ -1029,9 +1230,11 @@ module rd68031_biu #(
   assign take_rst   = !op_continuing && !post_flt_end && rst_pend_q
                    && (req_valid || rst_post_q) && (rst_bytes != 3'd0);
   assign req_start  = take_req && (st_p_nxt == rd68031_pkg::ST_S0);
+  assign dc_wr_take = take_req && (st_p_nxt == rd68031_pkg::ST_S0)
+                   && (req_kind == rd68031_pkg::CT_WRITE);
   assign take_req   = !op_continuing && !post_flt_end && !rst_pend_q
-                   && req_valid;
-  assign take_fetch = !op_continuing && !post_flt_end && !req_valid && fetch_valid
+                   && req_bus;
+  assign take_fetch = !op_continuing && !post_flt_end && fetch_go
                    && !rst_self;
 
   // UM 8.2.1: with DF cleared "it assumes that the data input buffer value on
@@ -1079,6 +1282,7 @@ module rd68031_biu #(
   end
 
   always_comb begin
+    next_fill = 1'b0;
     if (take_rst) begin
       next_addr  = rst_addr;
       next_rem   = rst_bytes;
@@ -1089,8 +1293,17 @@ module rd68031_biu #(
       next_ciout = 1'b0;
       next_spent = 1'b0;
     end else if (take_req) begin
-      next_addr  = (req_fc == rd68031_pkg::FC_CPU) ? cpu_space_addr : req_addr;
-      next_rem   = req_bytes;
+      // An operand whose first long word hit in the data cache starts its bus
+      // cycles at its second -- UM 6.1.2, "the hit and miss are treated
+      // independently" -- and that cycle is the first of the operand, with OCS
+      // (UM 7.2.7: "in the case of a misaligned data transfer where the first
+      // portion of the operand results in a cache hit ... and the second
+      // portion in a cache miss, OCS is asserted for the second portion").
+      if ((req_fc == rd68031_pkg::FC_CPU) && !req_cpuraw)
+                                         next_addr = cpu_space_addr;
+      else if (dc_pa)                    next_addr = {req_addr[31:2] + 30'd1, 2'b00};
+      else                               next_addr = req_addr;
+      next_rem   = dc_pa ? dc_nb : req_bytes;
       next_fc    = req_fc;
       next_rw    = (req_kind != rd68031_pkg::CT_WRITE);
       next_rmc   = req_rmc;
@@ -1110,9 +1323,19 @@ module rd68031_biu #(
       // Continuing a multi-cycle operand on the edge that ends S5. op_addr and
       // op_rem are updated by this same edge, so what the next cycle must carry
       // is the residual *after* this transfer, not before it -- and so is
-      // whether this operand has had its CBREQ.
-      next_addr  = op_addr + {29'd0, xfer_done};
-      next_rem   = op_rem - xfer_done;
+      // whether this operand has had its CBREQ. A cycle completing a cache
+      // entry comes first if one is due, and the operand resumes after it.
+      if (fl_on_n) begin
+        next_addr = fl_addr_n;
+        next_rem  = fl_rem_n;
+        next_fill = 1'b1;
+      end else if (cyc_fill) begin
+        next_addr = op_addr;
+        next_rem  = op_rem;
+      end else begin
+        next_addr = op_addr + {29'd0, xfer_done};
+        next_rem  = op_rem - xfer_done;
+      end
       next_fc    = op_fc;
       next_rw    = op_rw;
       next_rmc   = op_rmc;
@@ -1126,8 +1349,12 @@ module rd68031_biu #(
       // NOT be advanced again: xfer_done is only meaningful while the cycle that
       // produced it is still current, and by now term_rty has been cleared, so
       // adding it here would retry at the wrong address with a residual of zero.
-      next_addr  = op_addr;
-      next_rem   = op_rem;
+      //
+      // A cycle completing a cache entry is retried as itself, and after a halt
+      // the completion that was due is still due.
+      next_addr  = fl_on ? fl_addr : op_addr;
+      next_rem   = fl_on ? fl_rem  : op_rem;
+      next_fill  = fl_on;
       next_fc    = op_fc;
       next_rw    = op_rw;
       next_rmc   = op_rmc;
@@ -1170,6 +1397,7 @@ module rd68031_biu #(
   assign next_last = next_addr + {29'd0, next_rem} - 32'd1;
   assign next_brq  = next_burst && !next_spent && next_rw && !next_rmc
                   && !next_ciout && (next_fc != rd68031_pkg::FC_CPU)
+                  && !next_fill
                   && (next_last[31:4] == next_addr[31:4]);
 
   // A faulted operand finishes too: the requester has to be unstalled either way,
@@ -1177,12 +1405,20 @@ module rd68031_biu #(
   //
   // An operand may finish part-way through a burst, at the rising edge that ends
   // a BL, as soon as its last byte has arrived. The burst carries on without it.
+  //
+  // With the data cache: an operand whose last bytes hit stops `op_tail` short
+  // of the end (UM 6.1.2), and one whose long word is being completed from a
+  // narrow port finishes with the last completing cycle rather than with its
+  // own last byte (UM 6.1.3.1). A bus error on a completing cycle finishes
+  // nothing early and faults nothing: it only abandons the completion.
   assign op_finishing  = op_active
                          && (((st_n == rd68031_pkg::ST_S5)
                               && !term_rty
-                              && ((op_rem == xfer_done) || term_err))
+                              && (cyc_fill
+                                  ? (fill_end && (op_rem == op_tail))
+                                  : (term_err || ((nx_rem == op_tail) && !need_fill))))
                              || ((st_n == rd68031_pkg::ST_BL)
-                                 && (xfer_done != 3'd0) && (op_rem == xfer_done)));
+                                 && (xfer_done != 3'd0) && (nx_rem == op_tail)));
   assign op_continuing = op_active && !op_finishing;
 
   // Combinational, and true throughout S5: the operand completes at the rising
@@ -1193,7 +1429,7 @@ module rd68031_biu #(
 
   // CIIN, for the operand: seen on a read transfer that carried some of its bytes.
   logic ciin_now;
-  assign ciin_now = ciin_q && op_rw && (xfer_done != 3'd0);
+  assign ciin_now = ciin_q && op_rw && (xfer_done != 3'd0) && !cyc_fill;
 
   // ==========================================================================
   // Rising-edge domain
@@ -1247,6 +1483,17 @@ module rd68031_biu #(
       op_brq_used <= 1'b0;
       op_ciout   <= 1'b0;
       op_ciin    <= 1'b0;
+      op_dfill   <= 1'b0;
+      op_fillc   <= 1'b0;
+      op_tail    <= 3'd0;
+      fl_on      <= 1'b0;
+      fl_addr    <= '0;
+      fl_rem     <= 3'd0;
+      ent_q      <= '0;
+      ent_got    <= 4'b0000;
+      ent_bad    <= 1'b0;
+      cyc_fill   <= 1'b0;
+      burst_tail <= 1'b0;
       op_data    <= '0;
       cyc_addr   <= '0;
       cyc_fc     <= '0;
@@ -1291,6 +1538,12 @@ module rd68031_biu #(
       st_p      <= st_p_nxt;
       req_ack   <= 1'b0;
       req_taken <= 1'b0;
+
+      // A burst is under way past its first long word while the falling-edge
+      // state says another is coming: BL, a long word latched with the burst
+      // going on, or BW, a wait before the next. The edge that ends the last
+      // long word's S5 clears it.
+      burst_tail <= (st_n == rd68031_pkg::ST_BL) || (st_n == rd68031_pkg::ST_BW);
 
       if (rst_op_valid) begin
         rst_pend_q <= 1'b1;
@@ -1375,15 +1628,28 @@ module rd68031_biu #(
         // 7.5.2), and that includes OCS if the cycle had it: a retry of the
         // first cycle of an operand is still the first cycle of the operand.
         if (!term_rty) op_first <= 1'b0;
-        if (op_rw) op_data <= rd_merged;
-        op_addr <= op_addr + {29'd0, xfer_done};
-        op_rem  <= op_rem - xfer_done;
+        // A cycle completing a cache entry carries none of the operand.
+        if (!cyc_fill) begin
+          if (op_rw) op_data <= rd_merged;
+          op_addr <= op_addr + {29'd0, xfer_done};
+          op_rem  <= op_rem - xfer_done;
+        end
         if (ciin_now) op_ciin <= 1'b1;
+        // The long word this cycle read, for the completion -- UM 6.1.3.1.
+        if ((st_n == rd68031_pkg::ST_S5) && op_rw && !term_rty) begin
+          ent_q   <= cyc_addr[31:2];
+          ent_got <= got_now;
+          ent_bad <= bad_now;
+          fl_on   <= fl_on_n;
+          fl_addr <= fl_addr_n;
+          fl_rem  <= fl_rem_n;
+        end
         if ((st_n == rd68031_pkg::ST_S5) && cyc_brq && !term_rty)
           op_brq_used <= 1'b1;
         if (op_finishing) begin
           op_active <= 1'b0;
           op_first  <= 1'b1;
+          fl_on     <= 1'b0;
           if (op_isfetch) begin
             fetch_ack   <= 1'b1;
             fetch_fault <= term_err;
@@ -1392,7 +1658,9 @@ module rd68031_biu #(
           end else begin
             // A posted write is acknowledged to nobody.
             req_ack      <= !op_posted;
-            req_end_q    <= end_now;
+            // An operand that finishes on a cycle completing a cache entry
+            // finished cleanly, whatever that cycle met.
+            req_end_q    <= cyc_fill ? rd68031_pkg::CE_DSACK : end_now;
             req_ciin     <= op_ciin || ciin_now;
             // A bus error on a CPU-SPACE cycle is not a bus error. UM 8.1.9
             // makes one on an interrupt acknowledge the spurious interrupt, and
@@ -1400,13 +1668,13 @@ module rd68031_biu #(
             // instruction; the microcode reads it off the end code and decides.
             // Raising a fault here as well would take the bus error exception
             // instead, and the spurious interrupt would be unreachable.
-            req_fault    <= term_err && ((op_fc != rd68031_pkg::FC_CPU)
-                                         || op_cpflt);
-            req_fault_wr <= term_err && ((op_fc != rd68031_pkg::FC_CPU)
-                                         || op_cpflt)
+            req_fault    <= term_err && !cyc_fill
+                                     && ((op_fc != rd68031_pkg::FC_CPU) || op_cpflt);
+            req_fault_wr <= term_err && !cyc_fill
+                                     && ((op_fc != rd68031_pkg::FC_CPU) || op_cpflt)
                                      && !op_rw;
             req_fault_post <= term_err && op_posted;
-            if (op_rw) rdata_q <= rd_merged;
+            if (op_rw) rdata_q <= cyc_fill ? op_data : rd_merged;
           end
         end
       end
@@ -1429,8 +1697,16 @@ module rd68031_biu #(
         cyc_rw    <= next_rw;
         cyc_brq   <= next_brq;
         cyc_ciout <= next_ciout;
+        cyc_fill  <= next_fill;
 
         if (take_rst || take_req || take_fetch) begin
+          // What the data cache said about it -- nothing, for a prefetch or an
+          // operand RTE hands back (a rerun recomputes cacheability only by
+          // reading the bus again: doc/checkpoint.md rule 12).
+          op_dfill   <= take_req && req_dfill;
+          op_fillc   <= take_req && req_dfill && !req_rmc;
+          op_tail    <= (take_req && dc_pb) ? dc_nb : 3'd0;
+          fl_on      <= 1'b0;
           op_active  <= 1'b1;
           op_addr    <= next_addr;
           op_rem     <= next_rem;
@@ -1450,7 +1726,8 @@ module rd68031_biu #(
           req_taken  <= req_post && (take_req || (take_rst && !rst_post_q));
           // An operand RTE hands back in CPU space can only be a coprocessor
           // access that faulted, so it faults again if it has to.
-          op_cpflt   <= take_rst ? 1'b1 : (take_req && req_cpfault);
+          // So can a MOVES to CPU space: its bus error is a bus error.
+          op_cpflt   <= take_rst ? 1'b1 : (take_req && (req_cpfault || req_cpuraw));
           // A restarted operand keeps what it had already transferred: the
           // residual says how much is left, and the buffer holds the rest.
           // A read starts from nothing. Its bytes are gathered right justified
@@ -1458,15 +1735,30 @@ module rd68031_biu #(
           // rest as they started -- which, taken from the request's write data,
           // was whatever the requesting microword's ALU was producing. That was
           // always zero until a read began to compute its own result.
+          //
+          // A read half of which hit in the data cache starts with that half
+          // already in place, and the bus fills in the rest.
           if (take_rst)        op_data <= {8'd0, rst_dob};
           else if (take_fetch) op_data <= '0;
-          else if (next_rw)    op_data <= '0;
+          else if (next_rw)    op_data <= dc_data;
           else                 op_data <= req_wdata;
         end
       end else if ((st_p_nxt == rd68031_pkg::ST_IDLE) && !req_rmc) begin
         // Nothing locked is pending and the bus is going idle, so let go of RMC
         // rather than blocking arbitration until the next cycle happens along.
         rmc_hold <= 1'b0;
+      end
+
+      // A read the data cache holds whole: answered on this edge, no bus cycle
+      // -- UM 6.1, "when a hit occurs in the instruction or data cache ... the
+      // information is transferred from the cache (on a read)". Last, so that a
+      // posted write finishing on this same edge, which acknowledges nobody,
+      // does not clear it.
+      if (hit_take) begin
+        req_ack   <= 1'b1;
+        req_end_q <= rd68031_pkg::CE_DSACK;
+        req_ciin  <= 1'b0;
+        rdata_q   <= dc_data;
       end
     end
   end
@@ -1582,9 +1874,16 @@ module rd68031_biu #(
       // it is a half clock -- the early retire, doc/timing-divergences.md. Only
       // for the first transfer of a cycle: a burst beat's operand bytes, if any,
       // are taken on the ordinary acknowledge.
+      //
+      // Not when the operand ends short of its last byte because that hit in
+      // the data cache, nor on a cycle completing a cache entry, nor when one
+      // is about to follow -- a cachable read whose port turned out narrower
+      // than 32 bits (UM 6.1.3.1); the ordinary acknowledge takes those.
       early_q <= (st_n_nxt == rd68031_pkg::ST_S5) && op_active && !op_isfetch
               && !op_posted && (beat_q == 3'd0)
-              && !term_err && !term_rty && !berr_s && (op_rem == xfer_n);
+              && !term_err && !term_rty && !berr_s && (op_rem == xfer_n)
+              && !cyc_fill && (op_tail == 3'd0)
+              && !(op_fillc && (port_code != rd68031_pkg::DSACK_32));
 
       beat_q <= beat_nxt;
 
@@ -1923,7 +2222,8 @@ module rd68031_biu #(
       flt_dob   <= '0;
       flt_dib   <= '0;
     end else if (st_n == rd68031_pkg::ST_S5 && op_finishing && !op_isfetch
-                 && term_err && ((op_fc != rd68031_pkg::FC_CPU) || op_cpflt)) begin
+                 && term_err && !cyc_fill
+                 && ((op_fc != rd68031_pkg::FC_CPU) || op_cpflt)) begin
       flt_addr  <= op_addr;
       flt_bytes <= op_rem;
       flt_fc    <= op_fc;
@@ -2029,6 +2329,6 @@ module rd68031_biu #(
                         reset_req, dbf,
                         avec_n_i,
                         op_data[39:32],
-                        next_last[3:0]};
+                        next_last[3:0], nx_addr[1:0]};
 
 endmodule

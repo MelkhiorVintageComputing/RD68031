@@ -808,3 +808,90 @@ nothing back to the bus unit (`doc/checkpoint.md` rule 5).
 operand changes, CAS2 faulted on each of its four accesses, TAS whose write
 faults while the byte changes; `core_cow_tb`: CAS2 across two protected pages,
 rerun whole twice.
+
+---
+
+## M10 · MOVES to CPU space went to an interrupt acknowledge address
+
+**What:** PRM 6: MOVES moves an operand "to or from the specified address
+space", at the effective address. With SFC or DFC at 7 that is a CPU-space cycle
+at the program's own address. The bus unit built the address of every CPU-space
+request from the microword's CPU-space type -- which MOVES does not set, so it
+defaulted to the interrupt acknowledge -- and a MOVES from CPU space read
+`$FFFFFFFx` instead of its operand. Nothing answers there in most systems, so
+the instruction hung waiting for a DSACK, or took a bus error at the wrong
+address. Inherited from RD68021.
+
+**Found by:** `core_cache_tb`, whose phase 64 reads a CPU-space address twice
+with MOVES to show that CPU space is never cached (UM 6.1.2): the program never
+got past it.
+
+**Fixed by:** the sequencer says when the address is the program's own
+(`req_cpuraw`, the microword's space being SFC or DFC); the bus unit then keeps
+it, and a bus error on the cycle is an ordinary bus error rather than an answer.
+
+**Stops it coming back:** `core_cache_tb` phase 64: two cycles at the address,
+in CPU space, answered by a device there.
+
+---
+
+## M10 · A read was answered by the data cache in the middle of its own bus cycles
+
+**What:** the sequencer holds a request up until it is acknowledged. A
+misaligned read whose first long word missed went to the bus; its first cycle
+filled that long word, and with the second already in the cache the request,
+still presented, now hit whole -- and the data cache acknowledged it while the
+bus unit went on with the operand's second cycle. The sequencer moved on, the
+bus unit's operand never finished, and the next request was never taken.
+
+**Found by:** `core_m030_tb`, the first time it ran with the data cache on: the
+exception handler of `m030.S` hung on its misaligned read of the stacked program
+counter, on both buses.
+
+**Fixed by:** the data cache answers only a request the bus unit has not
+already taken (`seq_op_busy` in `rd68031_biu`).
+
+**Stops it coming back:** `core_m030_tb`; `core_cache_tb` phases 80 and 81, the
+half hits.
+
+---
+
+## M10 · The bytes of an operand in its second long word were miscounted
+
+**What:** the data cache told the bus unit how many of a misaligned operand's
+bytes lie in its second long word as the low three bits of the end offset
+rather than the end offset less four: a long word at offset 2 has two bytes in
+the second long word, and was told six. An operand whose second long word hit
+then had its bus cycles stopped "six bytes short of the end", which they never
+reached, and ran on past the operand forever.
+
+**Found by:** `core_m030_tb` again, the same handler, once the bug above was
+fixed.
+
+**Fixed by:** `lk_nb` in `rd68031_dcache` is the end offset less four.
+
+**Stops it coming back:** `core_cache_tb` phases 80 and 81 check the cycles of
+both half hits, and the values.
+
+---
+
+## M10 · The bus-slave model drove only the bytes asked for on a read
+
+**What:** `sim/models/rd68031_slave.sv` put the requested bytes on their lanes
+and zero on the others. UM 7.2.7: "the slave device must supply as much aligned
+data on the data bus as its port size allows, regardless of the requested
+operand size ... For a 32-bit port, the slave device ignores A0 and A1 and
+supplies the long word beginning at the long-word boundary". A cache takes the
+whole port width -- that is what makes a cachable byte read fill a long word --
+so the data cache would have cached zeros around every byte and word the
+programs read, and the model would have been the one to blame. A testbench
+defect, not the RTL's, found before it did any damage.
+
+**Found by:** reading UM 7.2.7 while writing the data cache's fill.
+
+**Fixed by:** the model drives its whole port on every read; a knob (`full_rt`)
+turns that off for a device that cannot, which must then assert CIIN.
+
+**Stops it coming back:** `core_cache_tb` reads bytes and words from all three
+port widths and checks the values that come back from the cache afterwards;
+`core_m030_tb` runs three programs with the data cache on over a 16-bit port.

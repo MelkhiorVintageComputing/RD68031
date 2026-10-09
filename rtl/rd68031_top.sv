@@ -17,13 +17,14 @@
 // doc/coding-standard.md.
 
 module rd68031_top #(
-    // Number of instruction cache entries: 64 is the MC68020 cache this was forked
-    // with (UM20 4.1), and any other power of two from 2 up is a smaller cache with
-    // a wider tag. Zero removes the cache entirely, which is still fully software
-    // compatible -- the cache is architecturally invisible -- and `make cache`
-    // holds the two to that. CACR, CAAR and CDIS exist and behave either way. The
-    // MC68030's caches are M10.
+    // The two caches, each built (any non-zero value: the MC68030's 64 long
+    // words, 16 lines of four -- UM 6.1) or built out (zero). A core without
+    // them is still fully software compatible -- a cache that never hits is a
+    // disabled one, which the part allows -- and `make cache` holds the two
+    // builds to the same writes and to no more reads with the caches than
+    // without. CACR, CAAR and CDIS exist and behave either way. doc/caches.md.
     parameter int ICACHE_ENTRIES = 64,
+    parameter int DCACHE_ENTRIES = 64,
     // Whether the coprocessor interface is built. Zero takes an F-line exception on
     // every coprocessor opcode, which is also the right behaviour for a machine with
     // no coprocessor attached.
@@ -119,6 +120,7 @@ module rd68031_top #(
   logic  [3:0] req_cpuspace;
   logic  [7:0] req_cpuaddr;
   logic        req_cpfault;
+  logic        req_cpuraw;
 
   logic        req_ack;
   logic        req_start;
@@ -197,7 +199,7 @@ module rd68031_top #(
   // ==========================================================================
   logic [31:0] cacr;
   logic [31:0] caar;
-  logic  [1:0] cach_op;        // none / clear all / clear the entry CAAR names
+  logic  [3:0] cach_op;        // {CED, CD, CEI, CI}, pulsed by the MOVEC that sets them
   logic        cdis_sync_n;
 
   // ==========================================================================
@@ -225,21 +227,35 @@ module rd68031_top #(
   logic        mmudis_sync_n;
 
   // ==========================================================================
-  // What the MC68030's bus offers that no requester here asks for yet. A line
-  // fill (CBREQ) is the caches' to request, at M10; CIOUT is the MMU's to say,
-  // at M11. Until then both requesters tie them off, and what the bus unit
-  // reports back -- CIIN with each operand, and every read beat -- goes to the
-  // sink below.
+  // The caches and the bus -- doc/caches.md
+  //
+  // A line fill (CBREQ) is each cache's to ask for. CIOUT is the MMU's to say,
+  // at M11, and so is the cache inhibit that goes with it: "whenever the
+  // appropriate CI bit is set for either a read or a write access and an
+  // external bus cycle is required, CIOUT is asserted and the instruction and
+  // data caches are ignored for the access" (UM 6.1). Until the MMU exists both
+  // are tied off here, and M11 drives `ic_inhibit`/`fetch_ciout` from the
+  // prefetch's translation and `dc_inhibit`/`req_ciout` from the operand's.
   // ==========================================================================
   logic        req_burst, req_ciout, fetch_burst, fetch_ciout;
-  assign req_burst   = 1'b0;
+  logic        ic_inhibit, dc_inhibit;
   assign req_ciout   = 1'b0;
-  assign fetch_burst = 1'b0;
   assign fetch_ciout = 1'b0;
+  assign ic_inhibit  = 1'b0;
+  assign dc_inhibit  = 1'b0;
   logic        req_ciin, fetch_ciin;
   logic        beat_valid, beat_err, beat_ciin, beat_fetch;
   logic [31:0] beat_data, beat_addr;
   logic  [1:0] beat_num, beat_port;
+  logic        burst_tail;
+  // The beat ending now, for the data cache, and the data cache's answers.
+  logic        bnow_valid, bnow_err, bnow_ciin, bnow_dfill, bnow_brq, bnow_first;
+  logic [31:0] bnow_data, bnow_addr;
+  logic  [1:0] bnow_num, bnow_port;
+  logic  [2:0] bnow_fc;
+  logic        req_dfill, dc_on, dc_span, dc_hit_a, dc_hit_b, dc_wr_take;
+  logic  [2:0] dc_nb;
+  logic [39:0] dc_data;
   // Posted writes -- doc/checkpoint.md rule 9.
   logic        req_post, req_taken, post_busy, req_fault_post, rst_post;
 
@@ -258,6 +274,7 @@ module rd68031_top #(
       .req_cpuspace   (req_cpuspace),
       .req_cpuaddr    (req_cpuaddr),
       .req_cpfault    (req_cpfault),
+      .req_cpuraw     (req_cpuraw),
       .req_ack        (req_ack),
       .req_start      (req_start),
       .req_last       (req_last),
@@ -364,16 +381,89 @@ module rd68031_top #(
       .caar           (caar),
       .cach_op        (cach_op),
       .cdis_sync_n    (cdis_sync_n),
+      .ic_inhibit     (ic_inhibit),
 
       .fetch_valid    (fetch_valid),
       .fetch_addr     (fetch_addr),
       .fetch_fc       (fetch_fc),
+      .fetch_burst    (fetch_burst),
       .fetch_ack      (fetch_ack),
       .fetch_last     (fetch_last),
       .fetch_rdata    (fetch_rdata),
       .fetch_fault    (fetch_fault),
-      .bus_abort      (bus_abort)
+      .fetch_ciin     (fetch_ciin),
+      .bus_abort      (bus_abort),
+
+      .beat_valid     (beat_valid),
+      .beat_err       (beat_err),
+      .beat_data      (beat_data),
+      .beat_addr      (beat_addr),
+      .beat_num       (beat_num),
+      .beat_ciin      (beat_ciin),
+      .beat_fetch     (beat_fetch),
+      .burst_tail     (burst_tail)
   );
+
+  // ==========================================================================
+  // The data cache -- UM 6.1.2. It looks up the request the sequencer is
+  // presenting, and the bus unit acts on what it says.
+  // ==========================================================================
+  generate
+    if (DCACHE_ENTRIES > 0) begin : g_dcache
+      logic dc_read;
+      assign dc_read = (req_kind != rd68031_pkg::CT_WRITE);
+      rd68031_dcache u_dcache (
+          .clk         (clk),
+          .rst_n       (core_rst_n),
+          .cacr        (cacr),
+          .caar        (caar),
+          .cach_op     (cach_op),
+          .cdis_sync_n (cdis_sync_n),
+          .dc_inhibit  (dc_inhibit),
+          .lk_addr     (req_addr),
+          .lk_fc       (req_fc),
+          .lk_bytes    (req_bytes),
+          .lk_read     (dc_read),
+          .lk_rmc      (req_rmc),
+          .lk_wdata    (req_wdata),
+          .lk_on       (dc_on),
+          .lk_span     (dc_span),
+          .lk_hit_a    (dc_hit_a),
+          .lk_hit_b    (dc_hit_b),
+          .lk_data     (dc_data),
+          .lk_nb       (dc_nb),
+          .lk_fill     (req_dfill),
+          .lk_burst    (req_burst),
+          .wr_take     (dc_wr_take),
+          .bn_valid    (bnow_valid),
+          .bn_err      (bnow_err),
+          .bn_data     (bnow_data),
+          .bn_addr     (bnow_addr),
+          .bn_num      (bnow_num),
+          .bn_port     (bnow_port),
+          .bn_ciin     (bnow_ciin),
+          .bn_fc       (bnow_fc),
+          .bn_dfill    (bnow_dfill),
+          .bn_brq      (bnow_brq),
+          .bn_first    (bnow_first));
+    end else begin : g_nodcache
+      // No data cache: nothing ever hits, nothing is filled, no burst is asked
+      // for, and the bus runs every operand exactly as written.
+      assign dc_on     = 1'b0;
+      assign dc_span   = 1'b0;
+      assign dc_hit_a  = 1'b0;
+      assign dc_hit_b  = 1'b0;
+      assign dc_data   = 40'd0;
+      assign dc_nb     = 3'd0;
+      assign req_dfill = 1'b0;
+      assign req_burst = 1'b0;
+      logic unused_nodcache;
+      assign unused_nodcache = &{1'b1, dc_wr_take, bnow_valid, bnow_err, bnow_data,
+                                 bnow_addr, bnow_num, bnow_port, bnow_ciin,
+                                 bnow_fc, bnow_dfill, bnow_brq, bnow_first,
+                                 dc_inhibit};
+    end
+  endgenerate
 
   rd68031_biu #(.ADDR_HIZ_BETWEEN_CYCLES (ADDR_HIZ_BETWEEN_CYCLES)) u_biu (
       .clk            (clk),
@@ -389,7 +479,16 @@ module rd68031_top #(
       .req_cpuspace   (req_cpuspace),
       .req_cpuaddr    (req_cpuaddr),
       .req_cpfault    (req_cpfault),
+      .req_cpuraw     (req_cpuraw),
       .req_burst      (req_burst),
+      .req_dfill      (req_dfill),
+      .dc_on          (dc_on),
+      .dc_span        (dc_span),
+      .dc_hit_a       (dc_hit_a),
+      .dc_hit_b       (dc_hit_b),
+      .dc_nb          (dc_nb),
+      .dc_data        (dc_data),
+      .dc_wr_take     (dc_wr_take),
       .req_ciout      (req_ciout),
       .req_ack        (req_ack),
       .req_start      (req_start),
@@ -443,6 +542,18 @@ module rd68031_top #(
       .beat_port      (beat_port),
       .beat_ciin      (beat_ciin),
       .beat_fetch     (beat_fetch),
+      .bnow_valid     (bnow_valid),
+      .bnow_err       (bnow_err),
+      .bnow_data      (bnow_data),
+      .bnow_addr      (bnow_addr),
+      .bnow_num       (bnow_num),
+      .bnow_port      (bnow_port),
+      .bnow_ciin      (bnow_ciin),
+      .bnow_fc        (bnow_fc),
+      .bnow_dfill     (bnow_dfill),
+      .bnow_brq       (bnow_brq),
+      .bnow_first     (bnow_first),
+      .burst_tail     (burst_tail),
 
       .reset_req      (reset_req),
       .reset_busy     (reset_busy),
@@ -485,12 +596,12 @@ module rd68031_top #(
   );
 
   // ==========================================================================
-  // What the units offer that nothing consumes yet: MMUDIS is the MMU's (M11),
-  // and CIIN and the read beats are the caches' (M10).
+  // What the units offer that nothing consumes yet: MMUDIS is the MMU's (M11).
+  // The operand's CIIN is the bus unit's report to the sequencer, which has no
+  // use for it -- the data cache sees CIIN cycle by cycle, on the bnow port --
+  // and the beat's port size is the registered copy of what bnow carries.
   // ==========================================================================
   logic unused_top;
-  assign unused_top = &{1'b1, mmudis_sync_n, req_ciin, fetch_ciin,
-                        beat_valid, beat_err, beat_data, beat_addr, beat_num,
-                        beat_port, beat_ciin, beat_fetch};
+  assign unused_top = &{1'b1, mmudis_sync_n, req_ciin, beat_port};
 
 endmodule

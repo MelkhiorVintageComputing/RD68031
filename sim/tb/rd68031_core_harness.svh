@@ -6,7 +6,10 @@
 //
 // The whole processor against memory: a 32-bit port at $0000_0000 holding the
 // exception vectors, and 16- and 8-bit ports at $1000_0000 and $2000_0000 so
-// that the same program can be run through each and give the same answer.
+// that the same program can be run through each and give the same answer. Since
+// M10 a fourth, at $3000_0000: a 32-bit SYNCHRONOUS port that answers CBREQ with
+// CBACK (UM 7.3.7), for the caches' line fills. Nothing reaches it unless a
+// testbench puts something there.
 //
 // Instruction boundaries are sampled on the FALLING edge. The bus unit's output
 // stage is negative-edge clocked and the acknowledge only settles in the second
@@ -111,11 +114,14 @@ assign berr_n_i = ~(berr_force | berr_hit | berr_late_hit);
 wire [31:0] dbus;
 assign dbus = d_oe ? d_o : 32'bz;
 
-// The cache size comes from the Makefile's ICACHE_ENTRIES, so that `make cache`
-// can run every core testbench at both 64 and 0. A testbench that is ABOUT the
-// cache sets it itself before including this.
+// The caches come from the Makefile's ICACHE_ENTRIES and DCACHE_ENTRIES, so that
+// `make cache` can run every core testbench with them built and built out. A
+// testbench that is ABOUT the caches sets them itself before including this.
 `ifndef TB_ICACHE_ENTRIES
 `define TB_ICACHE_ENTRIES 64
+`endif
+`ifndef TB_DCACHE_ENTRIES
+`define TB_DCACHE_ENTRIES 64
 `endif
 
 // The 32-bit port's store, as a power of two of bytes. 64 KB is what every
@@ -136,6 +142,7 @@ localparam bit TB_CP = 1'b0;
 `endif
 
 rd68031_top #(.ICACHE_ENTRIES (`TB_ICACHE_ENTRIES),
+              .DCACHE_ENTRIES (`TB_DCACHE_ENTRIES),
               .COPROCESSOR (TB_CP)) dut (
     .clk (clk), .rst_n (rst_n),
     .fc_o (fc_o), .fc_oe (fc_oe),
@@ -161,15 +168,15 @@ rd68031_top #(.ICACHE_ENTRIES (`TB_ICACHE_ENTRIES),
     .refill_n_o (refill_n_o), .status_n_o (status_n_o)
 );
 
-logic [1:0] dsack32, dsack16, dsack8;
-wire [31:0] d32, d16, d8;
-logic       oe32, oe16, oe8;
-logic       sterm32, sterm16, sterm8;
-logic       cback32, cback16, cback8;
-logic       ciin32, ciin16, ciin8;
-assign sterm_n_i = sterm32 & sterm16 & sterm8;
-assign cback_n_i = cback32 & cback16 & cback8;
-assign ciin_n_i  = ciin32  & ciin16  & ciin8;
+logic [1:0] dsack32, dsack16, dsack8, dsackb;
+wire [31:0] d32, d16, d8, db;
+logic       oe32, oe16, oe8, oeb;
+logic       sterm32, sterm16, sterm8, stermb;
+logic       cback32, cback16, cback8, cbackb;
+logic       ciin32, ciin16, ciin8, ciinb;
+assign sterm_n_i = sterm32 & sterm16 & sterm8 & stermb;
+assign cback_n_i = cback32 & cback16 & cback8 & cbackb;
+assign ciin_n_i  = ciin32  & ciin16  & ciin8  & ciinb;
 
 // One more device, for a testbench to wire in whatever the three memories are
 // not. The interrupt acknowledge is the reason: its address is SYNTHESISED in
@@ -187,6 +194,7 @@ end
 assign dbus = oe32 ? d32 : 32'bz;
 assign dbus = oe16 ? d16 : 32'bz;
 assign dbus = oe8  ? d8  : 32'bz;
+assign dbus = oeb  ? db  : 32'bz;
 assign dbus = oe_ext ? d_ext : 32'bz;
 wire  [1:0] dsack_cp;
 `ifdef TB_COPROCESSOR
@@ -200,7 +208,7 @@ rd68031_cpmodel #(.CPID (3'd1)) cp (
 `else
 assign dsack_cp = 2'b11;
 `endif
-assign dsack_n_i = dsack32 & dsack16 & dsack8 & dsack_ext & dsack_cp;
+assign dsack_n_i = dsack32 & dsack16 & dsack8 & dsackb & dsack_ext & dsack_cp;
 
 rd68031_slave #(.PORT_BYTES (4), .WAITS (0), .BASE (32'h0000_0000),
                 .MASK (32'hF000_0000), .ABITS (`TB_S32_ABITS)) s32 (
@@ -225,6 +233,14 @@ rd68031_slave #(.PORT_BYTES (1), .WAITS (0), .BASE (32'h2000_0000),
     .d_i (dbus), .wr_inhibit_i (wr_protect && !berr_n_i),
     .d_o (d8), .d_oe (oe8), .dsack_n_o (dsack8), .sterm_n_o (sterm8),
     .cback_n_o (cback8), .ciin_n_o (ciin8));
+
+rd68031_slave #(.PORT_BYTES (4), .WAITS (0), .SYNC (1'b1), .BURST (1'b1),
+                .BASE (32'h3000_0000), .MASK (32'hF000_0000), .ABITS (16)) sB (
+    .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
+    .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),
+    .d_i (dbus), .wr_inhibit_i (wr_protect && !berr_n_i),
+    .d_o (db), .d_oe (oeb), .dsack_n_o (dsackb), .sterm_n_o (stermb),
+    .cback_n_o (cbackb), .ciin_n_o (ciinb));
 
 initial begin
   clk = 1'b0;
@@ -268,6 +284,7 @@ task automatic poke_w(input logic [31:0] a, input logic [15:0] v);
     4'h0: begin s32.mem[a[15:0]] = v[15:8]; s32.mem[a[15:0] + 1] = v[7:0]; end
     4'h1: begin s16.mem[a[15:0]] = v[15:8]; s16.mem[a[15:0] + 1] = v[7:0]; end
     4'h2: begin s8.mem[a[15:0]]  = v[15:8]; s8.mem[a[15:0] + 1]  = v[7:0]; end
+    4'h3: begin sB.mem[a[15:0]]  = v[15:8]; sB.mem[a[15:0] + 1]  = v[7:0]; end
     default: $display("  FAIL: poke_w to unmapped %08h", a);
   endcase
 endtask
@@ -284,6 +301,7 @@ function automatic logic [15:0] peek_w(input logic [31:0] a);
     4'h0: peek_w = {s32.mem[a[15:0]], s32.mem[a[15:0] + 1]};
     4'h1: peek_w = {s16.mem[a[15:0]], s16.mem[a[15:0] + 1]};
     4'h2: peek_w = {s8.mem[a[15:0]],  s8.mem[a[15:0] + 1]};
+    4'h3: peek_w = {sB.mem[a[15:0]],  sB.mem[a[15:0] + 1]};
     default: peek_w = 16'hXXXX;
   endcase
 endfunction
@@ -449,31 +467,55 @@ logic [31:0] acc_data [0:MAXACC-1];
 // access. An interpreter has no notion of either, and what it reports is the
 // operand.
 //
-// UM 7.1.1 names exactly this distinction in hardware -- ECS marks every bus
-// cycle, OCS only the first cycle of an operand -- so the recorder triggers on
-// OCS and nothing has to be inferred from the addresses.
+// And since M10 an operand need not reach the bus at all, or not all of it: a
+// read the data cache holds is answered with no cycle, and one it holds half of
+// starts its cycles at the other half (UM 6.1.2). Neither changes what the
+// program asked for, which is what an oracle reports, so the recorder takes the
+// operand where the bus unit ACCEPTS it -- from the sequencer, from RTE's
+// hand-back, or answered by the data cache -- as it was asked for. Before M10
+// this sampled OCS, which marks the first bus cycle of an operand (UM 7.1.1)
+// and so is the same thing for every operand that reaches the bus whole; it
+// also fired again on a retried first cycle, which this does not.
 //
-// OCS is asserted for the half clock of S0 only, so there is no clock edge
-// inside it to sample on. Sample a settled quarter-period after the rising edge
-// that starts S0 instead: the address, function code and R/W are driven on that
-// same edge, and a testbench may use a delay where the design may not.
+// Sampled on the rising edge itself: the request and the bus unit's decision to
+// take it are what the edge is about to act on, and nothing they depend on
+// changes until the edge's non-blocking updates land.
 initial nacc = 0;
 
+logic [31:0] hrec_addr, hrec_data;
+logic  [2:0] hrec_bytes, hrec_fc;
+logic        hrec_rw, hrec_go;
+
 always @(posedge clk) begin
-  #(CLK_PERIOD / 4.0);
-  if (rst_n && !ocs_n_o && !dut.u_biu.op_isfetch) begin
+  hrec_go = 1'b0;
+  if (rst_n && dut.u_biu.st_p_nxt == rd68031_pkg::ST_S0 && dut.u_biu.take_rst) begin
+    hrec_go    = 1'b1;
+    hrec_addr  = dut.u_biu.rst_addr;
+    hrec_bytes = dut.u_biu.rst_bytes;
+    hrec_fc    = dut.u_biu.rst_fc;
+    hrec_rw    = dut.u_biu.rst_rw;
+    hrec_data  = dut.u_biu.rst_dob;
+  end else if (rst_n && ((dut.u_biu.st_p_nxt == rd68031_pkg::ST_S0 && dut.u_biu.take_req)
+                         || dut.u_biu.hit_take)) begin
+    hrec_go    = 1'b1;
+    hrec_addr  = (dut.u_biu.req_fc == rd68031_pkg::FC_CPU && !dut.u_biu.req_cpuraw)
+                ? dut.u_biu.cpu_space_addr : dut.u_biu.req_addr;
+    hrec_bytes = dut.u_biu.req_bytes;
+    hrec_fc    = dut.u_biu.req_fc;
+    hrec_rw    = (dut.u_biu.req_kind != rd68031_pkg::CT_WRITE);
+    hrec_data  = dut.u_biu.req_wdata[31:0];
+  end
+  if (hrec_go) begin
     if (nacc < MAXACC) begin
-      acc_addr[nacc] = a_o;
-      acc_rw[nacc]   = rw_o;
-      acc_prog[nacc] = (fc_o == rd68031_pkg::FC_SUPER_PROG
-                        || fc_o == rd68031_pkg::FC_USER_PROG);
-      // op_rem is the byte count still to move, and at the first cycle of an
-      // operand that is the whole operand. op_data is the write data, right
-      // justified; on a read it is the accumulator and means nothing yet, so
-      // the recorded value is zero there and the oracle sends zero too.
-      acc_bytes[nacc] = dut.u_biu.op_rem;
-      acc_data[nacc]  = rw_o ? 32'd0 : (dut.u_biu.op_data[31:0]
-                                        & ~(32'hFFFF_FFFF << {dut.u_biu.op_rem, 3'b000}));
+      acc_addr[nacc]  = hrec_addr;
+      acc_rw[nacc]    = hrec_rw;
+      acc_prog[nacc]  = (hrec_fc == rd68031_pkg::FC_SUPER_PROG
+                         || hrec_fc == rd68031_pkg::FC_USER_PROG);
+      acc_bytes[nacc] = hrec_bytes;
+      // The written value, right justified; a read records zero, and the
+      // oracle sends zero too.
+      acc_data[nacc]  = hrec_rw ? 32'd0
+                               : (hrec_data & ~(32'hFFFF_FFFF << {hrec_bytes, 3'b000}));
     end
     nacc = nacc + 1;
   end

@@ -15,6 +15,13 @@
 //
 // UAE030 is an ORACLE, not a source. Where the two disagree the manual decides.
 //
+// The access list is the core harness's (rd68031_core_harness.svh), which since
+// M10 records each operand where the bus unit ACCEPTS it, as the program asked
+// for it, rather than at the OCS of its first bus cycle: with the data cache
+// enabled -- a vector's CACR may set ED -- a read can be answered with no bus
+// cycle, or start its cycles at its second long word (UM 6.1.2, 7.2.7). Both
+// are invisible to the program, and the oracle reports the operand either way.
+//
 // Memory is filled from the test index by the same two multiplications on both
 // sides, so neither has to send the other four kilobytes per test and neither
 // can be reading storage the other never wrote.

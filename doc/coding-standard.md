@@ -93,10 +93,10 @@ SFC, DFC and CAAR -- keeps `rst_n` as its asynchronous reset and takes `crst` as
 synchronous arm below it that assigns only the rest. Every register still has its value
 from `rst_n`; `crst` only ever assigns the same constants again.
 
-The instruction cache is the one structure that looks like an exception and is not. UM
-§4.2: "during processor reset, the cache is cleared by resetting all of the valid bits."
-The valid bits are resettable flops; the tag and data arrays are an unreset RAM that the
-valid bits gate. Nothing reads an uninitialised bit.
+The caches are the one structure that looks like an exception and is not. UM §6.2:
+"when a hardware reset of the processor occurs, all valid bits of both caches are
+cleared." The valid bits and the tags are resettable flops; the data arrays are unreset
+RAMs that the valid bits gate. Nothing reads an uninitialised bit.
 
 ## Naming
 

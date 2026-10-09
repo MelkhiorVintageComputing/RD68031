@@ -136,8 +136,10 @@ every rising edge of the clock thereafter" (state 4).
 The address is held: "if an external memory system requires incrementing of the
 long-word base address ... this function must be performed by external
 hardware", and the line wraps — "the count sequence wraps back to zero". The bus
-unit reports each long word on its `beat_*` port with the address the system put
-on A3/A2, for the caches of M10.
+unit reports each long word, with the address the system put on A3/A2, on its
+`bnow_*` port as the edge that ends it is reached, for the data cache, and on its
+registered `beat_*` port a clock later, for the instruction cache
+(`doc/caches.md`).
 
 **What ends a burst early** (7.3.7, 6.1.3.2): CBACK negated — the current long
 word "complete[s] normally" and the burst stops after it; CIIN — that long word is
@@ -210,9 +212,19 @@ acknowledge.
 | `req_ciin`, `fetch_ciin` | CIIN was asserted on a read cycle that carried some of this operand's bytes | 5.7.1 |
 | `beat_valid`, `beat_err`, `beat_data`, `beat_addr`, `beat_num`, `beat_port`, `beat_ciin`, `beat_fetch` | every read cycle and every burst long word, as it ends | 7.2.6, 6.1.3 |
 
-The requesters of today tie the inputs off — `req_burst`/`fetch_burst` are the
-caches' (M10), `req_ciout`/`fetch_ciout` the MMU's (M11) — and the outputs go to
-the top level's sink.
+### ... and at M10, for the caches
+
+| Signal | Meaning | Source |
+|---|---|---|
+| `req_dfill` | what the bus reads for this operand may fill the data cache: its beats are the data cache's, and a narrow port's entry is completed | 6.1.3.1 |
+| `dc_on`, `dc_span`, `dc_hit_a`, `dc_hit_b`, `dc_nb`, `dc_data` | the data cache's lookup of the request presented: answered whole, or half, or not at all | 6.1.2, 7.2.7 |
+| `dc_wr_take` | a write is taken on this edge: the data cache captures it | 6.1.2 |
+| `req_cpuraw` | a MOVES: its CPU-space address is the program's own | PRM 6 |
+| `bnow_*` | the beat ending on this edge, combinationally, with its space, CBREQ and whether it is its operand's first cycle | 6.1.3 |
+| `burst_tail` | a burst is landing past its first long word | 6.1.3.2 |
+
+`req_burst` and `fetch_burst` are the data cache's and the instruction cache's;
+`req_ciout` and `fetch_ciout` are still tied off, the MMU's (M11).
 
 The bus unit decides **which cycle** of a burst-allowed operand asserts CBREQ, by
 the conditions of 6.1.3.2 that are the bus's to know: a read, not a
@@ -239,10 +251,18 @@ widths — and checks the bytes moved in both directions, against slaves of 8, 1
 The MC68030 supports the MC68020's dynamic bus sizing "for asynchronous bus cycles
 (terminated with DSACKx) with two restrictions", both on cachable accesses: the
 port size must be consistent within a long word, and the port must supply as much
-data as it signals as port size (7.2.5). Both are requirements on the device. The
-extra cycles the MC68030 runs to complete a cache entry from a narrow port
-(6.1.3.1, figures 6-5 to 6-10) are the data cache's and come with it at M10; until
-then this behaves as an MC68030 with its data cache disabled.
+data as it signals as port size (7.2.5). Both are requirements on the device.
+
+**A cachable read completes every cache entry it touches** (6.1.3.1, figures 6-5
+to 6-10, M10): once the operand's bytes in a long word have been read, the bus
+unit reads the rest of that long word -- from the byte after the last one
+received, wrapping within it, SIZ giving the bytes still missing -- before the
+operand's next long word. A byte at $03 from an 8-bit port is four cycles, $03,
+$00 (3 bytes), $01 (word), $02 (byte); a long word at $06 from a 16-bit port is
+$06, $04, $08, $0A. These completing cycles carry none of the operand, assert no
+OCS, and a bus error on one is no exception. None runs for a 32-bit port, for a
+read-modify-write, after CIIN, or with the data cache disabled. `core_cache_tb`
+checks every figure cycle for cycle; `doc/caches.md` has the rest.
 
 **The port size is taken one clock after DSACK terminates the cycle.** Either
 DSACK1 or DSACK0 terminates the cycle on the falling edge it is first recognised
@@ -516,9 +536,10 @@ top level's sink until the MMU of M11 (`bus_status_tb`).
 
 | | |
 |---|---|
-| The cycle aborted before AS on a cache hit, an ATC miss or an MMU fault (7.1.1) | M10, M11 |
-| The extra cycles that complete a cache entry from an 8- or 16-bit port (6.1.3.1) | M10 |
-| Which requests are cachable and burstable — CACR's enables, freeze, burst enables | M10 |
+| The cycle aborted before AS on a cache hit (7.1.1, 7.2.7) | never: a hit is decided before any cycle starts -- `doc/divergences.md` |
+| The cycle aborted before AS on an ATC miss or an MMU fault (7.1.1) | M11 |
+| ~~The extra cycles that complete a cache entry from an 8- or 16-bit port (6.1.3.1)~~ | done at M10 |
+| ~~Which requests are cachable and burstable — CACR's enables, freeze, burst enables~~ | done at M10 -- `doc/caches.md` |
 | CIOUT's value — the ATC entry's or the TTx register's CI bit | M11 |
 | STATUS's ATC-miss, spurious/autovector and F-line indications | `doc/divergences.md` |
 | A bus error while RTE loads a frame is not a double bus fault | M8–M9, `doc/divergences.md` |

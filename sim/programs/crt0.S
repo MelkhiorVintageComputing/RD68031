@@ -31,11 +31,12 @@ _start:
 
         move.l  #STACK_TOP, %sp
 
-        | Turn the instruction cache on (UM 6.3.1.11, CACR's EI bit). Every program
-        | runs cached, which is what a real system does; `make cache` runs the
-        | same programs on a core built with no cache at all and holds the two
-        | to the same data cycles.
-        moveq   #1, %d0
+        | Turn both caches on, with burst filling and write allocation (UM 6.3.1:
+        | EI, IBE, ED, DBE and WA -- $3111). Every program runs cached, which is
+        | what a real system does; `make cache` runs the same programs on a core
+        | built with no caches at all and holds the two to the same writes and to
+        | no more reads with the caches than without.
+        move.l  #0x3111, %d0
         movec   %d0, %cacr
 
         | Clear .bss. The linker leaves it empty in the image and C expects

@@ -39,6 +39,8 @@
 // be nameable and restorable. See doc/checkpoint.md.
 
 module rd68031_ifu #(
+    // 0 builds the instruction cache out; any other value builds the MC68030's
+    // 64 long words (UM 6.1). doc/caches.md.
     parameter int ICACHE_ENTRIES = 0
 ) (
     input  logic        clk,
@@ -84,18 +86,38 @@ module rd68031_ifu #(
     // Cache control -----------------------------------------------------------
     input  logic [31:0] cacr,
     input  logic [31:0] caar,
-    input  logic  [1:0] cach_op,
+    input  logic  [3:0] cach_op,     // {CED, CD, CEI, CI}, pulsed by MOVEC
     input  logic        cdis_sync_n,
+    // The MMU's cache inhibit for the prefetch about to be asked for: the CI bit
+    // of the ATC entry or TTx register that maps it (UM 6.1, 9.5). It stops the
+    // fill and the burst request and nothing else -- "whenever a read access
+    // occurs and the required instruction word ... is resident in the
+    // appropriate on-chip cache ... the state of the corresponding CI bits in
+    // the MMU are also ignored". Zero until M11 drives it. doc/caches.md.
+    input  logic        ic_inhibit,
 
     // To the bus unit ---------------------------------------------------------
     output logic        fetch_valid,
     output logic [31:0] fetch_addr,
     output logic  [2:0] fetch_fc,
+    output logic        fetch_burst,  // a line fill is wanted: CBREQ (UM 6.1.3.2)
     input  logic        fetch_ack,
     input  logic        fetch_last,
     input  logic [31:0] fetch_rdata,
     input  logic        fetch_fault,
-    output logic        bus_abort
+    input  logic        fetch_ciin,
+    output logic        bus_abort,
+
+    // Every read beat, registered -- for the rest of a burst ----------------
+    input  logic        beat_valid,
+    input  logic        beat_err,
+    input  logic [31:0] beat_data,
+    input  logic [31:0] beat_addr,
+    input  logic  [1:0] beat_num,
+    input  logic        beat_ciin,
+    input  logic        beat_fetch,
+    // A burst is under way past its first long word -- rd68031_biu.
+    input  logic        burst_tail
 );
 
   // ==========================================================================
@@ -123,6 +145,12 @@ module rd68031_ifu #(
   // tagged with the space the long word was READ from, which a flush that changed
   // the privilege level while the fetch was in flight has already moved on from.
   logic        fetch_fc2_q;
+
+  // What was decided for the prefetch in flight, at the clock it was issued --
+  // UM 6.1.3.2, below with the cache.
+  logic        fetch_fill_q;   // its long word may be cached
+  logic        fetch_burst_q;  // ... and the line around it burst filled
+  logic        ib_ok_q;        // its first long word was cached: the burst's may be
 
   // The address that fetch was issued at. It has to be a register: fill_q moves
   // on as the queue drains, and a combinational fetch_addr would label the long
@@ -215,8 +243,15 @@ module rd68031_ifu #(
   // address entirely.
   assign fetch_valid = fetch_pend_q && !fetch_last && !fetch_ack;
   assign fetch_addr  = fetch_addr_q;
-  assign fetch_fc    = pf_super ? rd68031_pkg::FC_SUPER_PROG
-                                : rd68031_pkg::FC_USER_PROG;
+  // The space is the one the prefetch was ASKED for in, held with its address:
+  // the bus may take it some clocks later, after a flush that changed the
+  // privilege level, and the long word it brings back belongs to the stream
+  // that asked -- and is cached under that stream's FC2 (UM 6.1.1).
+  assign fetch_fc    = fetch_fc2_q ? rd68031_pkg::FC_SUPER_PROG
+                                   : rd68031_pkg::FC_USER_PROG;
+  // A prefetch the pipe has abandoned before the bus took it asks for no line:
+  // its own long word is still cached, but nobody is waiting for the rest.
+  assign fetch_burst = fetch_burst_q && !discard_q;
 
   // A hit in the instruction cache never starts an external cycle, so there is
   // nothing to abort. UM20 5.2.5 says the part MAY start the cycle in parallel with
@@ -226,7 +261,7 @@ module rd68031_ifu #(
   assign bus_abort = 1'b0;
 
   // ==========================================================================
-  // The instruction cache -- UM20 section 4
+  // The instruction cache -- UM 6.1.1
   //
   // Consulted at exactly one point: where the queue wants a long word that the
   // cache holding register does not have, which is where the bus would otherwise
@@ -241,60 +276,117 @@ module rd68031_ifu #(
   // state of the enable bits in CACR" -- UM 6.1). Disabled means neither
   // looked up nor filled; it does NOT mean emptied -- "if it is enabled again,
   // the previously valid entries remain valid and may be used" (UM 6.3.1.11).
-  // The organisation is still the MC68020's, 64 long words; the MC68030's 16
-  // lines of four, with IBE's burst fill, are M10.
+  //
+  // A miss asks the bus for the long word, and for the rest of the line with it
+  // when the line is cold and IBE is set (UM 6.1.3.2): the first long word comes
+  // back on the fetch port as ever, and the burst's later ones on the beat
+  // port, one long word per beat, each written into the cache as it lands.
   // ==========================================================================
   logic        cache_on;
   logic        cache_hit;
+  logic        cache_cold;
   logic [31:0] cache_rdata;
   logic        cache_fill;
   logic        inv_all, inv_one;
 
   assign cache_on = cacr[rd68031_pkg::CACR_EI] && cdis_sync_n;
 
-  // UM 6.3.1.10: "when the FI bit is set and a miss occurs in the instruction
-  // cache, the entry (or line) is not replaced". And a
-  // long word whose cycle ended in a bus error is not an instruction at all: the
-  // pipe carries it with its fault bit, and it must not outlive that in the cache.
-  // A word for a stream a flush abandoned is still the right word for its own
-  // address, but it is not taken into the holding register either, and filling
-  // the cache with it would be the only trace it left -- so it is dropped whole.
-  assign cache_fill = fetch_ack && !discard_q && !fetch_fault
-                   && cache_on && !cacr[rd68031_pkg::CACR_FI];
+  // Whether a miss now may replace an entry -- UM 6.1's "cachable": the cache
+  // enabled, CDIS negated, and the MMU not inhibiting it; and UM 6.3.1.10,
+  // "when the FI bit is set and a miss occurs in the instruction cache, the
+  // entry (or line) is not replaced". CIIN is the bus's to say, cycle by cycle,
+  // and is looked at when the long word arrives.
+  logic may_fill;
+  assign may_fill = cache_on && !cacr[rd68031_pkg::CACR_FI] && !ic_inhibit;
 
-  // CACR's CI and CEI, pulsed by the MOVEC that sets them. CEI clears
+  // CACR's CI, CEI, pulsed by the MOVEC that sets them. CEI clears
   // "regardless of the states of the EI and FI bits" (UM 6.3.1.9), and so does
-  // CI (UM 6.3.1.8).
-  assign inv_all = (cach_op == 2'b01);
-  assign inv_one = (cach_op == 2'b10);
+  // CI (UM 6.3.1.8). CI covers CEI when both are set.
+  assign inv_all = cach_op[0];
+  assign inv_one = cach_op[1] && !cach_op[0];
+
+  // The first long word. A long word whose cycle ended in a bus error is not
+  // an instruction at all: the pipe carries it with its fault bit, and it must
+  // not outlive that in the cache. CIIN on any cycle that carried it says "do
+  // not cache" (UM 6.1.3.1). A word for a stream a flush abandoned is still the
+  // right word for its own address, in the space it was read in, and it is
+  // cached like any other: the bus cycle was a cachable prefetch, and the next
+  // pass round a loop is usually the one that wants it.
+  logic fill_first, fill_beat;
+  assign fill_first = fetch_ack && fetch_fill_q && !fetch_fault && !fetch_ciin;
+
+  // The rest of a burst: "the subsequent cycles are for the subsequent entries
+  // in the cache line" (UM 6.1.3.2). CIIN on one "prevents the data during
+  // that cycle from being loaded into the appropriate cache" and ends the
+  // burst, which the bus unit sees to.
+  assign fill_beat  = beat_valid && beat_fetch && (beat_num != 2'd0) && !beat_ciin
+                   && ib_ok_q;
+
+  assign cache_fill = fill_first || fill_beat;
+
+  // A bus error on a fill. "When BERR is asserted during a read cycle that
+  // supplies data to either on-chip cache, the data in the cache is marked
+  // invalid" (UM 7.5.1); on the first cycle of a burst "the entire associated
+  // cache line is marked invalid", and on a later one "the cache entry
+  // corresponding to that cycle is marked invalid, but the processor does not
+  // take an exception" (UM 6.1.3.2). The first cycle's fault is still the
+  // prefetch's, taken if and when the word is used, as it always was.
+  logic err_ent, err_line;
+  assign err_line = fetch_ack && fetch_fault && fetch_fill_q && fetch_burst_q;
+  assign err_ent  = (fetch_ack && fetch_fault && fetch_fill_q && !fetch_burst_q)
+                 || (beat_err && beat_fetch && (beat_num != 2'd0));
+
+  // No new prefetch is asked for while a burst is still landing in the cache,
+  // nor on the clock its last long word is written: the lookup that decided it
+  // would not have seen the long words still to come, and would send the bus
+  // for one the burst is about to deliver. UM 6.1.3.2: "data from the burst
+  // fill cycles is not available ... until the burst operation is complete".
+  logic fill_hold;
+  assign fill_hold = burst_tail || (beat_valid && beat_fetch);
 
   generate
     if (ICACHE_ENTRIES > 0) begin : g_cache
-      logic cache_lhit;
-      rd68031_icache #(.ENTRIES (ICACHE_ENTRIES)) u_icache (
-          .clk     (clk),
-          .rst_n   (rst_n),
-          .la      (cache_la),
-          .lfc2    (pf_super),
-          .hit     (cache_lhit),
-          .rdata   (cache_rdata),
-          .fill    (cache_fill),
-          .fa      (fetch_addr_q[31:2]),
-          .ffc2    (fetch_fc2_q),
-          .fdata   (fetch_rdata),
-          .inv_all (inv_all),
-          .inv_one (inv_one),
-          .inv_la  (caar[31:2]));
-      assign cache_hit = cache_on && cache_lhit;
+      logic cache_lhit, cache_lcold;
+      logic [29:0] fill_la;
+      logic [31:0] fill_d;
+      logic [29:0] err_la;
+      assign fill_la = fill_first ? fetch_addr_q[31:2] : beat_addr[31:2];
+      assign fill_d  = fill_first ? fetch_rdata : beat_data;
+      assign err_la  = fetch_ack ? fetch_addr_q[31:2] : beat_addr[31:2];
+      rd68031_icache u_icache (
+          .clk      (clk),
+          .rst_n    (rst_n),
+          .la       (cache_la),
+          .lfc2     (pf_super),
+          .hit      (cache_lhit),
+          .cold     (cache_lcold),
+          .rdata    (cache_rdata),
+          .fill     (cache_fill),
+          .fa       (fill_la),
+          .ffc2     (fetch_fc2_q),
+          .fdata    (fill_d),
+          .inv_all  (inv_all),
+          .inv_caar (inv_one),
+          .caar_idx (caar[7:2]),
+          .inv_ent  (err_ent),
+          .inv_line (err_line),
+          .err_idx  (err_la[5:0]));
+      assign cache_hit  = cache_on && cache_lhit;
+      assign cache_cold = cache_lcold;
+      logic unused_cache;
+      assign unused_cache = &{1'b1, err_la[29:6], caar[31:8], caar[1:0]};
     end else begin : g_nocache
       // No cache. CACR and CAAR still exist and read back what was written, and
       // CDIS is still sampled; with nothing behind them they change nothing,
-      // which is what a disabled cache does anyway.
+      // which is what a disabled cache does anyway. No burst is ever asked for:
+      // there is nothing to fill.
       assign cache_hit   = 1'b0;
+      assign cache_cold  = 1'b0;
       assign cache_rdata = 32'd0;
       logic unused_nocache;
       assign unused_nocache = &{1'b1, cache_fill, inv_all, inv_one, caar,
-                                fetch_fc2_q};
+                                fetch_fc2_q, err_ent, err_line, beat_data,
+                                beat_addr};
     end
   endgenerate
 
@@ -339,6 +431,9 @@ module rd68031_ifu #(
       fetch_pend_q <= 1'b0;
       fetch_addr_q <= '0;
       fetch_fc2_q  <= 1'b0;
+      fetch_fill_q <= 1'b0;
+      fetch_burst_q <= 1'b0;
+      ib_ok_q      <= 1'b0;
       discard_q    <= 1'b0;
       primed_q     <= 1'b0;
       ckpt_busy_q  <= 1'b0;
@@ -349,6 +444,7 @@ module rd68031_ifu #(
       if (fetch_ack) begin
         fetch_pend_q <= 1'b0;
         discard_q    <= 1'b0;
+        ib_ok_q      <= fill_first;
         // A word answering a request the flush threw away belongs to the
         // instruction stream that no longer exists. Taking it would put a word
         // from the OLD stream into the pipe with the NEW stream's address on
@@ -377,10 +473,26 @@ module rd68031_ifu #(
         chr_addr_q <= cache_la;
         chr_v_q    <= 1'b1;
         chr_f_q    <= 1'b0;
-      end else if (!fetch_pend_q && room && !chr_hit) begin
+      end else if (!fetch_pend_q && room && !chr_hit && !fill_hold) begin
         fetch_pend_q <= 1'b1;
         fetch_addr_q <= {fill_q[31:2], 2'b00};
         fetch_fc2_q  <= pf_super;
+        // UM 6.1.3.2: a burst is asked for when "a read cycle ... misses due
+        // to the indexed tag not matching" or "tag matches, but all long words
+        // in the line are invalid", with the cache enabled, IBE set and FI
+        // clear; otherwise the miss is a single entry fill (UM 6.1.1).
+        fetch_fill_q  <= may_fill;
+        fetch_burst_q <= may_fill && cacr[rd68031_pkg::CACR_IBE] && cache_cold;
+        ib_ok_q       <= 1'b0;
+      end
+
+      // CI or CEI while a fill is in flight: what it brings back was read from
+      // memory before the clear, and the clear is the program saying that the
+      // cache's copy of memory is no longer to be trusted. Nothing more of it
+      // goes in. doc/caches.md.
+      if (inv_all || inv_one) begin
+        fetch_fill_q <= 1'b0;
+        ib_ok_q      <= 1'b0;
       end
 
       // ------------------------------------------------------------------
@@ -584,6 +696,7 @@ module rd68031_ifu #(
   // ==========================================================================
   logic unused_ifu;
   assign unused_ifu = &{1'b1,
-                        ckpt_save, cacr, caar[1:0]};
+                        ckpt_save, cacr, caar[1:0], cach_op[3:2],
+                        beat_addr[1:0]};
 
 endmodule

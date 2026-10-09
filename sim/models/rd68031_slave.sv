@@ -97,6 +97,13 @@ module rd68031_slave #(
   int unsigned bwaits_rt;       // ... and before each later burst beat
   int unsigned burst_limit;     // long words it will supply in one burst, 1..4
   bit          ciin_all;        // CIIN on every read
+  // A read drives the whole port, whatever SIZ and A1/A0 ask for -- UM 7.2.7:
+  // "the slave device must supply as much aligned data on the data bus as its
+  // port size allows, regardless of the requested operand size", which is what
+  // a device whose data the caches may keep has to do (UM 6.1.3.1). Clear it to
+  // drive only the bytes asked for, with the other lanes zero: a device that
+  // cannot supply its port width, and must then assert CIIN.
+  bit          full_rt;
   logic  [3:0] ciin_beats;      // ... or on these beats of a burst (bit n = beat n)
   int unsigned writes;          // write cycles accepted, for a testbench to count
 
@@ -105,6 +112,7 @@ module rd68031_slave #(
     bwaits_rt   = BURST_WAITS;
     burst_limit = BURST ? 4 : 1;
     ciin_all    = CIIN;
+    full_rt     = 1'b1;
     ciin_beats  = 4'b0000;
     writes      = 0;
   end
@@ -258,6 +266,9 @@ module rd68031_slave #(
     if (selected && rw_i) begin
       if (whole) begin
         for (j = 0; j < 4; j = j + 1) rd_lane[j] = mem[idx(beat_a + j)];
+      end else if (full_rt) begin
+        for (j = 0; j < PORT_BYTES; j = j + 1)
+          rd_lane[j] = mem[idx(a_i - port_off(a_i) + j)];
       end else begin
         for (j = 0; j < 4; j = j + 1) begin
           if (j < xfer_n(a_i, siz_i)) begin

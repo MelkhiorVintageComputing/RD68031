@@ -46,6 +46,10 @@ module rd68031_seq #(
     // A bus error on this CPU-space cycle is a bus error -- UM 10.5.2.8. True
     // for every coprocessor interface register access but the first.
     output logic        req_cpfault,
+    // The address is the program's own, whatever the space -- MOVES, whose
+    // SFC or DFC may name CPU space (PRM 6). Every other CPU-space request has
+    // its address built by the bus unit from the type (UM figure 7-42).
+    output logic        req_cpuraw,
     input  logic        req_ack,
     input  logic        req_start,
     input  logic        req_last,
@@ -111,7 +115,7 @@ module rd68031_seq #(
     // Cache control -----------------------------------------------------------
     output logic [31:0] cacr,
     output logic [31:0] caar,
-    output logic  [1:0] cach_op,
+    output logic  [3:0] cach_op,
 
     // Status -------------------------------------------------------------------
     input  logic  [2:0] ipl_sync_n,
@@ -2246,6 +2250,14 @@ module rd68031_seq #(
   // CPU-space cycles are; the second has to raise the fault.
   assign req_cpfault = (`UF(CPUSPACE) == rd68031_ucode_pkg::U_CPUSPACE_COPROC);
 
+  // PRM 6, MOVES: "moves the byte, word, or long operand ... to or from the
+  // specified address space", the address being the effective address. With
+  // SFC or DFC at 7 that is a CPU-space cycle at that address -- not one whose
+  // address the bus unit builds from a type field, which is what every other
+  // CPU-space request here is. doc/bugs-found.md.
+  assign req_cpuraw  = (`UF(FC) == rd68031_ucode_pkg::U_FC_SFC)
+                    || (`UF(FC) == rd68031_ucode_pkg::U_FC_DFC);
+
   // ==========================================================================
   // The instruction pipe
   // ==========================================================================
@@ -3014,18 +3026,19 @@ module rd68031_seq #(
 
   assign cacr      = cacr_q;
   assign caar      = caar_q;
-  // MOVEC setting CACR's CI or CEI -- UM 6.3.1.8 and 6.3.1.9. Both "always read
-  // as a zero", so they are never stored: the write is an order to the cache,
-  // carried out on the edge that commits it. CI clears everything and so covers
-  // CEI when both are set. CD and CED are the same orders to the data cache,
-  // which arrives at M10; until then they are accepted and do nothing.
+  // MOVEC setting CACR's CI, CEI, CD or CED -- UM 6.3.1.8, 6.3.1.9, 6.3.1.3
+  // and 6.3.1.4. All four "always read as a zero", so they are never stored:
+  // the write is an order to the cache, carried out on the edge that commits
+  // it, "at the time a MOVEC instruction loads a one" into the bit. The two
+  // caches are independent -- "a similar operation can be performed for both
+  // caches by a single MOVEC instruction" (UM 6.3.1) -- so each pair is passed
+  // on as it stands; each cache lets its clear-all cover its clear-entry.
   logic cacr_wr;
   assign cacr_wr = commit && (`UF(DST) == rd68031_ucode_pkg::U_DST_CREG)
                 && (creg_sel == 12'h002);
-  assign cach_op = !cacr_wr                     ? 2'b00
-                 : y[rd68031_pkg::CACR_CI]  ? 2'b01
-                 : y[rd68031_pkg::CACR_CEI] ? 2'b10
-                 :                           2'b00;
+  assign cach_op = cacr_wr ? {y[rd68031_pkg::CACR_CED], y[rd68031_pkg::CACR_CD],
+                              y[rd68031_pkg::CACR_CEI], y[rd68031_pkg::CACR_CI]}
+                           : 4'b0000;
   // ==========================================================================
   // RTE putting a fault frame back -- UM 8.2.3, doc/ssw.md
   //

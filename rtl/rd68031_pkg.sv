@@ -242,14 +242,17 @@ package rd68031_pkg;
   localparam logic [7:0] VEC_TRAP_0       = 8'd32;  // TRAP #n is 32 + n
 
   // ==========================================================================
-  // Instruction cache -- UM20 4.1
+  // The caches -- UM 6.1, figures 6-2 and 6-3
   //
-  // 64 direct-mapped long-word entries. The tag is A31-A8 plus FC2, so a supervisor
-  // and a user fetch of the same address are different entries; A7-A2 index; A1
-  // selects the word within the entry.
+  // Each 256 bytes: 16 direct-mapped lines (A7-A4) of four long-word entries
+  // (A3-A2), with a valid bit per entry and a tag per line. The instruction
+  // cache's tag is A31-A8 and FC2, the data cache's A31-A8 and FC2-FC0.
+  // rd68031_icache.sv and rd68031_dcache.sv; doc/caches.md.
   // ==========================================================================
-  localparam int ICACHE_INDEX_W = 6;
+  localparam int CACHE_LINES    = 16;
+  localparam int ICACHE_INDEX_W = 6;   // A7-A2
   localparam int ICACHE_TAG_W   = 25;  // A31-A8 and FC2
+  localparam int DCACHE_TAG_W   = 27;  // A31-A8 and FC2-FC0
 
   // CACR -- UM 6.3.1 and figure 6-14. "Bits 31-14 and 7-5 are reserved ...
   // They are currently read as zeros and are ignored when written", and the
@@ -267,10 +270,8 @@ package rd68031_pkg;
   localparam int CACR_CD  = 11;  // clear all of the data cache; reads zero
   localparam int CACR_DBE = 12;  // data burst enable
   localparam int CACR_WA  = 13;  // write allocate
-  // What a MOVEC to CACR keeps: WA, DBE, FD, ED, IBE, FI and EI. Only EI and
-  // FI act yet. The burst enables and the data-cache bits are stored and read
-  // back, and act when the burst fill and the data cache arrive at M10 --
-  // doc/divergences.md.
+  // What a MOVEC to CACR keeps: WA, DBE, FD, ED, IBE, FI and EI, all of which
+  // act (doc/caches.md); CD, CED, CI and CEI are orders, never stored.
   localparam logic [31:0] CACR_IMPLEMENTED = 32'h0000_3313;
 
   // ==========================================================================

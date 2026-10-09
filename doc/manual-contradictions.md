@@ -384,3 +384,38 @@ example, and are what RD68021 did as well: the trace frame stacked straight
 after the trap's has +$08 the trap instruction and +$02 the trap handler.
 `core_excpri_tb` checks it for TRAP and CHK, and 8.1.12's own example with an
 interrupt.
+
+---
+
+## 18. What a write-allocation miss invalidates
+
+**Followed: figure 6-4 -- an aligned long word that misses the tag invalidates
+the other three entries of the line; any other write that misses the tag
+clears only the valid bits of the entries it touches.**
+
+UM 6.1.2.1, as printed: "When a tag miss occurs on a write of long-word data
+that is long-word aligned, the corresponding tag is replaced, and only the long
+word being written is marked as valid. The other three entries in the cache line
+are invalidated when a tag miss occurs on a misaligned long-word write or on a
+byte or word write, the data is not written in the cache, the tag is unaltered,
+and the valid bit(s) are cleared." Read as one sentence, the second half says
+the whole line is invalidated by a misaligned or short write that misses.
+
+Figure 6-4 says otherwise. Example 4, an aligned long word with no tag match,
+lists "TAG <- TAG', b4-b7 <- b4'-b7', V0 <- 0, V1 <- 1, V2 <- 0, V3 <- 0": the
+other three entries go with the replaced tag. Example 5, a misaligned long word
+with no tag match, lists only "V2 <- 0" -- V0 and V3, which the write does not
+touch, keep their valid bits (V1 was already clear). And the sentence's own
+last clauses -- "the tag is unaltered, and the valid bit(s) are cleared" -- only
+make sense one entry at a time: with the tag unaltered, the other entries still
+belong to it and there is no reason to invalidate them.
+
+So the paragraph is two sentences with the full stop lost: "... The other three
+entries in the cache line are invalidated. When a tag miss occurs on a
+misaligned long-word write or on a byte or word write, the data is not written
+in the cache, the tag is unaltered, and the valid bit(s) are cleared." The
+paragraph's own summary agrees: "an aligned long-word data write may replace a
+previously valid entry; whereas, a misaligned data write or a write of data that
+is not long word may invalidate a previously valid entry or entries" -- the
+entries it writes. `rtl/rd68031_dcache.sv` does that, and `core_cache_tb` checks
+all five examples, and the byte writes, in both WA modes.

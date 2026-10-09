@@ -18,6 +18,7 @@ BUILD ?= build
 
 # Overridable build knobs, all documented where they are used.
 ICACHE_ENTRIES ?= 64
+DCACHE_ENTRIES ?= 64
 COPROCESSOR    ?= 0
 
 # Vendor tool locations. Neither is on PATH; the launchers in scripts/ set it up.
@@ -45,6 +46,7 @@ SRCS := rtl/rd68031_sync.sv \
         rtl/rd68031_bitfield.sv \
         rtl/rd68031_biu.sv \
         rtl/rd68031_icache.sv \
+        rtl/rd68031_dcache.sv \
         rtl/rd68031_ifu.sv \
         rtl/rd68031_seq.sv \
         rtl/rd68031_top.sv
@@ -52,7 +54,8 @@ SRCS := rtl/rd68031_sync.sv \
 RTL  := $(PKGS) $(GENPKG) $(GENSRC) $(SRCS)
 VLT  := rtl/rd68031.vlt
 
-IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$(ICACHE_ENTRIES)
+IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$(ICACHE_ENTRIES) \
+           -DTB_DCACHE_ENTRIES=$(DCACHE_ENTRIES)
 
 .PHONY: sim-progs
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
@@ -99,7 +102,8 @@ help:
 	@echo
 	@echo "  make clean        remove build/"
 	@echo
-	@echo "Knobs: ICACHE_ENTRIES=$(ICACHE_ENTRIES) COPROCESSOR=$(COPROCESSOR)" \
+	@echo "Knobs: ICACHE_ENTRIES=$(ICACHE_ENTRIES) DCACHE_ENTRIES=$(DCACHE_ENTRIES)" \
+	      "COPROCESSOR=$(COPROCESSOR)" \
 	      "AFAMILY=$(AFAMILY) APART=$(APART)"
 
 dirs:
@@ -131,6 +135,7 @@ NOTES := ': sorry: .*\(ignored\|all bits will be included\)\.$$'
 
 lint-iverilog: dirs
 	@iverilog $(IVFLAGS) -P$(TOP).ICACHE_ENTRIES=$(ICACHE_ENTRIES) \
+	    -P$(TOP).DCACHE_ENTRIES=$(DCACHE_ENTRIES) \
 	    -o $(BUILD)/$(TOP).vvp -s $(TOP) $(RTL) \
 	    > $(BUILD)/iverilog.log 2>&1 \
 	  || { grep -v $(NOTES) $(BUILD)/iverilog.log; exit 1; }
@@ -138,7 +143,8 @@ lint-iverilog: dirs
 
 lint-verilator: dirs
 	@verilator --lint-only -Wall --top-module $(TOP) \
-	    -GICACHE_ENTRIES=$(ICACHE_ENTRIES) $(VLT) $(RTL) \
+	    -GICACHE_ENTRIES=$(ICACHE_ENTRIES) -GDCACHE_ENTRIES=$(DCACHE_ENTRIES) \
+	    $(VLT) $(RTL) \
 	    > $(BUILD)/verilator.log 2>&1 \
 	  || { grep -v '^- V e r i l a t i o n\|^- Verilator:' $(BUILD)/verilator.log; exit 1; }
 	@echo "  verilator: ok"
@@ -153,7 +159,8 @@ lint-verilator: dirs
 # driven from both the posedge and the negedge block and `make lint` said PASS.
 lint-yosys: dirs
 	@set -o pipefail; yosys -p "read_verilog -sv $(RTL); \
-	    chparam -set ICACHE_ENTRIES $(ICACHE_ENTRIES) $(TOP); synth -top $(TOP); \
+	    chparam -set ICACHE_ENTRIES $(ICACHE_ENTRIES) $(TOP); \
+	    chparam -set DCACHE_ENTRIES $(DCACHE_ENTRIES) $(TOP); synth -top $(TOP); \
 	    write_verilog $(BUILD)/$(TOP)_yosys.v" > $(BUILD)/yosys.log 2>&1 \
 	  || { tail -40 $(BUILD)/yosys.log; exit 1; }
 	@if grep -q 'multiple conflicting drivers\|Warning: Identifier .* is implicitly declared\|inferring latch' $(BUILD)/yosys.log; then \
@@ -167,7 +174,8 @@ lint-yosys: dirs
 # ---------------------------------------------------------------------------
 audit: dirs
 	@python3 tools/reset_audit.py --top $(TOP) --build $(BUILD) \
-	    --param ICACHE_ENTRIES=$(ICACHE_ENTRIES) $(RTL)
+	    --param ICACHE_ENTRIES=$(ICACHE_ENTRIES) \
+	    --param DCACHE_ENTRIES=$(DCACHE_ENTRIES) $(RTL)
 
 # ---------------------------------------------------------------------------
 # Microcode -- M4
@@ -230,11 +238,21 @@ $(M030).hex: sim/programs/m030.S sim/programs/flat.ld
 	    $(M030).o 2> $(M030).link.log || { cat $(M030).link.log; exit 1; }
 	@$(CROSS)objcopy -O verilog --verilog-data-width=1 $(M030).elf $@
 
+# core_cache_tb runs sim/programs/cache.S, which owns its vectors too: one short
+# test per phase, opened by a write of the phase number the testbench watches.
+CACHEP := build/programs/cache
+$(CACHEP).hex: sim/programs/cache.S sim/programs/flat.ld
+	@mkdir -p build/programs
+	@$(CROSS)gcc -mcpu=68030 -c -o $(CACHEP).o sim/programs/cache.S
+	@$(CROSS)gcc -nostdlib -nostartfiles -T sim/programs/flat.ld -o $(CACHEP).elf \
+	    $(CACHEP).o 2> $(CACHEP).link.log || { cat $(CACHEP).link.log; exit 1; }
+	@$(CROSS)objcopy -O verilog --verilog-data-width=1 $(CACHEP).elf $@
+
 sim-progs:
 	@$(MAKE) --no-print-directory BUILD=build build/programs/arith.hex \
 	    build/programs/corners.hex
 
-sim: dirs $(COW).hex $(M030).hex sim-progs
+sim: dirs $(COW).hex $(M030).hex $(CACHEP).hex sim-progs
 	@ok=1; for tb in $(TBS); do \
 	  iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/$$tb.vvp -s $$tb \
 	      $(RTL) sim/models/*.sv sim/tb/$$tb.sv > $(BUILD)/$$tb.build.log 2>&1 \
@@ -449,24 +467,26 @@ cycles: dirs
 	@python3 tools/cycles.py check $(BUILD)/cycles.out --doc doc/timing-divergences.md
 
 # ---------------------------------------------------------------------------
-# The instruction cache is architecturally invisible
+# The caches are architecturally invisible
 #
-# UM 4.1 caches instruction prefetches and nothing else, so a core built with no
-# cache at all must give the same answers. This runs the directed testbenches,
-# the sweep and the effective-address vectors on a core with ICACHE_ENTRIES=0,
-# and then every program on both builds, holding the two to identical data
-# cycles and to no more instruction fetches with the cache than without.
+# UM section 6: both caches are copies of memory that the program cannot see,
+# the data cache write-through, so a core built with no caches at all must give
+# the same answers. This runs the directed testbenches, the sweep and the
+# effective-address vectors on a core with ICACHE_ENTRIES=0 and DCACHE_ENTRIES=0,
+# and then every program on both builds, holding the two to identical writes,
+# and to no more data reads and no more instruction fetches with the caches
+# than without (tools/cache_diff.py).
 # ---------------------------------------------------------------------------
 NOCACHE := $(BUILD)/nocache
 
 cache: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(PROGS)) \
             $(patsubst %,$(BUILD)/programs/%.trc,$(PROGS))
 	@mkdir -p $(NOCACHE); rm -f $(NOCACHE)/cache.failed
-	@echo "  -- ICACHE_ENTRIES=0: the directed testbenches"
-	@$(MAKE) --no-print-directory sim ICACHE_ENTRIES=0 BUILD=$(NOCACHE) \
+	@echo "  -- ICACHE_ENTRIES=0 DCACHE_ENTRIES=0: the directed testbenches"
+	@$(MAKE) --no-print-directory sim ICACHE_ENTRIES=0 DCACHE_ENTRIES=0 BUILD=$(NOCACHE) \
 	  || echo sim > $(NOCACHE)/cache.failed
-	@echo "  -- ICACHE_ENTRIES=0: the sweep and the effective addresses"
-	@$(MAKE) --no-print-directory vectors ICACHE_ENTRIES=0 BUILD=$(NOCACHE) \
+	@echo "  -- ICACHE_ENTRIES=0 DCACHE_ENTRIES=0: the sweep and the effective addresses"
+	@$(MAKE) --no-print-directory vectors ICACHE_ENTRIES=0 DCACHE_ENTRIES=0 BUILD=$(NOCACHE) \
 	    OBUILD=$(OBUILD) || true
 	@# Mismatches the cached core has as well are the RTL's, not the cache's:
 	@# the failure list is compared with the last full sweep of the cached core
@@ -480,12 +500,13 @@ cache: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(PROGS)) \
 	else grep -q '^PASS' $(NOCACHE)/core_vec_tb.log \
 	  || { echo "  FAIL: the sweep without the cache, and no $(BUILD)/vectors.fail to compare with"; \
 	       echo vectors >> $(NOCACHE)/cache.failed; }; fi
-	@$(MAKE) --no-print-directory ea ICACHE_ENTRIES=0 BUILD=$(NOCACHE) \
+	@$(MAKE) --no-print-directory ea ICACHE_ENTRIES=0 DCACHE_ENTRIES=0 BUILD=$(NOCACHE) \
 	    OBUILD=$(OBUILD) || echo ea >> $(NOCACHE)/cache.failed
 	@echo "  -- the programs, both ways"
 	@ok=1; test -f $(NOCACHE)/cache.failed && { echo "  (failed so far: $$(tr '\n' ' ' < $(NOCACHE)/cache.failed))"; ok=0; }; \
 	for e in 0 64; do \
-	  iverilog -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$$e -I sim/tb \
+	  iverilog -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$$e \
+	      -DTB_DCACHE_ENTRIES=$$e -I sim/tb \
 	      -o $(NOCACHE)/cosim$$e.vvp -s core_cosim_tb \
 	      $(RTL) sim/models/*.sv sim/tb/core_cosim_tb.sv \
 	      > $(NOCACHE)/cosim$$e.build.log 2>&1 \
@@ -497,7 +518,7 @@ cache: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(PROGS)) \
 	        +trace=$(BUILD)/programs/$$p.trc +buslog=$(NOCACHE)/$$p.$$e.bus \
 	        > $(NOCACHE)/cosim-$$p.$$e.log 2>&1; \
 	    grep -q '^PASS' $(NOCACHE)/cosim-$$p.$$e.log \
-	      || { echo "  FAIL: $$p with $$e entries"; tail -3 $(NOCACHE)/cosim-$$p.$$e.log; ok=0; }; \
+	      || { echo "  FAIL: $$p with $$e entries in each cache"; tail -3 $(NOCACHE)/cosim-$$p.$$e.log; ok=0; }; \
 	  done; \
 	  r=$$(python3 tools/cache_diff.py $(NOCACHE)/$$p.0.bus $(NOCACHE)/$$p.64.bus) \
 	    && echo "  PASS: $$p -- $$r" || { echo "  $$r"; ok=0; }; \

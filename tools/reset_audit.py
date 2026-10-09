@@ -30,11 +30,12 @@ flip-flops, every one reset", which is true and worthless. Stopping before
 `opt_clean` audits every register the source actually describes.
 
 Memories are not registers. yosys leaves an inferred RAM as a $mem cell, which
-this audit does not count, and there is exactly one: the instruction cache's
-array (rtl/rd68031_icache.sv). It is gated by 64 valid bits that ARE reset flops,
-and no lookup reads the array for an entry whose valid bit is clear, so nothing
-the RAM powered up holding can be observed -- UM 4.2 clears the cache the same
-way.
+this audit does not count, and there are two kinds: the instruction cache's data
+array (rtl/rd68031_icache.sv) and the data cache's sixteen byte-wide banks
+(rtl/rd68031_dcache.sv). Each is gated by 64 valid bits that ARE reset flops,
+and no lookup reads an entry whose valid bit is clear, so nothing a RAM powered
+up holding can be observed -- UM 6.2 clears the caches the same way: "all valid
+bits of both caches are cleared". The tags are reset flops too.
 
 Exemptions are named individually in EXEMPT below, with the argument for each, and
 the audit fails if a second one appears. A blanket allowance would defeat the point.

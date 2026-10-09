@@ -41,7 +41,8 @@ module core_m030_sys #(
     parameter bit BURST      = 1'b0,
     parameter int WAITS      = 0,
     parameter bit CP         = 1'b0,
-    parameter int ICACHE     = 64
+    parameter int ICACHE     = 64,
+    parameter int DCACHE     = 64
 ) (
     input logic clk,
     input logic rst_n
@@ -76,7 +77,8 @@ module core_m030_sys #(
   assign dbus = d_oe   ? d_o   : 32'bz;
   assign dbus = oe_mem ? d_mem : 32'bz;
 
-  rd68031_top #(.ICACHE_ENTRIES (ICACHE), .COPROCESSOR (CP)) dut (
+  rd68031_top #(.ICACHE_ENTRIES (ICACHE), .DCACHE_ENTRIES (DCACHE),
+                .COPROCESSOR (CP)) dut (
       .clk (clk), .rst_n (rst_n),
       .fc_o (fc_o), .fc_oe (fc_oe),
       .a_o (a_o), .a_oe (a_oe),
@@ -127,6 +129,9 @@ module core_m030_sys #(
   logic [31:0]      path;         // a hash of their addresses, in order
   longint unsigned  clocks;       // from reset to the end
   int unsigned      cycles_sterm, cycles_dsack, cycles_berr, cbreqs;
+  // Bursts: cycles that asserted CBREQ and had it answered with CBACK on their
+  // first STERM (UM 7.3.7), and the long words they brought, by requester.
+  int unsigned      bursts, burst_lw, bursts_f, bursts_d;
   // Coprocessor interface cycles -- CPU space type 2 (UM figure 10-3) --
   // and the ones of them addressed to CpID 0, which UM 10.1 says the MC68030
   // never runs.
@@ -146,6 +151,7 @@ module core_m030_sys #(
   task automatic clear();
     insns = 0; path = 32'h811C_9DC5; clocks = 0; spins = 0; last_pc = 32'hFFFF_FFFF;
     cycles_sterm = 0; cycles_dsack = 0; cycles_berr = 0; cbreqs = 0; done = 1'b0;
+    bursts = 0; burst_lw = 0; bursts_f = 0; bursts_d = 0;
     cycles_cp = 0; cycles_cp0 = 0;
     wpath = 32'h811C_9DC5; writes = 0;
   endtask
@@ -192,6 +198,12 @@ module core_m030_sys #(
     if (rst_n && !done) begin
       if (!sterm_n && !as_n_o)        cycles_sterm = cycles_sterm + 1;
       if (cbreq_oe && !cbreq_n_o && !as_n_o && !as_q) cbreqs = cbreqs + 1;
+      if (!sterm_n && !cback_n && !cbreq_n_o && !as_n_o && !as_q) begin
+        bursts = bursts + 1;
+        if (dut.u_biu.op_isfetch) bursts_f = bursts_f + 1;
+        else                      bursts_d = bursts_d + 1;
+      end
+      if (!sterm_n && !as_n_o && dut.u_biu.cyc_brq) burst_lw = burst_lw + 1;
     end
     as_q = !as_n_o;
   end
@@ -219,6 +231,9 @@ module core_m030_tb;
 `ifndef TB_ICACHE_ENTRIES
 `define TB_ICACHE_ENTRIES 64
 `endif
+`ifndef TB_DCACHE_ENTRIES
+`define TB_DCACHE_ENTRIES 64
+`endif
 `ifdef TB_COPROCESSOR
   localparam bit TB_CP = 1'b1;
 `else
@@ -234,10 +249,12 @@ module core_m030_tb;
   end
 
   core_m030_sys #(.PORT_BYTES (4), .SYNC (1'b1), .BURST (1'b1), .WAITS (0),
-                  .CP (TB_CP), .ICACHE (`TB_ICACHE_ENTRIES))
+                  .CP (TB_CP), .ICACHE (`TB_ICACHE_ENTRIES),
+                  .DCACHE (`TB_DCACHE_ENTRIES))
       sys_s (.clk (clk), .rst_n (rst_n));
   core_m030_sys #(.PORT_BYTES (2), .SYNC (1'b0), .BURST (1'b0), .WAITS (1),
-                  .CP (TB_CP), .ICACHE (`TB_ICACHE_ENTRIES))
+                  .CP (TB_CP), .ICACHE (`TB_ICACHE_ENTRIES),
+                  .DCACHE (`TB_DCACHE_ENTRIES))
       sys_a (.clk (clk), .rst_n (rst_n));
 
   int unsigned fails;
@@ -297,6 +314,18 @@ module core_m030_tb;
       @(negedge clk);
       n = n + 1;
     end
+    // Where a system that did not finish stopped -- the first thing to look at.
+    if (!(sys_s.done && sys_a.done)) begin
+      $display("core_m030_tb: %s stuck: sys_s pc_d %08h upc %0d req_valid %b hit_take %b rd_block %b op_active %b st_p %0d st_n %0d post_busy %b fetch_valid %b pf_ready %b fill_hold %b",
+               name, sys_s.dut.u_ifu.pc_d, sys_s.dut.u_seq.upc, sys_s.dut.u_biu.req_valid,
+               sys_s.dut.u_biu.hit_take, sys_s.dut.u_biu.rd_block, sys_s.dut.u_biu.op_active,
+               sys_s.dut.u_biu.st_p, sys_s.dut.u_biu.st_n, sys_s.dut.u_biu.post_busy,
+               sys_s.dut.u_biu.fetch_valid, sys_s.dut.u_ifu.pf_ready, sys_s.dut.u_ifu.fill_hold);
+      $display("core_m030_tb:   req_addr %08h kind %0d bytes %0d dc_on %b hit_a %b hit_b %b span %b stall %b other_stall %b",
+               sys_s.dut.u_biu.req_addr, sys_s.dut.u_biu.req_kind, sys_s.dut.u_biu.req_bytes,
+               sys_s.dut.u_biu.dc_on, sys_s.dut.u_biu.dc_hit_a, sys_s.dut.u_biu.dc_hit_b,
+               sys_s.dut.u_biu.dc_span, sys_s.dut.u_seq.stall, sys_s.dut.u_seq.other_stall);
+    end
     check(sys_s.done, {name, ": the synchronous system reaches its BRA *"});
     check(sys_a.done, {name, ": the asynchronous system reaches its BRA *"});
     check(sys_s.insns == sys_a.insns,
@@ -333,9 +362,32 @@ module core_m030_tb;
           {name, ": the synchronous system's cycles all ended with STERM"});
     check(sys_a.cycles_sterm == 0 && sys_a.cycles_dsack > 0,
           {name, ": the asynchronous system's cycles all ended with DSACK"});
-    $display("core_m030_tb: %s -- %0d instructions, %0d writes; synchronous %0d clocks, %0d STERM cycles, %0d burst requests; asynchronous 16-bit %0d clocks, %0d DSACK cycles",
+    // The programs run with both caches and both burst enables on (crt0.S,
+    // m030.S), so the synchronous port, which answers CBREQ with CBACK, sees
+    // line fills for each cache -- UM 6.1.3.2, 7.3.7 -- each of up to four long
+    // words. The asynchronous port sees CBREQ too, since the processor cannot
+    // know the port before the cycle ends, and never bursts: "the MC68030
+    // ignores the assertion of CBACK during cycles terminated with DSACKx".
+    // Built without caches, nobody asks.
+    if (`TB_ICACHE_ENTRIES != 0)
+      check(sys_s.bursts_f > 0,
+            $sformatf("%s: the instruction cache burst fills on the synchronous port (%0d)",
+                      name, sys_s.bursts_f));
+    if (`TB_DCACHE_ENTRIES != 0)
+      check(sys_s.bursts_d > 0,
+            $sformatf("%s: the data cache burst fills on the synchronous port (%0d)",
+                      name, sys_s.bursts_d));
+    if (`TB_ICACHE_ENTRIES == 0 && `TB_DCACHE_ENTRIES == 0)
+      check(sys_s.cbreqs == 0 && sys_a.cbreqs == 0,
+            {name, ": no cache, no burst request"});
+    check(sys_s.burst_lw <= 4 * sys_s.cbreqs,
+          $sformatf("%s: no burst longer than four long words (%0d in %0d)",
+                    name, sys_s.burst_lw, sys_s.cbreqs));
+    check(sys_a.bursts == 0, {name, ": the asynchronous port never bursts"});
+    $display("core_m030_tb: %s -- %0d instructions, %0d writes; synchronous %0d clocks, %0d STERM cycles, %0d burst requests, %0d bursts (%0d instruction, %0d data); asynchronous 16-bit %0d clocks, %0d DSACK cycles, %0d burst requests",
              name, sys_s.insns, sys_s.writes, sys_s.clocks, sys_s.cycles_sterm,
-             sys_s.cbreqs, sys_a.clocks, sys_a.cycles_dsack);
+             sys_s.cbreqs, sys_s.bursts, sys_s.bursts_f, sys_s.bursts_d,
+             sys_a.clocks, sys_a.cycles_dsack, sys_a.cbreqs);
   endtask
 
   string image_m030, image_corners, image_arith;
@@ -398,8 +450,8 @@ module core_m030_tb;
     check(sys_s.dut.u_seq.dreg[6] === 32'h0000_005A,
           "m030: the program reached its end");
     check(sys_s.dut.u_seq.sr_q[13] === 1'b0, "m030: ... in user mode");
-    check(sys_s.dut.u_seq.cacr_q === 32'h0000_0001,
-          "m030: CACR is EI again, as the program left it");
+    check(sys_s.dut.u_seq.cacr_q === 32'h0000_3111,
+          "m030: CACR is WA DBE ED IBE EI again, as the program left it");
     // UM 10.1: "The MC68030 never generates coprocessor interface bus cycles
     // with the CpID equal to zero." With the interface built, the two CpID 1
     // instructions each make the one access that finds nobody there; without

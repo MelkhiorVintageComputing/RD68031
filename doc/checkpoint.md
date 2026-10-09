@@ -266,22 +266,33 @@ reservation below.
 
 **The data cache is not checkpointed, and nothing a fault frame says is about a
 cache line.** It is write-through (UM 6.1.2), so it never holds the only copy of
-anything, and:
+anything, and (`doc/caches.md` has the design):
 
 - **A faulted write has already updated it.** UM 6.1.2: "since the write to the
   cache completes before the write to external memory, the cache contains the
-  new value even if the external write terminates in a bus error". RTE's rerun
-  writes the same bytes again, so the rerun is idempotent and the frame need
-  carry nothing about it. A write the MMU refuses instead invalidates the entry
-  (UM 6.1.2), which is also idempotent.
+  new value even if the external write terminates in a bus error". The cache
+  takes the write when the bus unit takes it -- for a posted write, before its
+  bus error can be known. RTE's rerun writes the same bytes to memory again and
+  leaves the cache alone, so the rerun is idempotent and the frame need carry
+  nothing about it; a handler that cleared the cache in between left nothing to
+  update. A write the MMU refuses instead invalidates the entry (UM 6.1.2, M11),
+  which is also idempotent.
 - **A fill fault is an operand fault or nothing.** UM 6.1.3.1: "if the bus
   error occurs on a read cycle for a portion of the required operand ... the
   processor immediately takes a bus error exception. If the read cycle in error
   is made only to fill the data cache ... no exception occurs, but the
   corresponding entry is marked invalid." So the frame describes the operand --
-  its residual, its size, its space -- and never the line.
-- **A rerun recomputes cacheability.** CIIN, the page's CI bit and the CACR are
-  sampled again by the rerun, as they are for any access.
+  its residual, its size, its space -- and never the line. The cycles that
+  complete an entry from a narrow port carry none of the operand: they never
+  move `op_addr` or `op_rem`, and a bus error on one is not a fault.
+- **An operand half served by the cache faults as a whole one.** A read whose
+  last long word hit stops its bus cycles short of it; its residual still
+  counts those bytes, and the data input buffer holds them. RTE's rerun reads
+  them from the bus with the rest.
+- **A rerun is not cached.** RTE hands the residual back to the bus unit as the
+  frame's operand, not as a new request: it is not looked up and fills nothing.
+  The next read of the same data is an ordinary one, cached or not as CACR, CDIS
+  and CIIN say then.
 
 ### The burst
 
@@ -378,14 +389,13 @@ RTE accepts these six and no other: anything else is a format error, and so is a
 | `+$08` | 12:10 | `irqlvl` | the level of the interrupt being taken |
 | `+$52` | 15:0 | `rmwupc` | the micro-address the read-modify-write under way starts again at |
 
-**492 bits available, 369 used, 48 reserved, 4 words spare** (`+$54`, `+$56`, `+$58`, `+$5A`).
+**492 bits available, 369 used, 32 reserved, 5 words spare** (`+$50`, `+$54`, `+$56`, `+$58`, `+$5A`).
 
 ### Reserved for the milestones still to come
 
 | Offset | Words | For | What |
 |---|--:|---|---|
 | `+$4C` | 2 | M11 | MMU instruction state that has to outlive a posted write's fault -- PTEST, PLOAD, PFLUSH, PMOVE -- should one need more than T0-T3 and the extension word |
-| `+$50` | 1 | M10 | the faulted operand's cache disposition, should an RTE rerun need to know how the first attempt left the data cache |
 
 ### The frozen set
 
@@ -445,7 +455,7 @@ RTE accepts these six and no other: anything else is a format error, and so is a
 | CACR, CAAR | architectural |
 | TC, CRP, SRP, TT0, TT1, MMUSR (M11) | architectural. PMOVE writes them on the microword that completes it, and a faulted one commits nothing (rule 2) |
 | the instruction cache | a cache. What it holds is a copy of memory, and a fault neither needs it nor disturbs it |
-| the data cache (M10) | a cache, write-through. A faulted write has already updated it -- UM 6.1.2, "the cache contains the new value even if the external write terminates in a bus error" -- and RTE's rerun writes the same bytes again, so the rerun is idempotent |
+| the data cache | a cache, write-through. A faulted write has already updated it -- UM 6.1.2, "the cache contains the new value even if the external write terminates in a bus error" -- and RTE's rerun writes the same bytes to memory again and leaves the cache alone, so the rerun is idempotent. A faulted read filled nothing it did not complete (doc/caches.md) |
 | the ATC (M11) | a cache of the tables. A table search's descriptor updates (U, M) and its ATC entry stand whether or not the access then faults -- UM 9.5.2 -- and a rerun searches again if the entry has gone |
 | a table search in progress (M11) | never interrupted. It runs with RMC asserted throughout (UM 9.5.2), a bus error ends it with the B bit and no exception, and the exception is taken on the retry of the access -- so no frame is ever built in the middle of one |
 
@@ -658,9 +668,15 @@ the MC68030's, written now for the milestones that will need them.
 
 12. **A cache is never checkpointed (M10).** Neither the data cache nor the ATC
     nor the instruction cache holds the only copy of anything, so a fault leaves
-    them as they are and RTE puts nothing back. A rerun recomputes cacheability,
-    burst and CIOUT from the pins and the tables, as any access does. A fault
-    frame describes an operand and never a cache line.
+    them as they are and RTE puts nothing back. A fault frame describes an
+    operand and never a cache line, and the frame word reserved for a "cache
+    disposition" (`+$50`) is released: no rerun needs one. RTE's rerun of a
+    faulted operand goes to the bus whatever the caches hold and fills neither;
+    a rerun prefetch is an ordinary one, and recomputes cacheability, burst and
+    CIOUT from CACR, the pins and (M11) the tables, as any access does. The
+    caches' own registers -- tags, valid bits, a long word being gathered from a
+    narrow port, a write about to be applied -- are cycle-level, in `EXEMPT`
+    with their reasons.
 
 13. **The internal bits of the special status word stay zero** until a milestone
     takes them, and one that does may use them only in the long frame -- the
