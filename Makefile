@@ -48,6 +48,8 @@ SRCS := rtl/rd68031_sync.sv \
         rtl/rd68031_icache.sv \
         rtl/rd68031_dcache.sv \
         rtl/rd68031_ifu.sv \
+        rtl/rd68031_mmu_xl.sv \
+        rtl/rd68031_mmu.sv \
         rtl/rd68031_seq.sv \
         rtl/rd68031_top.sv
 
@@ -226,6 +228,16 @@ $(COW).hex: sim/programs/cow.S sim/programs/flat.ld
 	    $(COW).o 2> $(COW).link.log || { cat $(COW).link.log; exit 1; }
 	@$(CROSS)objcopy -O verilog --verilog-data-width=1 $(COW).elf $@
 
+# core_mmu_cow_tb runs the same program built for the MC68030's own MMU: the
+# kernel protects and maps the pages with translation tables (doc/mmu.md).
+COWMMU := build/programs/cow_mmu
+$(COWMMU).hex: sim/programs/cow.S sim/programs/flat.ld
+	@mkdir -p build/programs
+	@$(CROSS)gcc -mcpu=68030 -DCOW_MMU -c -o $(COWMMU).o sim/programs/cow.S
+	@$(CROSS)gcc -nostdlib -nostartfiles -T sim/programs/flat.ld -o $(COWMMU).elf \
+	    $(COWMMU).o 2> $(COWMMU).link.log || { cat $(COWMMU).link.log; exit 1; }
+	@$(CROSS)objcopy -O verilog --verilog-data-width=1 $(COWMMU).elf $@
+
 # core_m030_tb runs three images on two buses: the MC68030 smoke program, which
 # owns its vectors like cow.S and is assembled for the MC68030 so that the MMU
 # instructions are the assembler's own encodings, and two of the programs
@@ -248,11 +260,25 @@ $(CACHEP).hex: sim/programs/cache.S sim/programs/flat.ld
 	    $(CACHEP).o 2> $(CACHEP).link.log || { cat $(CACHEP).link.log; exit 1; }
 	@$(CROSS)objcopy -O verilog --verilog-data-width=1 $(CACHEP).elf $@
 
+# core_mmu_tb runs sim/programs/mmu_*.S: bare-metal programs that set up
+# translation tables and check themselves, linked with sim/programs/mmu.ld so
+# that their tables and the pages they map are at fixed physical addresses.
+# -mcpu=68030 for the MMU instructions. Fixed paths, as for COW.
+MMUPROGS := mmu_regs mmu_walk mmu_fault
+MMUHEX   := $(patsubst %,build/programs/%.hex,$(MMUPROGS))
+build/programs/mmu_%.hex: sim/programs/mmu_%.S sim/programs/mmu_common.inc sim/programs/mmu.ld
+	@mkdir -p build/programs
+	@$(CROSS)gcc -mcpu=68030 -Isim/programs -c -o build/programs/mmu_$*.o $<
+	@$(CROSS)gcc -nostdlib -nostartfiles -T sim/programs/mmu.ld \
+	    -o build/programs/mmu_$*.elf build/programs/mmu_$*.o \
+	    2> build/programs/mmu_$*.link.log || { cat build/programs/mmu_$*.link.log; exit 1; }
+	@$(CROSS)objcopy -O verilog --verilog-data-width=1 build/programs/mmu_$*.elf $@
+
 sim-progs:
 	@$(MAKE) --no-print-directory BUILD=build build/programs/arith.hex \
 	    build/programs/corners.hex
 
-sim: dirs $(COW).hex $(M030).hex $(CACHEP).hex sim-progs
+sim: dirs $(COW).hex $(COWMMU).hex $(M030).hex $(CACHEP).hex $(MMUHEX) sim-progs
 	@ok=1; for tb in $(TBS); do \
 	  iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/$$tb.vvp -s $$tb \
 	      $(RTL) sim/models/*.sv sim/tb/$$tb.sv > $(BUILD)/$$tb.build.log 2>&1 \

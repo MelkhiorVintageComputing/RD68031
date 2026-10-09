@@ -12,8 +12,12 @@
 |                       illegal instruction, vector 4 (UM 8.1.5), in either mode.
 |   PMOVE, PFLUSH(A),   the MMU instructions, F-line with CpID 0. Privileged
 |   PTEST, PLOAD        (UM 8.1.6): in user mode a privilege violation, vector
-|                       8. In supervisor mode they are M11's; until then each is
-|                       an F-line exception, vector 11 (doc/divergences.md).
+|                       8. In supervisor mode they run -- with translation
+|                       disabled here, so they change nothing that matters; a
+|                       command word the part does not define (a Dn operand,
+|                       an MC68851 register, PTEST level 0 with an address
+|                       register, PFLUSHA with an <ea>) is an F-line exception,
+|                       vector 11 (UM 8.1.5). core_mmu_tb tests what they do.
 |   CpID 0, not MMU     "unimplemented F-line" -- F-line in supervisor mode,
 |                       privilege violation in user mode (UM 9.8, 8.1.5).
 |   CpID 1              a coprocessor instruction, and never the MMU's: with
@@ -75,6 +79,8 @@ s_rtm_a:
 s_rtm_d:
         .short  0x06C0                  | RTM D0
 
+        | Each runs: TC is zero after reset, so writing it back changes nothing,
+        | and the searches find CRP's descriptor type zero -- invalid.
         moveq   #4, %d7
 s_pmove_rd:
         pmove   %tc, (%a0)
@@ -101,6 +107,18 @@ s_pload:
         moveq   #6, %d7
 s_pload_abs:
         ploadw  %sfc, (0x1234).w
+        | ... and what the MC68030 does not define, F-line -- UM 8.1.5.
+        moveq   #4, %d7
+s_mmu_dn:
+        .short  0xF000, 0x4200          | PMOVE TC,D0: no Dn operand (PRM 6)
+s_mmu_drp:
+        .short  0xF010, 0x4600          | PMOVE DRP,(A0): an MC68851 register
+s_mmu_pt0a:
+        .short  0xF010, 0x8110          | PTEST #0 with an address register
+s_mmu_flea:
+        .short  0xF010, 0x2400          | PFLUSHA (A0): no <ea> for PFLUSHA
+s_mmu_srfd:
+        .short  0xF010, 0x6100          | PMOVE (A0),MMUSR with FD set
         moveq   #2, %d7
 s_cp0_t1:
         .short  0xF040                  | CpID 0, type 001: the MC68851's PScc
@@ -224,18 +242,11 @@ expect:
         exp     ILLEGAL, SUP, s_callm
         exp     ILLEGAL, SUP, s_rtm_a
         exp     ILLEGAL, SUP, s_rtm_d
-        exp     LINEF,   SUP, s_pmove_rd
-        exp     LINEF,   SUP, s_pmove_wr
-        exp     LINEF,   SUP, s_pmove_crp
-        exp     LINEF,   SUP, s_pmove_sr
-        exp     LINEF,   SUP, s_pmove_tt
-        exp     LINEF,   SUP, s_pflusha
-        exp     LINEF,   SUP, s_pflush_fc
-        exp     LINEF,   SUP, s_pflush_ea
-        exp     LINEF,   SUP, s_ptest
-        exp     LINEF,   SUP, s_ptestw
-        exp     LINEF,   SUP, s_pload
-        exp     LINEF,   SUP, s_pload_abs
+        exp     LINEF,   SUP, s_mmu_dn
+        exp     LINEF,   SUP, s_mmu_drp
+        exp     LINEF,   SUP, s_mmu_pt0a
+        exp     LINEF,   SUP, s_mmu_flea
+        exp     LINEF,   SUP, s_mmu_srfd
         exp     LINEF,   SUP, s_cp0_t1
         exp     LINEF,   SUP, s_cp0_t7
         exp     LINEF,   SUP, s_cp0_ea

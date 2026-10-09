@@ -20,10 +20,22 @@
 // every one is checked against UM Table 8-6, figure 8-9 and 8.1.13. Every shape of write the program makes has to land exactly once,
 // with every other effect of its instruction exactly once, after the kernel's
 // handler has been through the processor's internal state.
+//
+// core_mmu_cow_tb is this file with COW_MMU defined: the same program built
+// with -DCOW_MMU, which protects the pages with the MC68030's own MMU -- WP in
+// the user's page table, an invalid descriptor for the kernel's page table in
+// the supervisor's -- and maps them with a descriptor write and PFLUSH. The
+// testbench then refuses nothing; it checks instead that no refused access
+// ever reached the bus (UM 9.2.1: the MMU aborts the cycle before AS), and
+// everything else exactly as here.
 
 `timescale 1ns / 1ps
 
+`ifdef COW_MMU
+module core_mmu_cow_tb;
+`else
 module core_cow_tb;
+`endif
 
 `include "rd68031_core_harness.svh"
 
@@ -40,6 +52,8 @@ module core_cow_tb;
   logic [31:0] prot;             // one bit per 256-byte page, $4000-$5FFF
   logic        kprot;            // the kernel's page table, until it maps it
   int unsigned berrs;            // bus errors the MMU raised
+  int unsigned leaks;            // refused accesses that reached the bus
+  string       tbname;
   int unsigned unprotects;
   int unsigned user_on_sstack;
   logic [15:0] got_w;
@@ -55,11 +69,18 @@ module core_cow_tb;
 
   // ... and a supervisor-data read of the kernel's page table, until the kernel
   // maps it: the first handler faults inside itself.
-  always @(*) berr_force = rst_n && as_oe && !as_n_o
-                           && (refused(a_o, fc_o, rw_o, rmc_oe && !rmc_n_o)
-                               || (kprot && rw_o && fc_o == 3'd5
-                                   && (a_o & 32'hFFFF_FF00) == PTABLE));
+  wire bus_refused = rst_n && as_oe && !as_n_o
+                     && (refused(a_o, fc_o, rw_o, rmc_oe && !rmc_n_o)
+                         || (kprot && rw_o && fc_o == 3'd5
+                             && (a_o & 32'hFFFF_FF00) == PTABLE));
+`ifdef COW_MMU
+  // The MMU in the core refuses these before the cycle starts; the harness
+  // leaves berr_force negated.
+  always @(posedge bus_refused) leaks = leaks + 1;
+`else
+  always @(*) berr_force = bus_refused;
   always @(posedge berr_force) berrs = berrs + 1;
+`endif
 
   // The page table: a supervisor write of a page's address maps it writable.
   always @(negedge ds_n_o)
@@ -99,17 +120,28 @@ module core_cow_tb;
   endtask
 
   initial begin
-    $display("core_cow_tb: copy-on-write faults in user mode, handled, and restarted");
+`ifdef COW_MMU
+    tbname = "core_mmu_cow_tb";
+    if (!$value$plusargs("image=%s", image)) image = "build/programs/cow_mmu.hex";
+`else
+    tbname = "core_cow_tb";
     if (!$value$plusargs("image=%s", image)) image = "build/programs/cow.hex";
+`endif
+    $display("%s: copy-on-write faults in user mode, handled, and restarted", tbname);
     for (n = 0; n < 65536; n = n + 1) s32.mem[n] = 8'h00;
     $readmemh(image, s32.mem);
 
     prot           = 32'hFFFF_FFFF;
     kprot          = 1'b1;
     berrs          = 0;
+    leaks          = 0;
     unprotects     = 0;
     user_on_sstack = 0;
+`ifdef COW_MMU
+    wr_protect     = 1'b0;
+`else
     wr_protect     = 1'b1;
+`endif
 
     want_fault( 0, 32'h0000_4010, 2'b00, "MOVE.L D1,(A0)");
     // The first handler's own page-table read: a supervisor data read, DF set,
@@ -153,8 +185,8 @@ module core_cow_tb;
       @(negedge clk);
       n = n + 1;
     end
-    $display("core_cow_tb: %0d clocks, %0d bus errors, %0d pages mapped", n, berrs,
-             unprotects);
+    $display("%s: %0d clocks, %0d bus errors from the testbench, %0d refused accesses on the bus, %0d pages mapped",
+             tbname, n, berrs, leaks, unprotects);
 
     // ------------------------------------------------------------------
     // It finished, in the privilege violation handler: still a user program.
@@ -173,8 +205,12 @@ module core_cow_tb;
     // ------------------------------------------------------------------
     check(peek_l(KVARS) === NFAULT, $sformatf("the kernel took %0d faults, want %0d",
                                               peek_l(KVARS), NFAULT));
+`ifdef COW_MMU
+    check(leaks == 0, $sformatf("%0d refused accesses reached the bus -- UM 9.2.1", leaks));
+`else
     check(berrs == NFAULT, $sformatf("the MMU refused %0d accesses, want %0d",
                                      berrs, NFAULT));
+`endif
     for (n = 0; n < NFAULT; n = n + 1) begin
       logic [31:0] a;
       logic [15:0] ssw, sr, fmt, ver;
@@ -266,9 +302,9 @@ module core_cow_tb;
 
     if (pipe_fails != 0)
       $display("  FAIL: the pipe invariant broke %0d times", pipe_fails);
-    $display("core_cow_tb: %0d checks, %0d failed", checks, fails);
-    if (fails == 0 && pipe_fails == 0) $display("PASS: core_cow_tb");
-    else                               $display("FAIL: core_cow_tb");
+    $display("%s: %0d checks, %0d failed", tbname, checks, fails);
+    if (fails == 0 && pipe_fails == 0) $display("PASS: %s", tbname);
+    else                               $display("FAIL: %s", tbname);
     $finish;
   end
 

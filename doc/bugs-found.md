@@ -895,3 +895,31 @@ turns that off for a device that cannot, which must then assert CIIN.
 **Stops it coming back:** `core_cache_tb` reads bytes and words from all three
 port widths and checks the values that come back from the cache afterwards;
 `core_m030_tb` runs three programs with the data cache on over a 16-bit port.
+
+---
+
+## M11 · The table walker wrote U into indirect descriptors
+
+**What:** the walker treated every table-type descriptor the same way: WP and S
+accrued from it, and U written back if it was clear -- which is what figure
+9-29 draws, because figure 9-25 only decides after the fetch that a table-type
+descriptor at the bottom of the tree is an indirect one. But a short indirect
+descriptor has no status bits: figure 9-17 gives bits 31-2 to the descriptor
+address. Setting "U" set address bit 3, so after the first search the indirect
+descriptor pointed eight bytes further on, at some other page descriptor; and
+"WP" was address bit 2, so an indirect descriptor pointing at a descriptor
+whose address had bit 2 set write-protected the page it mapped.
+
+**Found by:** `core_mmu_tb`'s first run of `sim/programs/mmu_walk.S`: PTEST at
+level 7 through the indirect descriptor returned the descriptor address $9E88
+for $9E80, and PTEST through one pointing at $9E84 reported W.
+
+**Fixed by:** `d_ind` in `rd68031_mmu`: a table-type descriptor at the last level
+accrues nothing and is never written. The contradiction between figure 9-29
+and figures 9-17/9-18 is `doc/manual-contradictions.md` 21.
+
+**Stops it coming back:** `mmu_walk.S` phases 18-21 check both indirect
+descriptors unchanged after the search, the address PTEST returns, and the
+MMUSR of an indirect descriptor pointing at a table descriptor -- I and three
+tables, no W; `core_mmu_tb` counts two history writes, not three, for each
+indirect search.

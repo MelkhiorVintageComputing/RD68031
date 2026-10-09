@@ -235,9 +235,14 @@ INTERNAL = [
 # check() keeps reservations off every allocated bit.
 # --------------------------------------------------------------------------
 RESERVED = [
-    (0x4C, 2, 'M11', 'MMU instruction state that has to outlive a posted '
-                     "write's fault -- PTEST, PLOAD, PFLUSH, PMOVE -- should "
-                     'one need more than T0-T3 and the extension word'),
+    # M11's two words, +$4C -- "MMU instruction state that has to outlive a
+    # posted write's fault -- PTEST, PLOAD, PFLUSH, PMOVE -- should one need
+    # more than T0-T3 and the extension word" -- are released. PMOVE holds its
+    # operand in T0 and T1 and writes the register on a microword that can take
+    # no fault; PTEST and PLOAD wait for posted writes before their search
+    # starts, so none can land while it runs; PTEST's descriptor address is
+    # written to An by the microword after, which can take no fault either; and
+    # the walker is the hardware's, never the frame's (rule 11, doc/mmu.md).
     # M8-M9's word, +$52, became `rmwupc` above.
     # M10's word, +$50 -- "the faulted operand's cache disposition, should an
     # RTE rerun need to know how the first attempt left the data cache" -- is
@@ -566,10 +571,28 @@ EXEMPT = [
     ('biu', 'beat_q',       'how many long words this cycle has latched'),
     ('biu', 'cyc_brq',      'CBREQ is asserted for the cycle now running'),
     ('biu', 'cyc_ciout',    'CIOUT for it'),
+    ('biu', 'cyc_paddr',    'its physical address: the A31-A0 the MMU made of '
+                            'cyc_addr'),
+    ('biu', 'cyc_abt',      'the MMU refused it, and no pin moves'),
     ('biu', 'op_burst',     'the operand now running may ask for a line fill. '
                             'A request, reissued with the request.'),
     ('biu', 'op_brq_used',  '... and has had its CBREQ'),
-    ('biu', 'op_ciout',     'its CIOUT, from the request'),
+    ('biu', 'op_pmask',     'the translation it was taken with: the page '
+                            'offset mask. Recomputed from the ATC and the TTx '
+                            'registers when RTE hands the operand back'),
+    ('biu', 'op_lp1',       '... the logical page of its first byte'),
+    ('biu', 'op_pb1',       '... that page\'s physical base'),
+    ('biu', 'op_pb2',       '... and the next one\'s, if it crosses'),
+    ('biu', 'op_ci1',       '... their cache inhibits'),
+    ('biu', 'op_ci2',       '... likewise'),
+    ('biu', 'op_f2',        '... and whether the second page refused it'),
+    ('biu', 'op_istw',      'the operand is the table walker\'s, which no fault '
+                            'is ever taken on (rule 11)'),
+    ('biu', 'tw_ack',       'a walker operand has finished: lives one clock'),
+    ('biu', 'tw_berr',      '... with a bus error, which ends the search with B'),
+    ('biu', 'tw_rdata',     '... and what it read'),
+    ('biu', 'fetch_ci',     'the MMU inhibited caching the prefetch just '
+                            'answered: reported with it'),
     ('biu', 'op_ciin',      'CIIN seen on one of its cycles so far'),
     ('biu', 'req_ciin',     '... reported with the acknowledge, for one operand'),
     ('biu', 'fetch_ciin',   '... and for the prefetch'),
@@ -674,6 +697,68 @@ EXEMPT = [
                             'so nothing can fault inside one: the microword that '
                             'reads the pipe comes after it.'),
     ('seq', 'div_fin_q',    'likewise'),
+    ('seq', 'mmu_go_q',     'PTEST or PLOAD has started its search. The '
+                            'microword waits for posted writes first and makes '
+                            'no bus request of its own, so nothing can fault '
+                            'while the search runs -- rule 11'),
+    ('seq', 'mmu_fin_q',    '... and it is over'),
+
+    # The MMU -- doc/mmu.md. Its registers are architectural, its ATC a cache,
+    # and its walker is never interrupted (rule 11).
+    ('mmu', 'tc_q',         'architectural'),
+    ('mmu', 'crp_q',        'architectural'),
+    ('mmu', 'srp_q',        'architectural'),
+    ('mmu', 'tt0_q',        'architectural'),
+    ('mmu', 'tt1_q',        'architectural'),
+    ('mmu', 'mmusr_q',      'architectural'),
+    ('mmu', 'v_q',          'the ATC: a cache of the tables. A fault leaves it '
+                            'as it is and RTE has nothing to put back -- a rerun '
+                            'searches again if the entry has gone (rule 12)'),
+    ('mmu', 'h_q',          '... its replacement history'),
+    ('mmu', 'tag_q',        '... its tags'),
+    ('mmu', 'dat_q',        '... and its translations'),
+    ('mmu', 'ptest_da',     'the last descriptor PTEST fetched, for An. Written '
+                            'into An by the microword after the search, which '
+                            'can take no fault'),
+    ('mmu', 'done_q',       'PTEST or PLOAD is done: lives one clock'),
+    ('mmu', 'sts_q',        'a search for an access begins, for STATUS'),
+    ('mmu', 'w_st',         'the table walker. A search is never checkpointed '
+                            'and never interrupted: it starts after any posted '
+                            'write has finished, and a bus error ends it with B '
+                            'and no exception -- rule 11'),
+    ('mmu', 'w_ret',        '... where it goes after a history write'),
+    ('mmu', 'w_kind',       '... what it is for'),
+    ('mmu', 'w_la',         '... the logical address'),
+    ('mmu', 'w_fc',         '... its space'),
+    ('mmu', 'w_rw',         '... PTEST\'s R/W'),
+    ('mmu', 'w_wr',         '... a write, for the M bit'),
+    ('mmu', 'w_lvl',        '... PTEST\'s level'),
+    ('mmu', 'w_x',          '... the level it has reached'),
+    ('mmu', 'w_pos',        '... the logical address bits it has used'),
+    ('mmu', 'w_ta',         '... the table base'),
+    ('mmu', 'w_dt',         '... its descriptor size'),
+    ('mmu', 'w_limv',       '... whether a limit applies'),
+    ('mmu', 'w_lu',         '... lower or upper'),
+    ('mmu', 'w_lim',        '... and what it is'),
+    ('mmu', 'w_wp',         '... the accrued WP -- figure 9-26'),
+    ('mmu', 'w_s',          '... S'),
+    ('mmu', 'w_ci',         '... CI'),
+    ('mmu', 'w_m',          '... M'),
+    ('mmu', 'w_n',          '... tables accessed'),
+    ('mmu', 'w_d0',         '... the descriptor'),
+    ('mmu', 'w_d1',         '... its second long word'),
+    ('mmu', 'w_daddr',      '... its address'),
+    ('mmu', 'w_lastda',     '... the last one fetched whole'),
+    ('mmu', 'w_inval',      '... how it ended: an invalid descriptor'),
+    ('mmu', 'w_limx',       '... a limit violation'),
+    ('mmu', 'w_berr',       '... a bus error'),
+    ('mmu', 'w_indir',      '... the fetch is an indirect one'),
+    ('mmu', 'w_ebase',      '... an early termination\'s page address'),
+    ('mmu', 'w_pfa',        '... the page frame address'),
+    ('mmu', 'w_pend',       '... its bus operand is outstanding'),
+    ('mmu', 'w_raddr',      '... at this address'),
+    ('mmu', 'w_rdat',       '... with this data'),
+    ('mmu', 'w_rwr',        '... and this direction'),
 
     # The divider's own working state, for the same reason.
     ('divider', 'acc',      'the running remainder'),
@@ -703,7 +788,7 @@ NOT_CHECKPOINTED = [
                       "these the S and M bits select"),
     ('VBR, SFC, DFC', 'architectural'),
     ('CACR, CAAR', 'architectural'),
-    ('TC, CRP, SRP, TT0, TT1, MMUSR (M11)', 'architectural. PMOVE writes them '
+    ('TC, CRP, SRP, TT0, TT1, MMUSR', 'architectural. PMOVE writes them '
                       'on the microword that completes it, and a faulted one '
                       'commits nothing (rule 2)'),
     ('the instruction cache', 'a cache. What it holds is a copy of memory, and a '
@@ -715,11 +800,11 @@ NOT_CHECKPOINTED = [
                        'bytes to memory again and leaves the cache alone, so '
                        'the rerun is idempotent. A faulted read filled nothing '
                        'it did not complete (doc/caches.md)'),
-    ('the ATC (M11)', 'a cache of the tables. A table search\'s descriptor '
+    ('the ATC', 'a cache of the tables. A table search\'s descriptor '
                       'updates (U, M) and its ATC entry stand whether or not the '
                       'access then faults -- UM 9.5.2 -- and a rerun searches '
                       'again if the entry has gone'),
-    ('a table search in progress (M11)', 'never interrupted. It runs with RMC '
+    ('a table search in progress', 'never interrupted. It runs with RMC '
                       'asserted throughout (UM 9.5.2), a bus error ends it with '
                       'the B bit and no exception, and the exception is taken '
                       'on the retry of the access -- so no frame is ever built '
@@ -896,7 +981,7 @@ def check():
 # --------------------------------------------------------------------------
 # The check that reads the RTL
 # --------------------------------------------------------------------------
-_MODULES = ('ifu', 'icache', 'dcache', 'biu', 'seq', 'divider', 'shifter', 'sync', 'dedge_ff', 'top')
+_MODULES = ('ifu', 'icache', 'dcache', 'biu', 'seq', 'mmu', 'divider', 'shifter', 'sync', 'dedge_ff', 'top')
 
 
 def _unparen(text):

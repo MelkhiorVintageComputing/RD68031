@@ -9,8 +9,9 @@ and the address bus is 32 bits.
 top level and is driven or sampled as described; `doc/bus-timing-compliance.md` has the
 behaviour state by state. The rows marked *new* are the MC68030's additions, and
 *changed* marks a pin that behaves differently from the MC68020's. MMUDIS is synchronised
-and goes to a sink until the MMU of M11; CIOUT is driven from the request, negated by
-every requester until M11, which drives it with the caches' inhibit (`doc/caches.md`);
+and disables the MMU's translation (`doc/mmu.md`); CIOUT is driven from the CI bit of the
+ATC entry or TTx register that translated the cycle, and negated for CPU space, for
+untranslated accesses and for table searches (`doc/mmu.md`, `doc/caches.md`);
 CBREQ is asserted for a request that allows a line fill, which since M10 both caches
 make (§6.1.3.2). M2 settled the output-enable groups against §7 and Table 5-2 (below).
 
@@ -84,7 +85,7 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET)
 | Port | Dir | Notes |
 |---|---|---|
 | `ciin_n_i` | in | Cache inhibit in: the data of this cycle is not loaded into either cache, and a burst it arrives in ends (§6.1.3.2). Interpreted cycle by cycle, ignored on writes -- with WA set, a write still allocates (§5.7.1, §6.1.2.1). |
-| `ciout_n_o`, `ciout_oe` | out | Cache inhibit out: the CI bit of the ATC entry or of the matching TTx register, for external caches (§5.7.2). |
+| `ciout_n_o`, `ciout_oe` | out | Cache inhibit out: the CI bit of the ATC entry or of the matching TTx registers (ORed), for external caches (§5.7.2, §9.3). Valid from S0 with the address; negated for CPU space, for an access no TTx matches while translation is disabled, and for every table search cycle (§12.1, "the MC68030 asserts RMC but not CIOUT"). |
 | `cbreq_n_o`, `cbreq_oe` | out | Cache burst request: this cycle may be extended into a burst that fills a cache line (§5.7.3, §7.3.7). |
 | `cback_n_i` | in | Cache burst acknowledge: the device can supply at least one more longword in burst mode (§5.7.4). |
 
@@ -118,7 +119,7 @@ assign pad = core_oe ? 1'b0 : 1'bz;     // open-drain pin (RESET)
 | Port | Dir | Notes |
 |---|---|---|
 | `cdis_n_i` | in | Dynamically disables **both** on-chip caches, whatever CACR says: no lookup, no fill, no burst request. It does not flush them: the entries come back when CDIS is negated (§5.11.1, §6.1). Synchronised internally, so it takes effect two falling edges after it is asserted. |
-| `mmudis_n_i` | in | *New.* Dynamically disables address translation. It does not flush the ATC (§5.11.2). Synchronised internally. |
+| `mmudis_n_i` | in | *New.* Dynamically disables address translation: no ATC lookup and no table search for an access, every logical address its physical one; TT0 and TT1 still apply, PTEST and PLOAD still work, and the ATC is not flushed (§5.11.2, §9.2.3, §9.7.3). An operand already started finishes with the translation it started with (§9.2.3). Synchronised internally, so it takes effect two falling edges after it is asserted. |
 | `refill_n_o` | out | *New.* The instruction pipeline is starting to refill (§5.11.3, §12). Never three-stated. |
 | `status_n_o` | out | *New.* Microsequencer status: the number of clocks it is asserted for distinguishes an instruction boundary, a pending exception and the halted state (§5.11.4, §12). Never three-stated. |
 

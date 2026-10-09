@@ -121,27 +121,27 @@ level when the bus unit got round to it. A flush that changes the privilege
 level abandons any prefetch in flight, and that long word, read in the old
 space, is cached under the old space's FC2 -- which is where it belongs.
 
-### The MMU hook, for M11
+### The MMU -- since M11
 
 The MMU's CI bit -- of the ATC entry or the TTx register that maps the access --
 drives CIOUT and inhibits both caches: "whenever the appropriate CI bit is set
 for either a read or a write access and an external bus cycle is required,
 CIOUT is asserted and the instruction and data caches are ignored for the
-access" (6.1). Each cache has a per-access input for it, tied to zero in
-`rd68031_top` until M11 drives it with `req_ciout` and `fetch_ciout`:
+access" (6.1). The bus unit translates every cycle it starts (`doc/mmu.md`),
+drives CIOUT from the translation, and tells each cache:
 
-| Input | Effect | UM |
-|---|---|---|
-| `ic_inhibit` (`rd68031_ifu`) | the prefetch about to be asked for is not cached and asks for no burst | 6.1 |
-| `dc_inhibit` (`rd68031_dcache`) | a read that misses is not cached and asks for no burst; a write ignores the data cache altogether, a hit included | 6.1, 6.1.2.1: "when CIOUT is asserted, the data cache is completely ignored, even on write cycles" |
-| either | a read that HITS is served whatever it says | 6.1: "the MMU is completely ignored ... the state of the corresponding CI bits in the MMU are also ignored" |
+| Input | When | Effect | UM |
+|---|---|---|---|
+| `ic_inhibit` (`rd68031_ifu`) | with the prefetch's answer: the prefetch is translated when the bus unit starts it, after the fetch unit asked for it, so the verdict comes back with the long word, as CIIN does | the long word is not cached; the bus unit has already withheld CBREQ | 6.1 |
+| `dc_inhibit` (`rd68031_dcache`) | with the request: the CI of the page the operand's bus cycles start in, looked up combinationally as the request is presented | a read that misses is not cached and asks for no burst; a write ignores the data cache altogether, a hit included | 6.1, 6.1.2.1: "when CIOUT is asserted, the data cache is completely ignored, even on write cycles" |
+| either | -- | a read that HITS is served whatever it says, and is never translated | 6.1: "the MMU is completely ignored ... the state of the corresponding CI bits in the MMU are also ignored"; figure 9-8 |
 
-It is sampled with the request, so M11 has to have the translation's CI bit
-when the request is presented -- which is when the data cache decides whether
-the operand needs the bus at all, and when the BIU latches CIOUT. A write the
-MMU refuses "is aborted, the corresponding entry is invalidated, and a bus error
-exception is taken" (6.1.2); that invalidation is M11's, on the same port CED
-uses.
+A write the MMU refuses "is aborted, the corresponding entry is invalidated, and
+a bus error exception is taken" (6.1.2). The cache takes a write when the bus
+unit takes it, which for an operand refused in its second page is before the
+refusal: the bus unit then invalidates the entries holding the refused bytes
+(`inv_*`, as the refusal ends), so the cache is never left holding bytes memory
+did not get. `core_mmu_tb` checks it (`mmu_fault.S`, case 11).
 
 ---
 

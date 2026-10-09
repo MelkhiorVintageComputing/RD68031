@@ -758,6 +758,8 @@ COND_READS = {
     'T1GE4': 'T1', 'T1B1': 'T1', 'T1B0': 'T1', 'T1ZERO': 'T1',
     'FWNOTRDY': 'T0', 'FWEMPTY': 'T0', 'FWBAD': 'T0', 'FWLEN': 'T0',
     'CREGBAD': 'XW', 'IRQPEND': 'SR',
+    'MMUPTEST': 'XW', 'MMUPLFL': 'XW', 'MMUSRG': 'XW', 'MMUQUAD': 'XW',
+    'XW12': 'XW', 'XW9': 'XW', 'XW8': 'XW', 'MMUCFG': 'XW',
 }
 
 # ... and the ones that read the CONDITION CODES, which a microword writes
@@ -1059,8 +1061,8 @@ def check_shift_src():
 # write to it, on any path to the end of the instruction, is the bug.
 EA_SCRATCH = ('T2', 'T3', 'XW')
 XW_SOURCES = ('XW', 'XW_HI', 'DREG_XQ', 'DREG_XR', 'DREG_XU', 'XREG',
-              'XWDISP8', 'INDEX')
-XW_DESTS = ('XREG', 'XREG_SZ', 'DREG_XR', 'DREG_XQ', 'DREG_XU')
+              'XWDISP8', 'INDEX', 'MMUHI', 'MMULO')
+XW_DESTS = ('XREG', 'XREG_SZ', 'DREG_XR', 'DREG_XQ', 'DREG_XU', 'PTEST_AN')
 
 
 def _ea_reads(f):
@@ -1091,6 +1093,11 @@ def _ea_reads(f):
         r.add('XW')
     if f.get('mdop', 'NONE') == 'DIV':
         r.update(('T2', 'T3'))
+    # Every MMU command reads the command word: the register a PMOVE names,
+    # and the function code, mask and level of the others (rd68031_seq,
+    # rd68031_mmu).
+    if f.get('mmu', 'NONE') != 'NONE':
+        r.add('XW')
     if f.get('ccr', '') == 'BFINS' or any(
             f.get(k, '').startswith('BF_MERGED') for k in ('asrc', 'bsrc')):
         r.add('T3')

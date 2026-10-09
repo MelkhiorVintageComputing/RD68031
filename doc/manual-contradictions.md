@@ -259,6 +259,23 @@ PLOADW FC,<ea>; and PMOVE and PMOVEFD -- the forms the assembler produces for
 `-mcpu=68030`, and the encodings `mmu_op` accepts. Table 3-14's PLOAD and PMOVE
 rows agree with section 9.
 
+**Settled at M11, with the operands.** Section 3's tables and the MC68851's PMOVE
+admit register operands; PRM 6's MC68030 pages give PMOVE, PTEST, PLOAD and
+PFLUSH FC,MASK,<ea> one addressing-mode table each, every one "control
+alterable", with Dn and An marked "--" -- and UM 9.6 lists "only
+control-alterable addressing modes supported for MMU instructions" among the
+MC68030's differences from the MC68851, adding that the MC68851's other modes
+"must be simulated or avoided". So a Dn, An, (An)+, -(An), PC-relative or
+immediate operand is an MMU instruction the part does not define: the decoder
+sends those operation words to `cp0_unimp`, and the one with no effective
+address field at all, $F000, is accepted only with PFLUSHA's and PFLUSH
+FC,MASK's command words (`MMUBADC`, `rd68031_seq`; `doc/mmu.md`). In supervisor
+mode that is the F-line exception of UM 8.1.5, in user mode the privilege
+violation of entry 13. `core_m030_tb` checks PMOVE TC,D0 among five such words.
+GNU as does not hold to the table: it encodes `pmove label,%srp` with a `.text`
+label as (d16,PC), which is not one of the modes and takes the F-line exception
+here, so the test programs address every operand through an address register.
+
 ---
 
 ## 13. Which exception a CpID-0 word takes in user mode
@@ -419,3 +436,158 @@ previously valid entry; whereas, a misaligned data write or a write of data that
 is not long word may invalidate a previously valid entry or entries" -- the
 entries it writes. `rtl/rd68031_dcache.sv` does that, and `core_cache_tb` checks
 all five examples, and the byte writes, in both WA modes.
+
+---
+
+## 19. Whether a read-modify-write cycle that misses in the ATC is searched
+
+**Followed: UM 9.2.1, figure 9-8 and 8.1.2 -- every ATC miss is searched, an
+RMW cycle's included.**
+
+UM 9.2.1 step 4: "When no on-chip cache hit occurs (on a read) and no TTx
+register matches or valid ATC entry matches, initiate a table search
+operation"; figure 9-8 draws "WRITE OR RMW ACCESS" down the same ATC-miss arc
+into "TABLE SEARCH OPERATION"; UM 8.1.2: "a miss in the ATC causes the processor
+to automatically initiate a table search but does not cause a bus error
+exception unless one of the specific conditions mentioned above is
+encountered".
+
+UM 9.10.3's example bus error handler says otherwise, in a comment on the case
+where PTEST reports nothing: "No MC68030 status bits on. Must be memory
+malfunction or RMW cycle with no ATC entry ... If Stack Frame shows RMW
+instruction (SSW) then ATC did not have descriptor loaded and MC68030 cannot
+search tables to load it. Explicitly load it and allow the task to continue
+normally: PLOAD". That describes a part that takes a bus error on an RMW cycle
+it has no translation for, and leaves the handler to load one.
+
+The general statements are followed: they are three, they are normative, and
+the example is an example. A handler written for the example's behaviour
+still works here -- the bus error it expects simply does not come. Which one
+the part does is for the oracles to say (M11 part 2), and `doc/mmu.md` lists
+it as an open question. `core_mmu_tb` (`mmu_fault.S`, case 6) has a CAS miss
+in the ATC, searched, and fault on write protection.
+
+---
+
+## 20. Which descriptor's limit the search checks
+
+**Followed: UM 9.5.2, 9.5.1.1 and 9.7.1 -- the limit of the last long descriptor
+fetched (or of the root pointer, unless FCL is set) bounds the next index; an
+early termination descriptor's bounds the next index field; and the root
+pointer's, when its DT is 1, is checked "regardless of the state of the FCL
+bit".**
+
+Figure 9-25 sets `y <- 'A'` on entering the level-A search, and figure 9-28's
+limit check begins "y = 'RP' and FCL = 1: limit check not required" -- a test
+that, with y already 'A', can never be true. Read literally the two give no
+rule for the function code descriptor's limit at all. Figure 9-27 sends an
+early termination through the same check with `y` left at the root pointer,
+which with FCL set would skip an early termination descriptor's own limit --
+against 9.5.1.1, "if the descriptor is an early termination page descriptor,
+the limit field is still used as a check on the next index field of the
+logical address". And the TC register's FCL description says "in this case,
+the limit field of CRP or SRP is ignored", while 9.7.1, of a root pointer with
+DT = 1, says "the processor performs a limit check, regardless of the state of
+the FCL bit".
+
+The prose is consistent once the last two are read as general and particular:
+a root pointer's limit is ignored under FCL except when the root pointer is
+itself the page descriptor. That is what `rd68031_mmu`'s walker does, and
+`mmu_walk.S` checks a long table descriptor's limit, an early termination's,
+and the root pointer's upper and lower limits with and without DT = 1.
+
+---
+
+## 21. Whether an indirect descriptor has a U bit, and when U is written
+
+**Followed: figures 9-17 and 9-18 -- an indirect descriptor has no status bits,
+so nothing accrues from it and nothing is written to it; and U is not written
+in a descriptor whose own S bit makes the access a supervisor violation.**
+
+Figure 9-29, "Fetch descriptor and update history", sets U in any descriptor
+of type "4 byte or 8 byte" whose U is clear, and figure 9-25 only decides after
+that fetch that a table-type descriptor at the bottom of the tree is an
+indirect one. Taken literally, the search writes bit 3 of every indirect
+descriptor it reads. But figure 9-17 gives a short indirect descriptor
+"DESCRIPTOR ADDRESS" in bits 31-2 and DT in 1-0, and nothing else: bit 3 is an
+address bit, and "setting U" there moves the pointer eight bytes -- the
+indirect descriptor would point at another page descriptor from then on. Bit 2
+is likewise an address bit, so accruing it as WP would write-protect pages at
+random. Figure 9-18's long indirect descriptor has only an unused first long
+word. So an indirect descriptor is read for its address and nothing else.
+
+The same figure writes U before it accrues S, while 9.5.1.1 says U is set
+"except after a supervisor violation is detected". A violation is detected by
+reading the descriptor whose S bit makes it; this design does not set U in
+that descriptor, nor in any below it, and sets M only "if the table search does
+not encounter a set WP bit or a supervisor violation" (9.5.2).
+
+`mmu_walk.S` checks a short and a long indirect descriptor left untouched, and
+a PLOAD in user space through a supervisor-only table setting no U anywhere.
+RD68031's first walker followed figure 9-29 and corrupted the short indirect
+descriptor exactly as described (`doc/bugs-found.md`, M11).
+
+---
+
+## 22. Which DT code is "valid long" in UM 9.5.3.2
+
+**Followed: UM 9.5.1.1 -- DT = 2 is "valid 4 byte", DT = 3 is "valid 8 byte".**
+
+UM 9.5.3.2, on indirection: "If the DT field contains a 'valid long' ($2) or
+'valid short' ($3) encoding". 9.5.1.1, 9.7.1 and figure 9-25 all give $2 as the
+4-byte, short, descriptor and $3 as the 8-byte, long one, and figures 9-17 and
+9-18 agree. The sentence has the two names swapped; the codes are what the
+walker follows.
+
+---
+
+## 23. What PRM 6 says PMOVE does to TC when the check passes
+
+**Followed: UM 9.7.2 -- a TC that fails the check is written with E cleared and
+the configuration exception is taken; one that passes is written as it is.**
+
+PRM 6, PMOVE: "If the E-bit = 1, consistency checks are performed on the PS and
+TIx fields. If the checks fail, the instruction takes an memory management
+unit configuration exception after moving the operand to the translation
+control register. If the checks pass, the translation control register is
+loaded with the operand and the E-bit is cleared." The last clause cannot be
+right: it would make translation impossible to enable. UM 9.7.2 has it the
+other way round: "If an MMU configuration exception occurs, the TC register is
+updated with the data, and the E bit is cleared." `mmu_regs.S` loads a valid TC
+with E set and reads E back set, and three invalid ones and reads E back
+clear.
+
+---
+
+## 24. Whether PTESTR and PTESTW differ
+
+**Followed: UM 9.8 -- only at level 0, when a TTx register matches with its R/W
+bit not masked.**
+
+PRM 6, PTEST's R/W field: "Specifies simulating a read or write bus cycle (no
+difference for MC68030 MMU)". Its own description, a page earlier: "When the
+level operand is zero, only the transparent translation of either read or
+write accesses causes the operations of the PTESTR and PTESTW to return
+different results", which is UM 9.8's "PTESTR and PTESTW instructions have
+identical results except for PTEST0 when either TTx register matches the
+logical address and the R/W bit of that register is not masked". `mmu_regs.S`
+checks both against TT1 set for reads.
+
+---
+
+## 25. Whether a cache hit can still fault on an invalid translation
+
+**Followed: figure 9-8 -- a read that hits in either cache is served, and the
+MMU is not consulted.**
+
+UM 6.1: "Whenever a read access occurs and the required instruction word or
+data operand is resident in the appropriate on-chip cache (no external bus
+cycle is required), the MMU is completely ignored, unless an invalid
+translation resides in the MMU at that time (see next two paragraphs)." The
+next two paragraphs define "cachable" and tell software to flush the caches
+when a mapping changes -- "otherwise, if on-chip cache entries are valid for
+pages with descriptors in memory marked invalid, processor operation is
+unpredictable" -- and say nothing about a hit faulting. Figure 9-8's second
+branch exits on "INSTRUCTION OR DATA CACHE HIT" before any TTx or ATC test.
+So a hit is served whatever the ATC holds, and keeping the caches coherent
+with the tables is the software's, as the paragraphs say.

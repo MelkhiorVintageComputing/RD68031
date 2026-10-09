@@ -18,8 +18,10 @@ fall-through, and `u()` refuses a field name it does not know.
 
 The instruction set is the MC68030's integer set: every instruction the
 MC68020 has but CALLM and RTM, which are illegal here, and the F-line words with
-CpID 0 going to the MMU's entry, which until M11 takes an F-line exception in
-supervisor mode and a privilege violation in user mode.
+CpID 0, which are the MMU instructions -- PMOVE, PTEST, PLOAD, PFLUSH and
+PFLUSHA (UM 9.8) -- or, when the command word is one the part does not define,
+an F-line exception in supervisor mode; in user mode every one is a privilege
+violation.
 """
 
 import sys
@@ -2855,9 +2857,9 @@ exc_next('exc_divzero',   5, ccr='CLRNZVC')
 # configuration exception. The exception is a post-instruction exception",
 # whose frame carries "the scanPC value (which points to the next
 # instruction)" and "the logical address of the PMOVE instruction": format $2,
-# which is what exc_next builds. The hook M11 jumps to from PMOVE, once the
-# MMU's registers exist to be refused a value; until then nothing can raise it
-# (doc/divergences.md, the MMU instructions' F-line stub).
+# which is what exc_next builds. PMOVE jumps here (mmu_pm_wr) after the
+# register is written: PC_C is the next instruction by then, every extension
+# word having been consumed.
 exc_next('exc_mmu_config', 56)
 
 # TRAP #n. PRM 4: vector 32 + n, and the frame carries the address of the next
@@ -3724,17 +3726,177 @@ def cir_write(comment, off, nbytes, init=False, **kw):
 # mmu_op is where the MMU instructions start: type 000, and an effective
 # address field that is either zero -- PFLUSHA and PFLUSH FC,MASK name none --
 # or control alterable, the only modes PRM 6 gives PMOVE, PTEST, PLOAD and
-# PFLUSH FC,MASK,<ea> on this part. M11 decodes the command word there. Until
-# it does, the stub takes the F-line exception a supervisor gets for a command
-# word the part does not define (doc/divergences.md). cp0_unimp is every other
-# CpID-0 word, and is final.
+# PFLUSH FC,MASK,<ea> on this part. cp0_unimp is every other CpID-0 word.
+#
+# The command word decides the rest, and one this part does not define is the
+# F-line exception UM 8.1.5 gives "undefined patterns in subsequent words" in
+# supervisor mode -- MMUBADC, rd68031_seq, which also refuses the no-<ea> word
+# for any instruction but PFLUSHA and PFLUSH FC,MASK and an <ea> for those two
+# (doc/mmu.md has the table). Then, PRM 6 by bits 15:13 of the command word:
+#
+#   100  PTEST    001  PLOAD, PFLUSHA, PFLUSH    000/010/011  PMOVE
+#
+# The command word is held in T0 across the effective-address routine, which
+# may decode an extension word of its own in xw (check_ea_live), and put back.
 # --------------------------------------------------------------------------
 label('mmu_op')
 u('an MMU instruction is privileged -- UM 8.1.6, PRM 6 "else TRAP"',
   seq='COND', cond='USER', next='exc_priv')
-u('M11 reads the command word here; until then every one is taken as a '
-  'command word this part does not define -- UM 8.1.5, an F-line exception',
-  next='exc_line_f')
+u('the command word, and one this part does not define is an F-line '
+  'exception -- UM 8.1.5, tested on stage C as it is taken',
+  asrc='STG_C', alu='A', dst='XW', size='WORD', pf='CONSUME',
+  seq='COND', cond='MMUBADC', next='exc_line_f')
+u('PTEST?', seq='COND', cond='MMUPTEST', next='mmu_ptest')
+u('PLOAD or PFLUSH?', seq='COND', cond='MMUPLFL', next='mmu_plfl')
+
+# --------------------------------------------------------------------------
+# PMOVE -- PRM 6, UM 9.7 and 9.8. "The instruction is a quad-word (8 byte)
+# operation for the CPU root pointer and the supervisor root pointer. It is a
+# long-word operation for the translation control register and the transparent
+# translation registers (TT0 and TT1). It is a word operation for the MMU status
+# register." The direction is bit 9: 1 is the register to memory.
+#
+# Into a register: the operand is read whole into T1 (and T0 for the upper long
+# word of a root pointer) and then written, on a microword of its own that can
+# take no fault -- so a fault on the operand leaves the register as it was
+# (doc/checkpoint.md rule 2). rd68031_mmu masks what the register does not
+# keep, flushes the ATC unless FD is set (UM 9.7.5.1), and checks TC, SRP and
+# CRP: "if the operand value is invalid ... the instruction takes an memory
+# management unit configuration error exception after moving the operand"
+# (PRM 6) -- vector 56, the post-instruction frame (UM 8.1.10).
+# --------------------------------------------------------------------------
+u('hold the command word across the effective address',
+  asrc='XW', alu='A', dst='T0', size='LONG')
+u('the address of the operand',
+  call=1, seq='EAMODE', size='LONG')
+u('... and the command word back',
+  asrc='T0', alu='A', dst='XW', size='WORD')
+u('to memory?', seq='COND', cond='XW9', next='mmu_pm_out')
+u('a root pointer?', seq='COND', cond='MMUQUAD', next='mmu_pm_in8')
+u('the status register?', seq='COND', cond='MMUSRG', next='mmu_pm_in2')
+u('TC, TT0 or TT1: one long word',
+  bus='READ', fc='DATA', asel='EA', bytes=4)
+u('... held for the register',
+  asrc='RDATA', alu='A', dst='T1', size='LONG')
+label('mmu_pm_wr')
+u('into the register -- rd68031_mmu',
+  mmu='WR')
+u('a configuration it refuses is the MMU configuration exception -- UM 8.1.10, '
+  '9.7.5.3',
+  seq='COND', cond='MMUCFG', next='exc_mmu_config')
+u('done', pf='ADV', seq='DECODE')
+
+label('mmu_pm_in2')
+u('MMUSR: one word',
+  bus='READ', fc='DATA', asel='EA', bytes=2)
+u('... held for the register',
+  asrc='RDATA', alu='A', dst='T1', size='LONG', next='mmu_pm_wr')
+
+label('mmu_pm_in8')
+u('SRP or CRP: the upper long word -- L/U, LIMIT and DT -- first',
+  bus='READ', fc='DATA', asel='EA', bytes=4)
+u('... held',
+  asrc='RDATA', alu='A', dst='T0', size='LONG')
+u('the lower long word is four on',
+  asrc='EA', bsrc='FOUR', alu='ADD', dst='T2', size='LONG')
+u('... the table address',
+  bus='READ', fc='DATA', asel='T2', bytes=4)
+u('... held',
+  asrc='RDATA', alu='A', dst='T1', size='LONG', next='mmu_pm_wr')
+
+label('mmu_pm_out')
+u('a root pointer?', seq='COND', cond='MMUQUAD', next='mmu_pm_out8')
+u('the status register?', seq='COND', cond='MMUSRG', next='mmu_pm_out2')
+u('TC, TT0 or TT1, a long word to memory',
+  bus='WRITE', fc='DATA', asel='EA', asrc='MMULO', alu='A', bytes=4,
+  pf='ADV', seq='DECODE')
+
+label('mmu_pm_out2')
+u('MMUSR, a word to memory',
+  bus='WRITE', fc='DATA', asel='EA', asrc='MMULO', alu='A', bytes=2,
+  pf='ADV', seq='DECODE')
+
+label('mmu_pm_out8')
+u('SRP or CRP: the upper long word',
+  bus='WRITE', fc='DATA', asel='EA', asrc='MMUHI', alu='A', bytes=4)
+u('the lower long word is four on',
+  asrc='EA', bsrc='FOUR', alu='ADD', dst='T2', size='LONG')
+u('... and goes there',
+  bus='WRITE', fc='DATA', asel='T2', asrc='MMULO', alu='A', bytes=4,
+  pf='ADV', seq='DECODE')
+
+# --------------------------------------------------------------------------
+# PLOAD, PFLUSHA and PFLUSH -- PRM 6, UM 9.4 and 9.8. PFLUSH's mode is bits
+# 12:10: 001 all, 100 by function code, 110 by function code and address; 000
+# is PLOAD. The function code is the command word's (rd68031_seq, mmu_fc).
+#
+# PLOAD "searches the translation table for the descriptor corresponding to
+# the specified effective address. It creates a new entry as if the MC68030 had
+# attempted to access that address" (PRM 6) -- whatever TC.E and MMUDIS say --
+# and the microword stalls until the search is done: it waits for posted writes
+# before it starts, so nothing can be taken in the middle (doc/checkpoint.md
+# rule 11).
+# --------------------------------------------------------------------------
+label('mmu_plfl')
+u('PFLUSH by function code?', seq='COND', cond='XW12', next='mmu_pflush_fc')
+u('PFLUSHA?', seq='COND', cond='XW10', next='mmu_pflusha')
+u('PLOAD: hold the command word across the effective address',
+  asrc='XW', alu='A', dst='T0', size='LONG')
+u('the logical address to load -- "not the effective address describing where '
+  'the PLOAD operand is located" (PRM 6)',
+  call=1, seq='EAMODE', size='LONG')
+u('... and the command word back',
+  asrc='T0', alu='A', dst='XW', size='WORD')
+u('search the tables and load the ATC -- rd68031_mmu',
+  mmu='PLOAD', sync=1)
+u('done', pf='ADV', seq='DECODE')
+
+label('mmu_pflusha')
+u('every ATC entry -- PRM 6, PFLUSHA',
+  mmu='FLUSHA', pf='ADV', seq='DECODE')
+
+label('mmu_pflush_fc')
+u('and an address?', seq='COND', cond='XW11', next='mmu_pflush_ea')
+u('every entry of the selected function codes -- PRM 6',
+  mmu='FLUSH', pf='ADV', seq='DECODE')
+
+label('mmu_pflush_ea')
+u('hold the command word across the effective address',
+  asrc='XW', alu='A', dst='T0', size='LONG')
+u('the logical address to flush',
+  call=1, seq='EAMODE', size='LONG')
+u('... and the command word back',
+  asrc='T0', alu='A', dst='XW', size='WORD')
+u('that page in the selected function codes -- PRM 6',
+  mmu='FLUSHEA', pf='ADV', seq='DECODE')
+
+# --------------------------------------------------------------------------
+# PTEST -- PRM 6, UM 9.7.4 and Table 9-3. Level 0 looks in the ATC (and the
+# TTx registers), levels 1-7 search the tables to that level; either way MMUSR
+# gets the verdict and nothing else changes: "the PTEST instruction does not
+# alter the ATC" (UM 9.8) and alters "neither the used or modified bits" (PRM
+# 6). With A set, "the physical address of the last descriptor successfully
+# fetched loads into the address register" -- written on a microword that takes
+# no fault, ahead of the one that ends the instruction, so a prefetch fault on
+# the next instruction cannot have it written again from a later search.
+# --------------------------------------------------------------------------
+label('mmu_ptest')
+u('hold the command word across the effective address',
+  asrc='XW', alu='A', dst='T0', size='LONG')
+u('the logical address to test',
+  call=1, seq='EAMODE', size='LONG')
+u('... and the command word back',
+  asrc='T0', alu='A', dst='XW', size='WORD')
+u('the search, into MMUSR -- rd68031_mmu',
+  mmu='PTEST', sync=1)
+u('an address register for the descriptor?',
+  seq='COND', cond='XW8', next='mmu_ptest_an')
+u('done', pf='ADV', seq='DECODE')
+
+label('mmu_ptest_an')
+u('the last descriptor\'s physical address -- PRM 6',
+  asrc='MMUDA', alu='A', dst='PTEST_AN', size='LONG')
+u('done', pf='ADV', seq='DECODE')
 
 # cpSAVE and cpRESTORE in a core built without the coprocessor interface. The
 # instruction is privileged before it is a coprocessor's: UM 10.2.3.3 and

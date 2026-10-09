@@ -98,7 +98,7 @@ package rd68031_frame_pkg;
   // ==========================================================================
   // This design's own state, in the long frame's internal words
   //
-  // 492 bits available, 369 used, 32 reserved for M8-M11, 5 words spare.
+  // 492 bits available, 369 used, 0 reserved for M8-M11, 7 words spare.
   // Recompute this whenever something is added: doc/checkpoint.md carries the
   // same table, printed from the same source.
   // ==========================================================================

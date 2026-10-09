@@ -30,6 +30,16 @@
 | user mode at the end: its last instruction is privileged, and has to trap.
 |
 | Not built with crt0.S: this program owns its vector table and its modes.
+|
+| Built a second time with -DCOW_MMU (build/programs/cow_mmu.hex, run by
+| core_mmu_cow_tb) for the MC68030's own MMU instead of the testbench's: the
+| kernel builds two one-level page tables -- the user's, with every page at
+| $4000-$5FFF write-protected (UM 9.5.1.1, WP), and the supervisor's, with
+| its own page table's page invalid -- loads them with PMOVE into CRP and SRP,
+| and enables translation with SRE set (UM Table 9-2), so that the kernel's
+| writes to the shared pages are never refused. Mapping a page writes its
+| descriptor and flushes the stale ATC entry with PFLUSH (UM 9.4). The
+| faults, their frames and every result are the same.
 
         .equ    ISP0,    0x3000         | the supervisor stack, growing down
         .equ    KVARS,   0x2000         | +0 faults, +4 log pointer, +8 done, +C SR
@@ -41,6 +51,13 @@
         .equ    EMUL,    0x4C00         | the page whose writes the kernel does
         .equ    EMUL2,   0x5000         | ... and whose CAS the kernel completes
         .equ    PTABLE,  0x2600         | the kernel's page table, itself paged
+#ifdef COW_MMU
+        .equ    UTBL,    0x7000         | the user's page table, CRP
+        .equ    STBL,    0x7800         | the supervisor's, SRP
+        | UM 9.7.2: E, SRE, PS = 8 (256 bytes), IS = 15, TIA = 9: one level
+        | of 512 short descriptors, indexed by A16-A8. 8 + 15 + 9 = 32.
+        .equ    TCV,     0x828F9000
+#endif
 
         .section .vectors, "a"
         .long   ISP0                    | 0: the initial interrupt stack pointer
@@ -85,6 +102,35 @@ _start:
         move.l  #0x000000AB, 0x4E10     | ... and its second, equal to D2
         move.l  #0xCAFEBABE, EMUL2+0x10 | the CAS the kernel completes
 
+#ifdef COW_MMU
+        | The page tables -- UM figure 9-10, short page descriptors (DT = 1),
+        | every page mapped onto itself. The user's are write-protected at
+        | $4000-$5FFF; the supervisor's page table page is invalid (DT = 0).
+        lea     UTBL, %a0
+        lea     STBL, %a1
+        moveq   #1, %d0
+        move.w  #511, %d1
+1:      move.l  %d0, %d2
+        cmpi.l  #0x4001, %d2
+        blo.s   2f
+        cmpi.l  #0x6001, %d2
+        bhs.s   2f
+        bset    #2, %d2                 | WP
+2:      move.l  %d2, (%a0)+
+        move.l  %d0, (%a1)+
+        addi.l  #0x100, %d0
+        dbf     %d1, 1b
+        clr.l   STBL + (PTABLE >> 8) * 4
+        | Through A0: PMOVE takes control alterable modes only (PRM 6), and
+        | the assembler would make a label PC-relative.
+        lea     srpimg, %a0
+        pmove   (%a0), %srp
+        lea     crpimg, %a0
+        pmove   (%a0), %crp
+        lea     tcimg, %a0
+        pmove   (%a0), %tc
+#endif
+
         | Into user mode the way an operating system starts a process: a format
         | $0 frame naming the program with S clear, and RTE.
         lea     USTACK, %a0
@@ -115,6 +161,11 @@ buserr:
         bne.s   1f
         | The kernel's own page: map it, and let the read be rerun.
         move.l  %d1, PAGER
+#ifdef COW_MMU
+        move.l  #PTABLE + 1, STBL + (PTABLE >> 8) * 4
+        move.l  %d1, %a2
+        pflush  #5, #7, (%a2)           | the entry with B the search left
+#endif
         bra.s   9f
 1:      cmpi.l  #EMUL, %d1
         bne.s   7f
@@ -172,6 +223,17 @@ buserr:
 | unit, the multiplier and the extension-word latch.
 remap:
         move.l  %d1, PAGER
+#ifdef COW_MMU
+        | The user's descriptor without WP, and its ATC entry flushed.
+        move.l  %d1, %d3
+        lsr.l   #6, %d3                 | the page number times four
+        lea     UTBL, %a2
+        move.l  %d1, %d4
+        addq.l  #1, %d4
+        move.l  %d4, 0(%a2,%d3.l)
+        move.l  %d1, %a2
+        pflush  #1, #7, (%a2)
+#endif
         bfextu  %d1{#16:#8}, %d3
         mulu.l  %d3, %d4
         rts
@@ -185,6 +247,13 @@ done:   bra.s   done
 unexpected:
         move.l  #0x0BAD, KVARS+8
 bad:    bra.s   bad
+
+#ifdef COW_MMU
+        .balign 4
+srpimg: .long   0x7FFF0002, STBL        | no limit, short descriptors
+crpimg: .long   0x7FFF0002, UTBL
+tcimg:  .long   TCV
+#endif
 
 | ---------------------------------------------------------------------------
 | The user program. Each shape writes to a page nothing has written yet, so each

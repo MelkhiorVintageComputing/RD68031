@@ -18,9 +18,10 @@
 // belongs to: no clock lost, and a memory instead of logic.
 //
 // The instruction set is the MC68030's: the MC68020's, forked from RD68021, less
-// CALLM and RTM, with the CpID-0 F-line words routed to the MMU's entry rather
-// than the coprocessor interface (tools/ucode/program.py) and CACR in the
-// MC68030's layout. The MMU instructions themselves are M11.
+// CALLM and RTM, with the CpID-0 F-line words decoded as the MMU instructions
+// rather than given to the coprocessor interface (tools/ucode/program.py), and
+// CACR in the MC68030's layout. The MMU itself is rd68031_mmu: this unit hands
+// it the instructions' operands and stalls while it searches.
 
 module rd68031_seq #(
     parameter bit COPROCESSOR = 1'b0
@@ -116,6 +117,21 @@ module rd68031_seq #(
     output logic [31:0] cacr,
     output logic [31:0] caar,
     output logic  [3:0] cach_op,
+
+    // The MMU instructions -- UM 9.8, rd68031_mmu ----------------------------
+    output logic  [2:0] mmu_cmd,     // rd68031_ucode_pkg::U_MMU_*
+    output logic        mmu_go,      // commit it, or start the search
+    output logic [15:0] mmu_xw,      // the command word
+    output logic  [2:0] mmu_fc,      // the function code it names
+    output logic [31:0] mmu_ea,      // the logical address <ea> names
+    output logic [31:0] mmu_wd_hi,   // PMOVE's operand: T0
+    output logic [31:0] mmu_wd_lo,   // ... and T1
+    input  logic [31:0] mmu_rd_hi,
+    input  logic [31:0] mmu_rd_lo,
+    input  logic        mmu_cfg_bad,
+    input  logic [31:0] mmu_da,
+    input  logic        mmu_busy,
+    input  logic        mmu_done,
 
     // Status -------------------------------------------------------------------
     input  logic  [2:0] ipl_sync_n,
@@ -704,6 +720,10 @@ module rd68031_seq #(
       rd68031_ucode_pkg::U_ASRC_UBOUND:
         a_bus = {{(32 - rd68031_ucode_pkg::UADDR){1'b0}},
                  rd68031_ucode_pkg::ENTRY_RTE_BOUNDARY};
+      // PMOVE from an MMU register, and PTEST's descriptor address.
+      rd68031_ucode_pkg::U_ASRC_MMUHI: a_bus = mmu_rd_hi;
+      rd68031_ucode_pkg::U_ASRC_MMULO: a_bus = mmu_rd_lo;
+      rd68031_ucode_pkg::U_ASRC_MMUDA: a_bus = mmu_da;
       default:                         a_bus = 32'd0;
     endcase
   end
@@ -1014,6 +1034,81 @@ module rd68031_seq #(
       12'h800, 12'h801, 12'h802, 12'h803, 12'h804: creg_bad_c = 1'b0;
       default:                                    creg_bad_c = 1'b1;
     endcase
+  end
+
+  // ==========================================================================
+  // The MMU instructions' command word -- UM 9.8, PRM 6 (the "MC68030 only"
+  // pages) and PRM 8
+  //
+  // UM 8.1.5: "Instructions that have word patterns with bits [15:12] equal to
+  // $F, bits [11:9] equal to $0, and defined word patterns for subsequent words
+  // are legal MMU instructions. Instructions that have bits [15:12] of the
+  // first words equal to $F, bits [11:9] equal to $0, and undefined patterns in
+  // subsequent words are treated as unimplemented instructions with F-line
+  // opcodes when execution is attempted in supervisor mode." The defined
+  // patterns are PRM 6's:
+  //
+  //   PMOVE TT0/TT1    000 PPP R FD 00000000   PPP = 010 or 011
+  //   PLOAD            001 000 R 0000 FFFFF
+  //   PFLUSHA          001 001 0 0 000 00000
+  //   PFLUSH FC,MASK   001 100 0 0 MMM FFFFF   (no <ea>)
+  //   PFLUSH ..,<ea>   001 110 0 0 MMM FFFFF
+  //   PMOVE TC/SRP/CRP 010 PPP R FD 00000000   PPP = 000, 010 or 011
+  //   PMOVE MMUSR      011 000 R 0  00000000
+  //   PTEST            100 LLL R A RRR FFFFF   level 0 only with A and RRR 0
+  //
+  // with FFFFF one of 10XXX (immediate), 01DDD (a data register), 00000 (SFC)
+  // and 00001 (DFC). "Only control alterable addressing modes" for every <ea>
+  // (UM 9.6, PRM 6) -- so not Dn and not An (manual-contradictions 12): the
+  // decoder sends only those and the no-<ea> word $F000 here, and the word
+  // with no <ea> is only PFLUSHA and PFLUSH FC,MASK. Tested on stage C, as
+  // MOVEC's register is, on the microword that takes the word.
+  // ==========================================================================
+  logic mmu_eanone, mmu_fcok, mmu_bad_c;
+  logic [2:0] mc_grp, mc_mid;
+  assign mmu_eanone = (stg_d[5:0] == 6'd0);
+  assign mmu_fcok   = (stg_c[4:3] == 2'b10) || (stg_c[4:3] == 2'b01)
+                   || (stg_c[4:0] == 5'b00000) || (stg_c[4:0] == 5'b00001);
+  assign mc_grp     = stg_c[15:13];
+  assign mc_mid     = stg_c[12:10];
+  always_comb begin
+    unique case (mc_grp)
+      3'b000:  mmu_bad_c = mmu_eanone || (stg_c[7:0] != 8'd0)
+                        || ((mc_mid != 3'b010) && (mc_mid != 3'b011));
+      3'b010:  mmu_bad_c = mmu_eanone || (stg_c[7:0] != 8'd0)
+                        || ((mc_mid != 3'b000) && (mc_mid != 3'b010)
+                            && (mc_mid != 3'b011));
+      3'b011:  mmu_bad_c = mmu_eanone || (stg_c[8:0] != 9'd0) || (mc_mid != 3'b000);
+      3'b001: begin
+        unique case (mc_mid)
+          3'b000:  mmu_bad_c = mmu_eanone || (stg_c[8:5] != 4'd0) || !mmu_fcok;
+          3'b001:  mmu_bad_c = !mmu_eanone || (stg_c[9:0] != 10'd0);
+          3'b100:  mmu_bad_c = !mmu_eanone || (stg_c[9:8] != 2'd0) || !mmu_fcok;
+          3'b110:  mmu_bad_c = mmu_eanone || (stg_c[9:8] != 2'd0) || !mmu_fcok;
+          default: mmu_bad_c = 1'b1;
+        endcase
+      end
+      // PRM 6, PTEST: "When this field contains 0, the A field and the
+      // register field must also be 0. The instruction takes an F-line
+      // exception when the level field is 0 and the A field is not 0." And
+      // "when the A field contains 0, this field must contain 0".
+      3'b100:  mmu_bad_c = mmu_eanone || !mmu_fcok
+                        || ((mc_mid == 3'b000) && stg_c[8])
+                        || (!stg_c[8] && (stg_c[7:5] != 3'd0));
+      default: mmu_bad_c = 1'b1;
+    endcase
+  end
+
+  // The function code the command word names, for PTEST, PLOAD and PFLUSH --
+  // PRM 6: "10XXX -- function code is specified as bits XXX. 01DDD -- function
+  // code is specified as bits 2-0 of data register DDD. 00000 -- function code
+  // is specified as SFC register. 00001 -- function code is specified as DFC
+  // register."
+  always_comb begin
+    if (xw_q[4])      mmu_fc = xw_q[2:0];
+    else if (xw_q[3]) mmu_fc = dreg[xw_q[2:0]][2:0];
+    else if (xw_q[0]) mmu_fc = dfc_q;
+    else              mmu_fc = sfc_q;
   end
 
   // The general register the extension word names: bit 15 says which file, bits
@@ -1449,6 +1544,7 @@ module rd68031_seq #(
 
   logic div_stall;
   assign div_stall = div_req && !div_fin_q;
+
 
   // ==========================================================================
   // Interrupts -- UM 8.1.9 and figures 8-2 and 8-3
@@ -1920,6 +2016,18 @@ module rd68031_seq #(
       rd68031_ucode_pkg::U_COND_FWLEN:    cond_true = (t_q[0][1:0] != 2'b00);
       rd68031_ucode_pkg::U_COND_CREGBAD:  cond_true = creg_bad;
       rd68031_ucode_pkg::U_COND_CREGBADC: cond_true = creg_bad_c;
+      // ---- The MMU instructions, UM 9.8 --------------------------------
+      rd68031_ucode_pkg::U_COND_MMUBADC:  cond_true = mmu_bad_c;
+      rd68031_ucode_pkg::U_COND_MMUPTEST: cond_true = (xw_q[15:13] == 3'b100);
+      rd68031_ucode_pkg::U_COND_MMUPLFL:  cond_true = (xw_q[15:13] == 3'b001);
+      rd68031_ucode_pkg::U_COND_MMUSRG:   cond_true = (xw_q[15:13] == 3'b011);
+      rd68031_ucode_pkg::U_COND_MMUQUAD:  cond_true = (xw_q[15:13] == 3'b010) && xw_q[11];
+      rd68031_ucode_pkg::U_COND_XW12:     cond_true = xw_q[12];
+      rd68031_ucode_pkg::U_COND_XW9:      cond_true = xw_q[9];
+      rd68031_ucode_pkg::U_COND_XW8:      cond_true = xw_q[8];
+      // UM 9.7.5.3: the register just written was refused -- rd68031_mmu
+      // checks the operand, which is still in T0 and T1.
+      rd68031_ucode_pkg::U_COND_MMUCFG:   cond_true = mmu_cfg_bad;
       default:                         cond_true = 1'b0;
     endcase
   end
@@ -1974,7 +2082,11 @@ module rd68031_seq #(
   // the pipe-fault terms they read.
   logic wait_prev, wait_own;
   logic other_stall;
+  // An MMU instruction waits for a table search under way to finish, and PTEST
+  // and PLOAD for their own -- rd68031_mmu. Assigned below.
+  logic mmu_stall;
   assign other_stall = wait_prev
+                    || mmu_stall
                     || div_stall
                     || dbf_q
                     || stopped_q
@@ -2002,6 +2114,46 @@ module rd68031_seq #(
   assign stall = (bus_req && !bus_done) || other_stall || wait_own;
 
   assign retire = !stall;
+
+  // ==========================================================================
+  // The MMU -- UM 9.8, rd68031_mmu
+  //
+  // PTEST and PLOAD search the tables, and the microword stalls for the search
+  // the way it stalls for the divider: the search starts on its first clock and
+  // the microword retires a clock after it ends. No fault can land on it while
+  // it waits -- it is marked to wait for posted writes first, it asks for no
+  // bus cycle of its own and uses no pipe word -- so the search is never
+  // abandoned half done (doc/checkpoint.md rule 11), and a bus error on one of
+  // its cycles is recorded in MMUSR or the ATC entry, not taken (UM 9.5.2).
+  //
+  // The other MMU microwords commit on their own edge, and every one waits
+  // first for a search already under way -- an instruction prefetch's or an
+  // operand's -- so that the ATC and the registers a search reads are not
+  // changed under it.
+  // ==========================================================================
+  logic mmu_walk, mmu_inst, mmu_start, mmu_go_q, mmu_fin_q;
+  assign mmu_walk  = (`UF(MMU) == rd68031_ucode_pkg::U_MMU_PLOAD)
+                  || (`UF(MMU) == rd68031_ucode_pkg::U_MMU_PTEST);
+  assign mmu_inst  = (`UF(MMU) != rd68031_ucode_pkg::U_MMU_NONE) && !mmu_walk;
+  assign mmu_start = mmu_walk && !mmu_go_q && !mmu_fin_q && !mmu_busy
+                  && !wait_prev && !dbf_q && !stopped_q;
+
+  always_ff @(posedge clk or negedge core_rst_n) begin
+    if (!core_rst_n) begin
+      mmu_go_q  <= 1'b0;
+      mmu_fin_q <= 1'b0;
+    end else if (!mmu_walk) begin
+      mmu_go_q  <= 1'b0;
+      mmu_fin_q <= 1'b0;
+    end else if (mmu_start) begin
+      mmu_go_q  <= 1'b1;
+    end else if (mmu_go_q && mmu_done) begin
+      mmu_go_q  <= 1'b0;
+      mmu_fin_q <= 1'b1;
+    end
+  end
+
+  assign mmu_stall = (mmu_walk && !mmu_fin_q) || (mmu_inst && mmu_busy);
 
   // ==========================================================================
   // Instruction-stream faults -- UM 8.1.2, 8.1.3 and doc/ssw.md
@@ -2657,6 +2809,17 @@ module rd68031_seq #(
             end
           end
           rd68031_ucode_pkg::U_DST_DREG_XQ: dreg[xw_q[14:12]] <= y_reg;
+          // PRM 6, PTEST: the descriptor address "loads into the address
+          // register" bits 7:5 of the command word name.
+          rd68031_ucode_pkg::U_DST_PTEST_AN: begin
+            if (xw_q[7:5] == 3'd7) begin
+              if (!super_mode)      usp_q <= y;
+              else if (master_mode) msp_q <= y;
+              else                  isp_q <= y;
+            end else begin
+              areg[xw_q[7:5]] <= y;
+            end
+          end
           // At the operand size. CAS and CAS2 are the byte and word users:
           // PRM 4, "Destination -> Compare Operand", and a byte or word
           // operation on a data register changes only its low-order part (UM
@@ -3026,6 +3189,13 @@ module rd68031_seq #(
 
   assign cacr      = cacr_q;
   assign caar      = caar_q;
+
+  assign mmu_cmd   = `UF(MMU);
+  assign mmu_go    = mmu_start || (commit && mmu_inst);
+  assign mmu_xw    = xw_q;
+  assign mmu_ea    = ea_q;
+  assign mmu_wd_hi = t_q[0];
+  assign mmu_wd_lo = t_q[1];
   // MOVEC setting CACR's CI, CEI, CD or CED -- UM 6.3.1.8, 6.3.1.9, 6.3.1.3
   // and 6.3.1.4. All four "always read as a zero", so they are never stored:
   // the write is an order to the cache, carried out on the edge that commits

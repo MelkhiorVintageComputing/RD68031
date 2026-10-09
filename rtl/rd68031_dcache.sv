@@ -58,8 +58,8 @@ module rd68031_dcache (
     input  logic  [3:0] cach_op,      // {CED, CD, CEI, CI}, pulsed by MOVEC
     input  logic        cdis_sync_n,
     // The MMU's cache inhibit for this access -- the CI bit of the ATC entry or
-    // TTx register that maps it, which also drives CIOUT (UM 6.1, 5.7.2). Zero
-    // until M11. A read that hits ignores it -- "whenever a read access occurs
+    // TTx register that maps it, which also drives CIOUT (UM 6.1, 5.7.2), from
+    // rd68031_mmu through the bus unit. A read that hits ignores it -- "whenever a read access occurs
     // and the required ... data operand is resident in the appropriate on-chip
     // cache ... the state of the corresponding CI bits in the MMU are also
     // ignored"; a read that misses does not fill; and a write ignores the cache
@@ -86,6 +86,15 @@ module rd68031_dcache (
 
     // The bus unit is taking the presented WRITE on this rising edge ---------
     input  logic        wr_take,
+
+    // ... or the MMU has refused one: UM 6.1.2, "if the MMU determines that the
+    // access is invalid, the write is aborted, the corresponding entry is
+    // invalidated, and a bus error exception is taken". The entries the
+    // refused bytes are in lose their valid bits on this edge -------------
+    input  logic        inv_v,
+    input  logic [31:0] inv_addr,
+    input  logic  [2:0] inv_fc,
+    input  logic  [2:0] inv_bytes,
 
     // The bus cycle, or burst beat, ending on this rising edge ----------------
     input  logic        bn_valid,     // it ended normally with data
@@ -488,6 +497,18 @@ module rd68031_dcache (
     end
   endgenerate
 
+  // The entries a refused write touches: one long word, or two.
+  logic [29:0] iea, ieb;
+  logic [3:0]  iend;
+  logic        itok_a, itok_b, i_clr_a, i_clr_b;
+  assign iea     = inv_addr[31:2];
+  assign ieb     = iea + 30'd1;
+  assign iend    = {2'b00, inv_addr[1:0]} + {1'b0, inv_bytes};
+  assign itok_a  = (tags[iea[5:2]*TW +: TW] == {inv_fc, iea[29:6]});
+  assign itok_b  = (tags[ieb[5:2]*TW +: TW] == {inv_fc, ieb[29:6]});
+  assign i_clr_a = inv_v && itok_a;
+  assign i_clr_b = inv_v && itok_b && (iend > 4'd4);
+
   localparam logic [63:0] ONE = 64'd1;
   logic [63:0] v_set, v_line, v_clr;
   assign v_set  = ((f_wr)    ? (ONE << fe[5:0])  : '0)
@@ -498,7 +519,9 @@ module rd68031_dcache (
                 | ((f_clr_line) ? (64'hF << {fline, 2'b00})     : '0)
                 | ((w_clr_a)    ? (ONE << wea[5:0])             : '0)
                 | ((w_clr_b)    ? (ONE << web[5:0])             : '0)
-                | ((inv_caar)   ? (ONE << caar[7:2])            : '0);
+                | ((inv_caar)   ? (ONE << caar[7:2])            : '0)
+                | ((i_clr_a)    ? (ONE << iea[5:0])             : '0)
+                | ((i_clr_b)    ? (ONE << ieb[5:0])             : '0);
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n)       valid_q <= '0;

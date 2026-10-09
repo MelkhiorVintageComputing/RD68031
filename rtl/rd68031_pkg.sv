@@ -106,7 +106,13 @@ package rd68031_pkg;
     ST_RETRY,              // BERR+HALT: wait for both to negate, then rerun
     ST_BL,                 // burst: a long word latched, AS held (UM 7.3.7 S3/S5/S7)
     ST_BH,                 // burst: STERM tested for the next long word (S4/S6/S8)
-    ST_BW                  // burst: a wait state between two long words
+    ST_BW,                 // burst: a wait state between two long words
+    // A cycle the MMU refuses (M11): UM 9.2.1, "the MMU causes a bus cycle to
+    // abort before the assertion of address strobe when ... an invalid access
+    // is attempted". No pin moves; the falling edge after it ends the cycle
+    // in S5 with a bus error, which the operand engine reports as it reports
+    // BERR -- doc/mmu.md.
+    ST_ABT
   } bus_state_e;
 
   // ==========================================================================

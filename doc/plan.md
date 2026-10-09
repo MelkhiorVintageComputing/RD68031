@@ -218,6 +218,26 @@ post-instruction format $2 frame UM 8.1.10 describes; and the ATC miss's three
 clocks of STATUS are a `mark = EXC` (or its own event) on the table search's
 first microword.
 
+**Status (M11, part 1):** the MMU is built and tested from the manual
+(`doc/mmu.md`). TC, CRP, SRP, TT0, TT1 and MMUSR, with the configuration
+exception from `exc_mmu_config` and the RESET pin clearing the three E bits in
+`rd68031_mmu` (not in `rd68031_seq`'s `crst` arm as the note above planned: the
+registers are the MMU's); the 22-entry ATC with a documented NRU replacement;
+transparent translation; a hardware table walker on the bus unit -- FC 5, RMC
+throughout, U and M written back under RMC, never cached, never CIOUT -- with
+FCL, SRE, IS, two to five levels, short and long descriptors, early
+termination, indirection and limits; every refusal an ordinary format $B bus
+error through `ST_ABT`, the frames of `tools/ucode/frames.py`'s FAULTS table
+unchanged; CIOUT and both caches' inhibits; PMOVE (and PMOVEFD), PTEST, PLOAD,
+PFLUSH and PFLUSHA replacing the `mmu_op` stub; MMUDIS; and the ATC miss's
+three clocks of STATUS, as the walker's start. The +$4C checkpoint reservation
+is released. The gate is `core_mmu_tb` with three programs (`mmu_regs`,
+`mmu_walk`, `mmu_fault`), and `core_mmu_paging_tb` and `core_mmu_cow_tb`, the
+MMU versions of `core_paging_tb` and `core_cow_tb`. Part 2 adds the oracle flows: `make cosim-mmu`, the
+PMMU vector groups and AP68030 -- and should look first at the open questions
+in `doc/mmu.md` (an RMW cycle missing in the ATC, U at the violating
+descriptor).
+
 **Known suspects when real software misbehaves (M13, M14):** the deliberate
 differences from the part that follow the manual instead -- `LINK A7` pushes the
 decremented stack pointer where the part pushes the value before it, and the

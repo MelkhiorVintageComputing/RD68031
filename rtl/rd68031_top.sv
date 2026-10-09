@@ -8,9 +8,10 @@
 // or bidirectional pin of the original is split into _i / _o / _oe, with _oe active
 // high meaning the core drives.
 //
-// The processor is three units: rd68031_seq runs the microcode and holds the
-// datapath, rd68031_ifu holds the instruction pipe and the cache, and rd68031_biu
-// drives the pins. This wires them together and does nothing else.
+// The processor is five units: rd68031_seq runs the microcode and holds the
+// datapath, rd68031_ifu holds the instruction pipe and the instruction cache,
+// rd68031_dcache the data cache, rd68031_mmu the memory management unit, and
+// rd68031_biu drives the pins. This wires them together and does nothing else.
 //
 // Note the fully-scoped rd68031_pkg:: references and the plain-vector ports: yosys
 // 0.52 supports neither `import pkg::*` nor user types on ports. See
@@ -230,19 +231,36 @@ module rd68031_top #(
   // The caches and the bus -- doc/caches.md
   //
   // A line fill (CBREQ) is each cache's to ask for. CIOUT is the MMU's to say,
-  // at M11, and so is the cache inhibit that goes with it: "whenever the
-  // appropriate CI bit is set for either a read or a write access and an
-  // external bus cycle is required, CIOUT is asserted and the instruction and
-  // data caches are ignored for the access" (UM 6.1). Until the MMU exists both
-  // are tied off here, and M11 drives `ic_inhibit`/`fetch_ciout` from the
-  // prefetch's translation and `dc_inhibit`/`req_ciout` from the operand's.
+  // and so is the cache inhibit that goes with it: "whenever the appropriate CI
+  // bit is set for either a read or a write access and an external bus cycle is
+  // required, CIOUT is asserted and the instruction and data caches are
+  // ignored for the access" (UM 6.1). The bus unit translates every cycle it
+  // starts (doc/mmu.md) and drives CIOUT from the translation, gives the data
+  // cache the request's CI with the request (`dc_inhibit`), and the
+  // instruction cache a prefetch's with its answer (`ic_inhibit`).
   // ==========================================================================
-  logic        req_burst, req_ciout, fetch_burst, fetch_ciout;
+  logic        req_burst, fetch_burst;
   logic        ic_inhibit, dc_inhibit;
-  assign req_ciout   = 1'b0;
-  assign fetch_ciout = 1'b0;
-  assign ic_inhibit  = 1'b0;
-  assign dc_inhibit  = 1'b0;
+  logic        dc_inv;
+  logic [31:0] dc_inv_addr;
+  logic  [2:0] dc_inv_fc, dc_inv_bytes;
+
+  // ==========================================================================
+  // The MMU -- UM section 9, doc/mmu.md
+  // ==========================================================================
+  logic  [2:0] mmu_cmd, mmu_fc;
+  logic        mmu_go, mmu_cfg_bad, mmu_busy, mmu_done, mmu_sts;
+  logic [15:0] mmu_xw;
+  logic [31:0] mmu_ea, mmu_wd_hi, mmu_wd_lo, mmu_rd_hi, mmu_rd_lo, mmu_da;
+  logic [31:0] l1_addr, l2_addr, l1_pb, l2_pb, l_mask;
+  logic  [2:0] l_fc;
+  logic        l_rw, l_rmc, l1_ci, l2_ci, l_take;
+  logic  [1:0] l1_kind, l2_kind;
+  logic        wq_valid, wq_wr;
+  logic [31:0] wq_addr;
+  logic  [2:0] wq_fc;
+  logic        tw_valid, tw_wr, tw_ack, tw_last, tw_berr;
+  logic [31:0] tw_addr, tw_wdata, tw_rdata;
   logic        req_ciin, fetch_ciin;
   logic        beat_valid, beat_err, beat_ciin, beat_fetch;
   logic [31:0] beat_data, beat_addr;
@@ -333,6 +351,20 @@ module rd68031_top #(
       .cacr           (cacr),
       .caar           (caar),
       .cach_op        (cach_op),
+
+      .mmu_cmd        (mmu_cmd),
+      .mmu_go         (mmu_go),
+      .mmu_xw         (mmu_xw),
+      .mmu_fc         (mmu_fc),
+      .mmu_ea         (mmu_ea),
+      .mmu_wd_hi      (mmu_wd_hi),
+      .mmu_wd_lo      (mmu_wd_lo),
+      .mmu_rd_hi      (mmu_rd_hi),
+      .mmu_rd_lo      (mmu_rd_lo),
+      .mmu_cfg_bad    (mmu_cfg_bad),
+      .mmu_da         (mmu_da),
+      .mmu_busy       (mmu_busy),
+      .mmu_done       (mmu_done),
 
       .ipl_sync_n     (ipl_sync_n),
       .reset_sync_n   (reset_sync_n),
@@ -435,6 +467,10 @@ module rd68031_top #(
           .lk_fill     (req_dfill),
           .lk_burst    (req_burst),
           .wr_take     (dc_wr_take),
+          .inv_v       (dc_inv),
+          .inv_addr    (dc_inv_addr),
+          .inv_fc      (dc_inv_fc),
+          .inv_bytes   (dc_inv_bytes),
           .bn_valid    (bnow_valid),
           .bn_err      (bnow_err),
           .bn_data     (bnow_data),
@@ -461,7 +497,8 @@ module rd68031_top #(
       assign unused_nodcache = &{1'b1, dc_wr_take, bnow_valid, bnow_err, bnow_data,
                                  bnow_addr, bnow_num, bnow_port, bnow_ciin,
                                  bnow_fc, bnow_dfill, bnow_brq, bnow_first,
-                                 dc_inhibit};
+                                 dc_inhibit, dc_inv, dc_inv_addr, dc_inv_fc,
+                                 dc_inv_bytes};
     end
   endgenerate
 
@@ -489,7 +526,11 @@ module rd68031_top #(
       .dc_nb          (dc_nb),
       .dc_data        (dc_data),
       .dc_wr_take     (dc_wr_take),
-      .req_ciout      (req_ciout),
+      .dc_inhibit     (dc_inhibit),
+      .dc_inv         (dc_inv),
+      .dc_inv_addr    (dc_inv_addr),
+      .dc_inv_fc      (dc_inv_fc),
+      .dc_inv_bytes   (dc_inv_bytes),
       .req_ack        (req_ack),
       .req_start      (req_start),
       .req_last       (req_last),
@@ -526,13 +567,41 @@ module rd68031_top #(
       .fetch_addr     (fetch_addr),
       .fetch_fc       (fetch_fc),
       .fetch_burst    (fetch_burst),
-      .fetch_ciout    (fetch_ciout),
       .fetch_ack      (fetch_ack),
       .fetch_last     (fetch_last),
       .fetch_rdata    (fetch_rdata),
       .fetch_fault    (fetch_fault),
       .fetch_ciin     (fetch_ciin),
+      .fetch_ci       (ic_inhibit),
       .bus_abort      (bus_abort),
+
+      .l1_addr        (l1_addr),
+      .l2_addr        (l2_addr),
+      .l_fc           (l_fc),
+      .l_rw           (l_rw),
+      .l_rmc          (l_rmc),
+      .l1_kind        (l1_kind),
+      .l2_kind        (l2_kind),
+      .l1_pb          (l1_pb),
+      .l2_pb          (l2_pb),
+      .l1_ci          (l1_ci),
+      .l2_ci          (l2_ci),
+      .l_mask         (l_mask),
+      .l_take         (l_take),
+      .wq_valid       (wq_valid),
+      .wq_addr        (wq_addr),
+      .wq_fc          (wq_fc),
+      .wq_wr          (wq_wr),
+      .mmu_busy       (mmu_busy),
+      .mmu_sts        (mmu_sts),
+      .tw_valid       (tw_valid),
+      .tw_addr        (tw_addr),
+      .tw_wr          (tw_wr),
+      .tw_wdata       (tw_wdata),
+      .tw_ack         (tw_ack),
+      .tw_last        (tw_last),
+      .tw_rdata       (tw_rdata),
+      .tw_berr        (tw_berr),
 
       .beat_valid     (beat_valid),
       .beat_err       (beat_err),
@@ -595,13 +664,58 @@ module rd68031_top #(
       .refill_n_o     (refill_n_o),  .status_n_o (status_n_o)
   );
 
+  rd68031_mmu u_mmu (
+      .clk            (clk),
+      .rst_n          (rst_n),
+      .crst           (crst),
+      .mmudis_sync_n  (mmudis_sync_n),
+      .cmd            (mmu_cmd),
+      .cmd_go         (mmu_go),
+      .cmd_xw         (mmu_xw),
+      .cmd_fc         (mmu_fc),
+      .cmd_ea         (mmu_ea),
+      .wd_hi          (mmu_wd_hi),
+      .wd_lo          (mmu_wd_lo),
+      .rd_hi          (mmu_rd_hi),
+      .rd_lo          (mmu_rd_lo),
+      .cfg_bad        (mmu_cfg_bad),
+      .ptest_da       (mmu_da),
+      .busy           (mmu_busy),
+      .done           (mmu_done),
+      .l1_addr        (l1_addr),
+      .l2_addr        (l2_addr),
+      .l_fc           (l_fc),
+      .l_rw           (l_rw),
+      .l_rmc          (l_rmc),
+      .l1_kind        (l1_kind),
+      .l2_kind        (l2_kind),
+      .l1_pb          (l1_pb),
+      .l2_pb          (l2_pb),
+      .l1_ci          (l1_ci),
+      .l2_ci          (l2_ci),
+      .l_mask         (l_mask),
+      .l_take         (l_take),
+      .wq_valid       (wq_valid),
+      .wq_addr        (wq_addr),
+      .wq_fc          (wq_fc),
+      .wq_wr          (wq_wr),
+      .w_sts          (mmu_sts),
+      .tw_valid       (tw_valid),
+      .tw_addr        (tw_addr),
+      .tw_wr          (tw_wr),
+      .tw_wdata       (tw_wdata),
+      .tw_ack         (tw_ack),
+      .tw_last        (tw_last),
+      .tw_rdata       (tw_rdata),
+      .tw_berr        (tw_berr));
+
   // ==========================================================================
-  // What the units offer that nothing consumes yet: MMUDIS is the MMU's (M11).
-  // The operand's CIIN is the bus unit's report to the sequencer, which has no
-  // use for it -- the data cache sees CIIN cycle by cycle, on the bnow port --
-  // and the beat's port size is the registered copy of what bnow carries.
+  // What the units offer that nothing consumes. The operand's CIIN is the bus
+  // unit's report to the sequencer, which has no use for it -- the data cache
+  // sees CIIN cycle by cycle, on the bnow port -- and the beat's port size is
+  // the registered copy of what bnow carries.
   // ==========================================================================
   logic unused_top;
-  assign unused_top = &{1'b1, mmudis_sync_n, req_ciin, beat_port};
+  assign unused_top = &{1'b1, req_ciin, beat_port};
 
 endmodule

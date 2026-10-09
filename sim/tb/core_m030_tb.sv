@@ -418,7 +418,7 @@ module core_m030_tb;
     log_at = peek_l(32'h0408);
     res_at = peek_l(32'h040C);
     nlog   = (peek_l(32'h8000) - log_at) / 8;
-    check(nexp == 30, $sformatf("m030: the program expects thirty exceptions (%0d)", nexp));
+    check(nexp == 23, $sformatf("m030: the program expects twenty-three exceptions (%0d)", nexp));
     check(nlog == nexp, $sformatf("m030: %0d exceptions taken, %0d expected", nlog, nexp));
     for (k = 0; k < nexp && k < nlog; k = k + 1) begin
       want_fv = peek_w(exp_at + 8*k);
@@ -449,6 +449,16 @@ module core_m030_tb;
     check(peek_l(res_at + 32'h14) === 32'h0000_F000, "m030: MOVEC ISP is the stack");
     check(sys_s.dut.u_seq.dreg[6] === 32'h0000_005A,
           "m030: the program reached its end");
+    // The MMU instructions ran: CRP's descriptor type is zero after reset, so
+    // the last PTEST (PTESTW #5,(A0),#7,A1) found it invalid at the root --
+    // I set, no level searched -- and fetched no descriptor, so A1 is zero
+    // (PRM 6, UM Table 9-3). PLOAD does not touch MMUSR.
+    check(sys_s.dut.u_mmu.mmusr_q === 16'h0400 && sys_a.dut.u_mmu.mmusr_q === 16'h0400,
+          $sformatf("m030: MMUSR after PTEST of an invalid root is $0400 (%04h)",
+                    sys_s.dut.u_mmu.mmusr_q));
+    check(sys_s.dut.u_seq.areg[1] === 32'd0,
+          $sformatf("m030: PTEST's address register is zero with no descriptor fetched (%08h)",
+                    sys_s.dut.u_seq.areg[1]));
     check(sys_s.dut.u_seq.sr_q[13] === 1'b0, "m030: ... in user mode");
     check(sys_s.dut.u_seq.cacr_q === 32'h0000_3111,
           "m030: CACR is WA DBE ED IBE EI again, as the program left it");

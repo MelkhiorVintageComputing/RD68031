@@ -38,7 +38,7 @@ Less than its size suggests. Word for word:
 |---|---|---|---|
 | the six frames | Table 6-5 | Table 8-6: the same six, every field at the same offset | unchanged |
 | the version word | `+$36`, 6.1.12 | `+$36`, 8.1.8 and 8.1.13 | unchanged; RTE now **checks** it, below |
-| format `$2` | CHK, CHK2, cpTRAPcc, TRAPcc, TRAPV, trace, zero divide, cp postinstruction | the same, and **MMU configuration** (8.1.10) | M11 builds it with the existing `$2` builder |
+| format `$2` | CHK, CHK2, cpTRAPcc, TRAPcc, TRAPV, trace, zero divide, cp postinstruction | the same, and **MMU configuration** (8.1.10) | built by the existing `$2` builder since M11 |
 | format `$9` | figure 7-43 | figure 10-43, the same ten words | unchanged |
 | special status word | figure 6-8: bits 11-9 and 3 **zero** | figure 8-9: bits 11-9 and 3 **X, "for internal use only"** | written as zero; a handler may not change them (8.2.2); RTE ignores them |
 | bus fault sources | BERR | BERR, and every MMU refusal (8.1.2, 9.5.2) | the same frame and the same bits -- below |
@@ -77,6 +77,15 @@ read-modify-write starts again at, which RTE needs to rerun "the entire
 instruction" (UM 8.2.3, rule 5). Nothing else in the rework of exceptions
 needed a home: the RESET pin's reset and the double bus fault are states no
 frame is ever built in, and IPEND's hold is about the pins.
+
+**M11 released its reservation, `+$4C`.** The MMU needed no frame state
+(`doc/mmu.md`): its registers are architectural and PMOVE writes them on a
+microword that takes no fault, after the operand is safe in T0 and T1; PTEST
+and PLOAD wait for posted writes before their search starts, so nothing can be
+taken while it runs, and PTEST's descriptor address reaches An on the next
+microword, which can take no fault either; and the table walker is hardware
+beside the bus unit, whose registers are cycle-level (rule 11). The budget is
+369 bits of 492, nothing reserved, seven words spare.
 
 ---
 
@@ -208,7 +217,7 @@ adds a way for a restored pipe to disagree with memory.
 
 ## What the MC68030 adds: the MMU, the data cache, the burst
 
-### MMU faults (M11)
+### MMU faults (M11, `doc/mmu.md`)
 
 **An MMU fault is a bus error on the logical access, and nothing more.** UM
 8.1.2: "a bus error exception also occurs when the MMU detects that a
@@ -250,17 +259,25 @@ UM 9.4 keeps an entry with B set until a PFLUSH, a PLOAD or the replacement
 algorithm removes it. A rerun searches again if the entry has gone.
 
 The table walker's registers are therefore cycle-level, like the bus unit's, and
-go in `EXEMPT` when M11 writes them.
+are in `EXEMPT` (`mmu.w_*`). So are the bus unit's copies of an operand's
+translation (`op_pmask`, `op_pb1`, ...): what the MMU said when the operand was
+taken holds until it is done, and RTE's rerun of a faulted operand is a new
+candidate, looked up again.
 
-The MMU instructions (M11) commit the way every instruction does: PMOVE writes
-TC, CRP, SRP, TT0, TT1 or MMUSR on the microword that completes it, so a fault on
+The refusal itself is taken where a BERR would be: the cycle that would have
+started is `ST_ABT`, which drives no pin and ends in S5 with a bus error, and
+the operand engine reports it exactly as it reports BERR -- the residual, DOB,
+the SSW, a posted write's fault and a prefetch's all follow unchanged.
+
+The MMU instructions commit the way every instruction does: PMOVE writes TC,
+CRP, SRP, TT0, TT1 or MMUSR on the microword that completes it, so a fault on
 its memory operand -- an ordinary data fault -- leaves the register as it was
 (rule 2). PTEST and PLOAD search the tables and report in MMUSR and the ATC
 rather than by exception. PMOVE of an invalid configuration is the MMU
 configuration exception, vector 56, a post-instruction exception on the six-word
-frame (UM 8.1.10, Table 8-6). If one of them needs working state beyond T0-T3
-and the extension word across a microword that can fault, it comes out of the
-reservation below.
+frame (UM 8.1.10, Table 8-6). None of them needed working state beyond T0-T3
+and the extension word, and the reservation that was kept for one is released
+(above).
 
 ### The data cache (M10)
 
@@ -275,8 +292,8 @@ anything, and (`doc/caches.md` has the design):
   bus error can be known. RTE's rerun writes the same bytes to memory again and
   leaves the cache alone, so the rerun is idempotent and the frame need carry
   nothing about it; a handler that cleared the cache in between left nothing to
-  update. A write the MMU refuses instead invalidates the entry (UM 6.1.2, M11),
-  which is also idempotent.
+  update. A write the MMU refuses instead invalidates the entries holding its
+  refused bytes (UM 6.1.2, since M11), which is also idempotent.
 - **A fill fault is an operand fault or nothing.** UM 6.1.3.1: "if the bus
   error occurs on a read cycle for a portion of the required operand ... the
   processor immediately takes a bus error exception. If the read cycle in error
@@ -389,13 +406,12 @@ RTE accepts these six and no other: anything else is a format error, and so is a
 | `+$08` | 12:10 | `irqlvl` | the level of the interrupt being taken |
 | `+$52` | 15:0 | `rmwupc` | the micro-address the read-modify-write under way starts again at |
 
-**492 bits available, 369 used, 32 reserved, 5 words spare** (`+$50`, `+$54`, `+$56`, `+$58`, `+$5A`).
+**492 bits available, 369 used, 0 reserved, 7 words spare** (`+$4C`, `+$4E`, `+$50`, `+$54`, `+$56`, `+$58`, `+$5A`).
 
 ### Reserved for the milestones still to come
 
 | Offset | Words | For | What |
 |---|--:|---|---|
-| `+$4C` | 2 | M11 | MMU instruction state that has to outlive a posted write's fault -- PTEST, PLOAD, PFLUSH, PMOVE -- should one need more than T0-T3 and the extension word |
 
 ### The frozen set
 
@@ -453,11 +469,11 @@ RTE accepts these six and no other: anything else is a format error, and so is a
 | USP, ISP, MSP | architectural; A7 is not a register, it is whichever of these the S and M bits select |
 | VBR, SFC, DFC | architectural |
 | CACR, CAAR | architectural |
-| TC, CRP, SRP, TT0, TT1, MMUSR (M11) | architectural. PMOVE writes them on the microword that completes it, and a faulted one commits nothing (rule 2) |
+| TC, CRP, SRP, TT0, TT1, MMUSR | architectural. PMOVE writes them on the microword that completes it, and a faulted one commits nothing (rule 2) |
 | the instruction cache | a cache. What it holds is a copy of memory, and a fault neither needs it nor disturbs it |
 | the data cache | a cache, write-through. A faulted write has already updated it -- UM 6.1.2, "the cache contains the new value even if the external write terminates in a bus error" -- and RTE's rerun writes the same bytes to memory again and leaves the cache alone, so the rerun is idempotent. A faulted read filled nothing it did not complete (doc/caches.md) |
-| the ATC (M11) | a cache of the tables. A table search's descriptor updates (U, M) and its ATC entry stand whether or not the access then faults -- UM 9.5.2 -- and a rerun searches again if the entry has gone |
-| a table search in progress (M11) | never interrupted. It runs with RMC asserted throughout (UM 9.5.2), a bus error ends it with the B bit and no exception, and the exception is taken on the retry of the access -- so no frame is ever built in the middle of one |
+| the ATC | a cache of the tables. A table search's descriptor updates (U, M) and its ATC entry stand whether or not the access then faults -- UM 9.5.2 -- and a rerun searches again if the entry has gone |
+| a table search in progress | never interrupted. It runs with RMC asserted throughout (UM 9.5.2), a bus error ends it with the B bit and no exception, and the exception is taken on the retry of the access -- so no frame is ever built in the middle of one |
 
 ### What each fault looks like
 
@@ -658,13 +674,18 @@ the MC68030's, written now for the milestones that will need them.
     is an ordinary data fault on a microword that has committed nothing (UM
     8.1.13: "in this way, the faulty stack frame remains intact").
 
-11. **A table search is never checkpointed, and never interrupted (M11).** It
+11. **A table search is never checkpointed, and never interrupted.** It
     starts after any posted write has finished, runs with RMC held, ends with an
     ATC entry -- B set or not -- and no exception, and the access it was for is
-    then retried and faults on its own. The walker's registers go in `EXEMPT`.
+    then retried and faults on its own. The walker's registers are in `EXEMPT`.
     A microword that consumes a search's result -- PTEST's MMUSR and descriptor
     address, PLOAD's entry -- does so before its next bus request, or the result
-    goes into a reserved word.
+    goes into a reserved word. Since M11: the search is the hardware's
+    (`doc/mmu.md`), a PTEST or PLOAD microword waits for posted writes before it
+    starts one and asks for no cycle of its own, MMUSR and the ATC are written by
+    the search itself, and PTEST's descriptor address -- held where only a PTEST
+    writes it -- reaches An on the next microword, which takes no fault. No
+    reserved word was needed.
 
 12. **A cache is never checkpointed (M10).** Neither the data cache nor the ATC
     nor the instruction cache holds the only copy of anything, so a fault leaves
@@ -673,7 +694,7 @@ the MC68030's, written now for the milestones that will need them.
     disposition" (`+$50`) is released: no rerun needs one. RTE's rerun of a
     faulted operand goes to the bus whatever the caches hold and fills neither;
     a rerun prefetch is an ordinary one, and recomputes cacheability, burst and
-    CIOUT from CACR, the pins and (M11) the tables, as any access does. The
+    CIOUT from CACR, the pins and the tables, as any access does. The
     caches' own registers -- tags, valid bits, a long word being gathered from a
     narrow port, a write about to be applied -- are cycle-level, in `EXEMPT`
     with their reasons.
@@ -746,7 +767,9 @@ names its figure or paragraph.
 | `core_cpif_tb` | the coprocessor midinstruction frame (`$9`) word by word: SR, scanPC, format, instruction address, operation word, effective address |
 | `core_paging_tb` | every combination of operand size, alignment and port width faulted across a page boundary, the frame of each checked: format, SSW (DF, RW, SIZE = the residual, FC, internal bits), `+$10` = the residual's address, `+$18`, and the version |
 | `core_cow_tb` | a real kernel and user process (`sim/programs/cow.S`) through copy-on-write, its memory model refusing read-modify-write cycles as writes the way the MC68030's MMU does (UM 8.2.3); the kernel logs each frame's format, SSW, fault address, SR and version, and the testbench checks every one |
+| `core_mmu_paging_tb`, `core_mmu_cow_tb` | since M11, the two above with the page refused by the MMU's tables instead of by the memory model (`doc/mmu.md`): the same frames, checked the same way |
 | `core_reset_tb` | not a frame: the RESET pin, and the double bus faults of reset exception processing (UM 8.1.1, 12.7.1) |
+| `core_mmu_tb` | since M11, the frames the MMU's refusals make (`sim/programs/mmu_fault.S`): an invalid descriptor, a write-protected page, a supervisor-only table, a root limit and a bus error during the search -- format, vector, the SSW's data half, +$10 the logical address -- each repaired by a handler that asks with PTEST and rerun by RTE; CAS faulting on its read (`$01C5`); a long word read and one written across into a refused page, the residual's size and address in the frame; an instruction fault taken when the word is used and a prefetch fault never taken; and the MMU configuration exception's format $2 frame (`mmu_regs.S`) |
 
 What each RTE case is really asking, because a check that cannot fail on the bug
 it is aimed at is not a check:

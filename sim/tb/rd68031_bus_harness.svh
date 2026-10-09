@@ -164,13 +164,22 @@ wire        ds_pin  = ds_oe  ? ds_n_o : 1'bz;
 wire        rw_pin  = rw_oe  ? rw_o   : 1'bz;
 wire        cbreq_pin = cbreq_oe ? cbreq_n_o : 1'bz;
 
+// The MMU, as an identity: every cycle may go, at its own address, with
+// CIOUT what the test asks for the requester about to be taken -- `req_ciout`
+// for the operand, `fetch_ciout` for the prefetch. Since M11 the bus unit asks
+// the MMU (rd68031_mmu) rather than its requesters; core_mmu_tb tests the real
+// one.
+wire [31:0] mmu_l1_addr, mmu_l2_addr;
+wire        mmu_ci = dut.take_fetch ? fetch_ciout : req_ciout;
+
 rd68031_biu dut (
     .clk (clk), .rst_n (rst_n),
     .req_valid (req_valid), .req_kind (req_kind), .req_fc (req_fc),
     .req_addr (req_addr), .req_bytes (req_bytes), .req_wdata (req_wdata),
     .req_rmc (req_rmc), .req_cpuspace (req_cpuspace), .req_cpuaddr (req_cpuaddr),
     .req_cpfault (req_cpfault), .req_cpuraw (1'b0),
-    .req_burst (req_burst), .req_ciout (req_ciout),
+    .req_burst (req_burst),
+    .dc_inhibit (), .dc_inv (), .dc_inv_addr (), .dc_inv_fc (), .dc_inv_bytes (),
     // No data cache here: nothing hits, nothing fills, no completing cycles.
     .req_dfill (1'b0), .dc_on (1'b0), .dc_span (1'b0), .dc_hit_a (1'b0),
     .dc_hit_b (1'b0), .dc_nb (3'd0), .dc_data (40'd0), .dc_wr_take (),
@@ -184,9 +193,18 @@ rd68031_biu dut (
     .rst_addr (32'd0), .rst_bytes (3'd0), .rst_fc (3'd0),
     .rst_rw (1'b1), .rst_rmc (1'b0), .rst_dob (32'd0),
     .fetch_valid (fetch_valid), .fetch_addr (fetch_addr), .fetch_fc (fetch_fc),
-    .fetch_burst (fetch_burst), .fetch_ciout (fetch_ciout),
+    .fetch_burst (fetch_burst),
     .fetch_ack (fetch_ack), .fetch_last (fetch_last), .fetch_rdata (fetch_rdata),
-    .fetch_fault (fetch_fault), .fetch_ciin (fetch_ciin), .bus_abort (1'b0),
+    .fetch_fault (fetch_fault), .fetch_ciin (fetch_ciin), .fetch_ci (),
+    .bus_abort (1'b0),
+    .l1_addr (mmu_l1_addr), .l2_addr (mmu_l2_addr), .l_fc (), .l_rw (), .l_rmc (),
+    .l1_kind (2'b00), .l2_kind (2'b00),
+    .l1_pb (mmu_l1_addr & 32'hFFFF_FF00), .l2_pb (mmu_l2_addr & 32'hFFFF_FF00),
+    .l1_ci (mmu_ci), .l2_ci (mmu_ci), .l_mask (32'h0000_00FF), .l_take (),
+    .wq_valid (), .wq_addr (), .wq_fc (), .wq_wr (),
+    .mmu_busy (1'b0), .mmu_sts (1'b0),
+    .tw_valid (1'b0), .tw_addr (32'd0), .tw_wr (1'b0), .tw_wdata (32'd0),
+    .tw_ack (), .tw_last (), .tw_rdata (), .tw_berr (),
     .beat_valid (beat_valid), .beat_err (beat_err), .beat_data (beat_data),
     .beat_addr (beat_addr), .beat_num (beat_num), .beat_port (beat_port),
     .beat_ciin (beat_ciin), .beat_fetch (beat_fetch),

@@ -17,6 +17,39 @@ reworked, and are not repeated here.*
 
 ---
 
+## M11: the table search
+
+UM 11.7 gives the time of a table search as a table of clock counts for
+two-clock bus cycles and a 32-bit port, by tree shape and by how many U and M
+bits there are to write. This design's walker is hardware (`doc/mmu.md`), and
+`core_mmu_tb` measures it -- the clocks from the search's start to the clock its
+ATC entry is written, on the harness's 32-bit asynchronous port (three-clock
+cycles, one more than UM 11.7 assumes):
+
+| Search | UM 11.7 | here |
+|---|--:|--:|
+| no FC level, two short levels, no U or M to write ("xSSxx", none) | 33 | 18 |
+| FC level, A and B long, U written at each level ("LLLxx", all U and M) | 53 | 52 |
+| one short level, U already set | -- | 10 |
+
+Each descriptor costs its bus cycles plus two to three clocks of the walker's
+own -- choose the next table, check the limit, decide the descriptor -- and a
+history write is one more bus cycle. With UM 11.7's two-clock cycles every row
+would be shorter here still; the part's microcoded search spends more clocks
+between its cycles. The bus cycles themselves -- their number, order, function
+code, RMC -- are the part's, and are what `core_mmu_tb` counts. A search starts
+the clock after the bus unit sees the miss, and the access is retried the clock
+after the entry is written.
+
+One order differs from the part's (`doc/divergences.md`): an operand that
+crosses into a page the ATC does not have has that page searched before its
+first cycle, where the part would search when the cycle reaches the page.
+
+The MMU instructions' own clock counts (UM 11.7.2) are not yet in `make
+cycles`, which still holds RD68021's MC68020 rows until M15 retargets it.
+
+---
+
 ## M10: the instruction cache's lines
 
 The MC68030's instruction cache tags a LINE of four long words, not a long word

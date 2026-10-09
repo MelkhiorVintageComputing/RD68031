@@ -36,9 +36,13 @@ is told apart, and gets them:
   that is no MMU instruction is an F-line exception that asked no coprocessor,
   and shows none.
 
+- an ATC miss, since M11: "MMU address translation cache miss -- processor to
+  begin table search" (UM Table 8-2) -- three clocks when the MMU's walker
+  starts a search for an access. PTEST and PLOAD are instructions, and their
+  searches show none.
+
 What remains:
 
-- **The ATC miss** is M11's: there is no ATC yet.
 - **One negated clock between indications.** This core can finish an instruction
   every clock, which a real MC68030 does not, and two one-clock pulses on
   consecutive clocks would read as one two-clock pulse. An event that arrives
@@ -87,8 +91,11 @@ the vector table. "During the reset period, the entire bus three-states."
   program space. What UM 8.1.1 does not name keeps its value: D0-D7, A0-A6,
   USP, MSP, SFC, DFC and CAAR. The arbiter keeps running: "bus arbitration
   requests are recognized during normal processing, RESET assertion, HALT
-  assertion" (UM 7.7). TC.E, TT0.E and TT1.E are M11's, which builds the
-  registers and adds them to the same reset (`doc/plan.md`).
+  assertion" (UM 7.7). Since M11 the pin also clears TC.E, TT0.E and TT1.E
+  and nothing else of the MMU's: the rest of those registers, CRP, SRP, MMUSR
+  and the ATC keep their values -- UM 9.2.2, "a reset of the processor does not
+  invalidate any entries in the ATC" -- and a table search in progress is
+  abandoned with the bus cycle it was running.
 - **`rst_n`**, which is not an MC68030 pin (`doc/pinout.md`), is the power-on
   initialisation ASIC needs: every register, the architectural ones included,
   takes its value from it, and the processor then runs the same reset exception.
@@ -121,7 +128,9 @@ with it, two clocks after it, and eight clocks after it -- only the last resets.
 `core_reset_tb` resets a running program and checks UM 8.1.1 step by step, the
 registers it spares, the cache invalidated, a restart from a double bus fault
 and from STOP, the double bus faults of reset exception processing, and the
-RESET instruction against a RESET from outside.
+RESET instruction against a RESET from outside. `core_mmu_tb` pulls RESET at
+the end of `mmu_regs.S` and checks the three E bits cleared, the rest of TC,
+TT0, TT1 and CRP kept, and the ATC still holding its entry.
 
 ---
 
@@ -214,37 +223,34 @@ of hand-built `$A` frames.
 
 ---
 
-## The MMU instructions take an F-line exception in supervisor mode (until M11)
+## The MMU: where the manual is silent, and what this design chose
 
-**UM 9.8 and PRM 6:** PMOVE, PTEST, PLOAD and PFLUSH (with PFLUSHA) are
-privileged instructions that move MMU registers, search and load the address
-translation cache, and flush it. UM 8.1.5: "Instructions that have word patterns
-with bits [15:12] equal to $F, bits [11:9] equal to $0, and defined word patterns
-for subsequent words are legal MMU instructions."
+*Closes M5's "The MMU instructions take an F-line exception in supervisor mode
+(until M11)": PMOVE, PTEST, PLOAD, PFLUSH and PFLUSHA execute (`doc/mmu.md`),
+and only a command word the part does not define takes the F-line exception
+(UM 8.1.5).*
 
-**What this design does:** the decoder sends their first words -- CpID 0, type
-000, an effective address field of zero or control alterable -- to `mmu_op` in
-`tools/ucode/program.py`. In user mode that is a privilege violation, vector 8,
-as the part does (UM 8.1.6, 9.8). In supervisor mode it is an F-line exception,
-vector 11, with the instruction's own address in a four-word frame: what the
-part does for a CpID-0 word whose command word it does not define, applied to
-every one, because there is no MMU yet to execute them. M11 builds the MMU and
-replaces the stub with the instructions. Every other CpID-0 word is final
-already: a privilege violation in user mode and an F-line exception in
-supervisor mode (`cp0_unimp`).
+**UM section 9** describes the MMU's architecture -- the registers, transparent
+translation, the ATC, the table search, the faults -- and the design follows it
+(`doc/mmu.md`). Where it is silent or contradicts itself the choice is below;
+the contradictions themselves are `doc/manual-contradictions.md` 19-25.
 
-**Why it is allowed:** it is not; it is provisional. An operating system that
-runs with translation disabled and never executes an MMU instruction sees no
-difference; one that does gets an F-line exception, which a handler can
-recognise and emulate. M11's gate (`core_mmu_tb`, `make cosim-mmu`) retires
-this entry.
+| | UM | here |
+|---|---|---|
+| ATC replacement | "a pseudo least recently used algorithm ... a validity bit and an internal history bit" (9.4), no more | the lowest invalid entry, else the lowest whose history bit is clear; set on load and on use, all but the newest cleared once every valid entry's is set (`doc/mmu.md`). A program cannot tell the difference unless it counts table searches |
+| who searches | "microcode and dedicated logic" (9.1) | a hardware walker beside the bus unit; the same bus cycles, the same results (`doc/mmu.md`) |
+| when a misaligned operand's second page is searched | not said; the part presumably searches when the cycle reaches the page | before the operand's first cycle, with the first page's: the same cycles in a different order, only for an operand that crosses into a page the ATC does not have |
+| ECS for a cycle the MMU aborts | "the processor aborts the cycle before asserting AS" -- after ECS (7.1.1) | no ECS: no cycle starts, as for a cache hit |
+| an RMW cycle that misses in the ATC | searched (9.2.1, figure 9-8) -- or a bus error for the handler to PLOAD (9.10.3's example) | searched -- manual-contradictions 19 |
+| U in the descriptor whose S bit makes the violation | figure 9-29 writes it, 9.5.1.1 does not | not written -- manual-contradictions 21 |
+| PTEST's N after a bus error | "the actual number of tables accessed" | the table whose fetch failed counts |
+| PLOAD with a TTx register matching | not said | PLOAD searches the tables anyway |
+| reserved bits of TTx and MMUSR | not said | not kept: they read zero, as TC's and the root pointers' do by the manual |
+| PMOVE register-to-memory with FD set | not said; the format has the bit | accepted, FD ignored |
 
-**How it is checked:** `core_m030_tb` runs every MMU instruction form the
-assembler produces for `-mcpu=68030` -- PMOVE to and from TC, CRP, MMUSR and TT0,
-PFLUSHA, PFLUSH by function code and by address, PTESTR, PTESTW with an address
-register, PLOADR and PLOADW -- in supervisor mode and three of them in user
-mode, and checks the vector, the stacked program counter and the stacked S bit
-of each.
+**How it is checked:** `core_mmu_tb` (`doc/mmu.md`, the tests), which counts
+the table search cycles of every phase -- and so would see a different search
+order or a different replacement.
 
 ---
 

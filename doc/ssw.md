@@ -45,7 +45,7 @@ what it reads back. Two reasons:
   could be read back out of a short frame written by something else, which
   `doc/checkpoint.md` rule 1 forbids. A milestone that wants them may use them
   only in the long frame (rule 13).
-- The long frame has room: 64 bits are reserved for M8-M11 and 64 more are
+- The long frame has room: since M11 nothing is reserved and seven words are
   spare (`doc/checkpoint.md`).
 
 Testbenches check them zero in every frame they read, citing this file and not
@@ -101,8 +101,10 @@ the MMU detects that a successful address translation is not possible". The
 MMU's refusals -- an invalid descriptor, a limit violation, a supervisor-only
 page, a write-protected page, a bus error during the table search, an ATC entry
 with B set -- all arrive as a bus error on the access that was being translated,
-on its retry (UM 9.5.2). So when M11 builds them they set exactly what a BERR on
-that access sets:
+on its retry (UM 9.5.2). So they set exactly what a BERR on that access sets --
+since M11 by construction: the refused cycle is `ST_ABT` in the bus unit, which
+ends with a bus error the operand engine reports as it reports BERR
+(`doc/mmu.md`):
 
 - **a data access**: `DF`, with `RM`, `RW`, `SIZE` and `FC2-FC0` of the faulted
   cycle and `+$10` its **logical** address -- the residual's, if the operand
@@ -118,7 +120,8 @@ handler that has to tell a refused write from a bus timeout does the same.
 operation for protection checking, regardless of the state of R/W". The word
 then has `DF`, `RM` = 1 and `RW` = 1 -- a read -- even though the page refused a
 write. RTE with `DF` set reruns the whole operation from that read (UM 8.2.3).
-`core_cow_tb`'s memory model refuses exactly that, and its CAS checks it.
+`core_cow_tb`'s memory model refuses exactly that, and its CAS checks it;
+`core_mmu_tb` checks it against the MMU itself (`mmu_fault.S`, case 6: `$01C5`).
 
 **Nothing about caches or bursts.** A fault frame describes an operand. UM
 6.1.3.1: a bus error on a fill cycle that carries none of the operand "no

@@ -181,6 +181,22 @@ COND = enc(
     # instruction.
     'CREGBAD',
     'CREGBADC',  # ... the same code, read from stage C before it is latched
+    # ---- The MMU instructions, UM 9.8 and PRM 6 -----------------------------
+    # UM 8.1.5: "Instructions that have bits [15:12] of the first words equal
+    # to $F, bits [11:9] equal to $0, and undefined patterns in subsequent
+    # words are treated as unimplemented instructions with F-line opcodes".
+    # The command word is tested in stage C, with the operation word's
+    # effective-address field, as it is taken -- the CREGBADC shape.
+    'MMUBADC',
+    # The command word in xw: which instruction, PRM 6's formats by bits 15:13.
+    'MMUPTEST',  # 100: PTEST
+    'MMUPLFL',   # 001: PLOAD or a PFLUSH
+    'MMUSRG',    # 011: PMOVE to or from the MMU status register
+    'MMUQUAD',   # 010 with bit 11: PMOVE to or from SRP or CRP, a quad word
+    'XW12', 'XW9', 'XW8',   # single bits: the PFLUSH mode, R/W, PTEST's A
+    # The PMOVE just committed loaded TC, SRP or CRP with a value UM 9.7.5.3
+    # refuses -- the MMU configuration exception, vector 56 (UM 8.1.10).
+    'MMUCFG',
 )
 
 # --------------------------------------------------------------------------
@@ -360,6 +376,13 @@ ASRC = enc(
                  # where RTE resumes out of a short bus fault frame, which
                  # carries no micro-address of its own -- doc/checkpoint.md
                  # rule 1
+    # ---- The MMU, UM 9.7 and 9.8 -------------------------------------------
+    # The register the PMOVE command word in xw names, read: the upper long
+    # word of SRP or CRP, and the lower long word of those or the whole of TC,
+    # TT0, TT1 or (zero extended) MMUSR -- rd68031_mmu.
+    'MMUHI',
+    'MMULO',
+    'MMUDA',     # the physical address of the last descriptor PTEST fetched
 )
 
 # A convention, not a field: ASRC.DREG and ASRC.AREG read the register that bits
@@ -564,6 +587,10 @@ DST = enc(
     # The micro-address a read-modify-write starts again at, out of the long
     # frame's +$52 -- UM 8.2.3, and MARK below.
     'RMWUPC',
+    # PRM 6, PTEST: "the physical address of the last descriptor successfully
+    # fetched loads into the address register" bits 7:5 of the command word
+    # name -- written whole, A7 being the active stack pointer.
+    'PTEST_AN',
 )
 
 # How wide the destination write is. A write to a data register of size byte or
@@ -690,6 +717,24 @@ CPUSPACE = enc('NONE', 'IACK', 'BKPT', 'COPROC',
 #          is latched and carried by the long frame at +$52.
 MARK = enc('NONE', 'EXC', 'LOAD', 'RMW')
 
+# What a microword asks of the MMU -- UM 9.8, rd68031_mmu. The command word is
+# in xw, the logical address of PTEST, PLOAD and PFLUSH <ea> in EA, and the
+# function code is the one the command word's FC field names (PRM 6).
+#
+#   WR       PMOVE into the register the command word names, from T1 -- and
+#            from T0 for the upper half of SRP or CRP -- flushing the ATC
+#            unless FD is set (UM 9.7.5.1)
+#   FLUSHA   PFLUSHA: every ATC entry
+#   FLUSH    PFLUSH FC,MASK
+#   FLUSHEA  PFLUSH FC,MASK,<ea>
+#   PLOAD    a table search that loads the ATC -- the microword stalls until
+#            the search is over
+#   PTEST    the ATC (level 0) or a table search, into MMUSR -- likewise
+#
+# Each waits for a table search already under way to finish first: the ATC and
+# the registers a search reads are not changed under one.
+MMU = enc('NONE', 'WR', 'FLUSHA', 'FLUSH', 'FLUSHEA', 'PLOAD', 'PTEST')
+
 # Which exception stack frame a microword is building. UM table 8-6 names the
 # exceptions that take each; the code below is the value that goes in bits 15:12
 # of the format word at +$06.
@@ -713,8 +758,9 @@ SHOP = enc(
 # struct: yosys and Quartus are happier, and the generated package gives every
 # field a position so the RTL cannot disagree about one.
 # --------------------------------------------------------------------------
-# The micro-address. 4096 words: 1529 are used after M11, and the coprocessor
-# interface (M13) is the last large block of microcode still to come. The width
+# The micro-address. 4096 words: 1998 are used since RD68031's M11, the MMU
+# instructions included (RD68021 counted 1529 at its own M11, before its
+# coprocessor interface). The width
 # is the depth of the microcode store, and the store is built at its full depth
 # -- 8192 words cost 24.5 block RAMs on the Artix where 4096 cost half that --
 # so it is sized to the program, not to the plan's first estimate. The frame
@@ -816,6 +862,7 @@ FIELDS = OrderedDict([
     # bus.
     ('sync',  (1,  None,  0)),
     ('mark',  (2,  MARK,  'NONE')),
+    ('mmu',   (3,  MMU,   'NONE')),
 ])
 
 

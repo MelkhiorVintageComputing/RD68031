@@ -88,12 +88,15 @@ module rd68031_ifu #(
     input  logic [31:0] caar,
     input  logic  [3:0] cach_op,     // {CED, CD, CEI, CI}, pulsed by MOVEC
     input  logic        cdis_sync_n,
-    // The MMU's cache inhibit for the prefetch about to be asked for: the CI bit
-    // of the ATC entry or TTx register that maps it (UM 6.1, 9.5). It stops the
-    // fill and the burst request and nothing else -- "whenever a read access
-    // occurs and the required instruction word ... is resident in the
-    // appropriate on-chip cache ... the state of the corresponding CI bits in
-    // the MMU are also ignored". Zero until M11 drives it. doc/caches.md.
+    // The MMU's cache inhibit for the prefetch being answered: the CI bit of the
+    // ATC entry or TTx register that mapped it (UM 6.1, 9.5), valid with
+    // fetch_ack. The prefetch is translated when the bus unit starts it, after
+    // this unit has asked for it, so the verdict comes back with the long word,
+    // as CIIN does; the bus unit has already withheld CBREQ for it. It stops
+    // the fill and nothing else -- "whenever a read access occurs and the
+    // required instruction word ... is resident in the appropriate on-chip
+    // cache ... the state of the corresponding CI bits in the MMU are also
+    // ignored". doc/caches.md.
     input  logic        ic_inhibit,
 
     // To the bus unit ---------------------------------------------------------
@@ -292,12 +295,12 @@ module rd68031_ifu #(
   assign cache_on = cacr[rd68031_pkg::CACR_EI] && cdis_sync_n;
 
   // Whether a miss now may replace an entry -- UM 6.1's "cachable": the cache
-  // enabled, CDIS negated, and the MMU not inhibiting it; and UM 6.3.1.10,
-  // "when the FI bit is set and a miss occurs in the instruction cache, the
-  // entry (or line) is not replaced". CIIN is the bus's to say, cycle by cycle,
-  // and is looked at when the long word arrives.
+  // enabled and CDIS negated; and UM 6.3.1.10, "when the FI bit is set and a
+  // miss occurs in the instruction cache, the entry (or line) is not
+  // replaced". CIIN is the bus's to say, cycle by cycle, and the MMU's CI the
+  // translation's, and both are looked at when the long word arrives.
   logic may_fill;
-  assign may_fill = cache_on && !cacr[rd68031_pkg::CACR_FI] && !ic_inhibit;
+  assign may_fill = cache_on && !cacr[rd68031_pkg::CACR_FI];
 
   // CACR's CI, CEI, pulsed by the MOVEC that sets them. CEI clears
   // "regardless of the states of the EI and FI bits" (UM 6.3.1.9), and so does
@@ -313,7 +316,8 @@ module rd68031_ifu #(
   // cached like any other: the bus cycle was a cachable prefetch, and the next
   // pass round a loop is usually the one that wants it.
   logic fill_first, fill_beat;
-  assign fill_first = fetch_ack && fetch_fill_q && !fetch_fault && !fetch_ciin;
+  assign fill_first = fetch_ack && fetch_fill_q && !fetch_fault && !fetch_ciin
+                   && !ic_inhibit;
 
   // The rest of a burst: "the subsequent cycles are for the subsequent entries
   // in the cache line" (UM 6.1.3.2). CIIN on one "prevents the data during
