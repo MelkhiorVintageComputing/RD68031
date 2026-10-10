@@ -278,20 +278,37 @@ sim-progs:
 	@$(MAKE) --no-print-directory BUILD=build build/programs/arith.hex \
 	    build/programs/corners.hex
 
+# The testbenches run SIMJOBS at a time (CLAUDE.md: light simulations, up to
+# four in parallel). Each writes its one-line verdict to $(BUILD)/<tb>.simres;
+# the verdicts are printed in TBS order once all have finished, so the output
+# reads as it did when they ran one after another. A testbench that leaves no
+# verdict -- killed, or crashed before writing one -- is a failure.
+SIMJOBS ?= 4
+
 sim: dirs $(COW).hex $(COWMMU).hex $(M030).hex $(CACHEP).hex $(MMUHEX) sim-progs
-	@ok=1; for tb in $(TBS); do \
-	  iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/$$tb.vvp -s $$tb \
-	      $(RTL) sim/models/*.sv sim/tb/$$tb.sv > $(BUILD)/$$tb.build.log 2>&1 \
-	    || { echo "FAIL: $$tb did not elaborate"; \
-	         grep -v $(NOTES) $(BUILD)/$$tb.build.log; ok=0; continue; }; \
+	@rm -f $(addprefix $(BUILD)/,$(addsuffix .simres,$(TBS))); \
+	run_tb() { \
+	  tb=$$1; r=$(BUILD)/$$tb.simres; \
+	  if ! iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/$$tb.vvp -s $$tb \
+	      $(RTL) sim/models/*.sv sim/tb/$$tb.sv > $(BUILD)/$$tb.build.log 2>&1; then \
+	    { echo "FAIL: $$tb did not elaborate"; \
+	      grep -v $(NOTES) $(BUILD)/$$tb.build.log; } > $$r; return; \
+	  fi; \
 	  vvp $(BUILD)/$$tb.vvp > $(BUILD)/$$tb.log 2>&1; \
 	  if grep -q '^FAIL' $(BUILD)/$$tb.log; then \
-	    echo "FAIL: $$tb"; grep -E '^  FAIL|^FAIL' $(BUILD)/$$tb.log | head -30; ok=0; \
+	    { echo "FAIL: $$tb"; grep -E '^  FAIL|^FAIL' $(BUILD)/$$tb.log | head -30; } > $$r; \
 	  elif ! grep -q '^PASS' $(BUILD)/$$tb.log; then \
-	    echo "FAIL: $$tb reported no PASS"; tail -20 $(BUILD)/$$tb.log; ok=0; \
+	    { echo "FAIL: $$tb reported no PASS"; tail -20 $(BUILD)/$$tb.log; } > $$r; \
 	  else \
-	    echo "  $$(grep -E '^PASS' $(BUILD)/$$tb.log | head -1)"; \
+	    echo "  $$(grep -E '^PASS' $(BUILD)/$$tb.log | head -1)" > $$r; \
 	  fi; \
+	}; \
+	export -f run_tb; \
+	printf '%s\n' $(TBS) | xargs -P $(SIMJOBS) -I{} bash -c 'run_tb {}'; \
+	ok=1; for tb in $(TBS); do \
+	  r=$(BUILD)/$$tb.simres; \
+	  if [ ! -s $$r ]; then echo "FAIL: $$tb left no verdict"; ok=0; continue; fi; \
+	  cat $$r; grep -q '^FAIL' $$r && ok=0; \
 	done; test $$ok -eq 1
 
 # The coprocessor interface, UM section 7, against the scripted coprocessor of
