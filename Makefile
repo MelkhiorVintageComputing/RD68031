@@ -63,7 +63,7 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$(ICACHE_ENTRIES) \
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl paths audit ucode ucode-check sim sim-bus \
         timing timing-verbose timing-build ea cache cycles cpif check clean \
-        vectors vectors-all cosim cosim-long cputest
+        vectors vectors-all cosim cosim-long cputest cosim-mmu ap030
 
 all: lint
 
@@ -89,7 +89,9 @@ help:
 	@echo "  make vectors-all every group, whatever OP says"
 	@echo "  make cosim       real programs, every register at every instruction (STEPS=$(STEPS))"
 	@echo "  make cosim-long  ... the whole of each program"
+	@echo "  make cosim-mmu   MMU programs: registers and the physical data-access stream (COSIMMMU=...)"
 	@echo "  make cache       the same results with no instruction cache at all"
+	@echo "  make ap030       AP68030 against the core, pin against pin (AP030PROGS=...)"
 	@echo "  make cputest     WinUAE's cputest corpus (CPUTEST_SEL=ADD,MOVE.L CPUTEST_MAX=$(CPUTEST_MAX))"
 	@echo "  make cycles      instruction clock counts against UM section 8"
 	@echo "  make timing-verbose  the AC solver, with the binding constraint named"
@@ -208,7 +210,7 @@ ucode-check: dirs
 # until M10 adds instructions the generator has no group for yet.
 VECGROUPS := all
 
-TBS := $(filter-out core_ea_tb core_vec_tb core_cosim_tb core_cycles_tb core_cputest_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
+TBS := $(filter-out core_ea_tb core_vec_tb core_cosim_tb core_cycles_tb core_cputest_tb core_pins_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
 
 # COPROCESSOR=1 builds the coprocessor interface into every core testbench, and
 # puts the scripted coprocessor of sim/models/rd68031_cpmodel.sv on the bus.
@@ -570,6 +572,113 @@ cache: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(PROGS)) \
 
 cosim-long: dirs
 	@$(MAKE) --no-print-directory cosim STEPS=4000000
+
+# ---------------------------------------------------------------------------
+# The MMU, against the oracle -- M11
+#
+# Bare-metal programs with real MC68030 translation tables, run on UAE030 and
+# on the core and compared at every instruction boundary on every register,
+# the MMU's included, and on the ORDERED PHYSICAL DATA-ACCESS STREAM: every
+# operand and stack access at its physical address, every table-search read,
+# every U and M write-back (tools/bus_diff.py stream). Instruction fetches are
+# not compared, nor reads the data cache may have answered.
+#
+# The oracle gets the core harness's memory map (rd68031_core_harness.svh):
+# the 64 KB 32-bit port repeated through $0FFF_FFFF, the 16-bit, 8-bit and
+# synchronous ports at $1000_0000, $2000_0000 and $3000_0000, and a window at
+# $4000_0000 that answers with a bus error, which core_cosim_tb +mmu sets up.
+#
+# mmu_fault's trace is cut at 3,000 instructions: the oracle restarts a faulted
+# instruction where the part continues it, and an access its handler abandons
+# (DF cleared) is retried forever there (doc/m11-mismatches.md, b8).
+#
+#   COSIMMMU=<programs>   which (default all); MMU_MAXFAIL=N register
+#                         disagreements to report before a run stops
+#                         (each one is followed by a deposit of the
+#                         oracle's registers, while the PCs agree)
+# ---------------------------------------------------------------------------
+COSIMMMU    ?= mmu_regs mmu_walk mmu_fault mmu_cosim cow_mmu
+MMU_MAXFAIL ?= 5000
+MMUCMP      := $(BUILD)/cosim-mmu
+MMUMAP      := -r 10000000:F0000000:10000 -r 20000000:F0000000:10000 \
+               -r 30000000:F0000000:10000 -e 40000000:F0000000
+
+cosim-mmu: dirs $(MMUHEX) build/programs/mmu_cosim.hex $(COWMMU).hex $(OBUILD)/uae030_trace
+	@mkdir -p $(MMUCMP)
+	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_cosim_tb.vvp -s core_cosim_tb \
+	    $(RTL) sim/models/*.sv sim/tb/core_cosim_tb.sv \
+	    > $(BUILD)/core_cosim_tb.build.log 2>&1 \
+	  || { grep -v $(NOTES) $(BUILD)/core_cosim_tb.build.log; exit 1; }
+	@ok=1; for p in $(COSIMMMU); do \
+	  n=200000; [ $$p = mmu_fault ] && n=3000; \
+	  $(CROSS)objcopy -O binary build/programs/$$p.elf $(MMUCMP)/$$p.bin; \
+	  $(OBUILD)/uae030_trace $(MMUMAP) -B $(MMUCMP)/$$p.ubus $(MMUCMP)/$$p.bin $$n \
+	      > $(MMUCMP)/$$p.trc 2> $(MMUCMP)/$$p.trace.log \
+	    || { echo "  FAIL: $$p: the oracle"; cat $(MMUCMP)/$$p.trace.log; ok=0; continue; }; \
+	  vvp $(BUILD)/core_cosim_tb.vvp +image=build/programs/$$p.hex +trace=$(MMUCMP)/$$p.trc \
+	      +mmu +mmubus=$(MMUCMP)/$$p.cbus +maxfail=$(MMU_MAXFAIL) > $(MMUCMP)/$$p.log 2>&1; \
+	  python3 tools/bus_diff.py stream $(MMUCMP)/$$p.ubus $(MMUCMP)/$$p.cbus \
+	      > $(MMUCMP)/$$p.diff 2>&1; d=$$?; \
+	  if grep -q '^PASS' $(MMUCMP)/$$p.log && [ $$d -eq 0 ]; then \
+	    echo "  PASS: $$p -- $$(sed -n 's/^core_cosim_tb: \([0-9]*\) instructions, every.*/\1/p' $(MMUCMP)/$$p.log) instructions, every register and the data-access stream"; \
+	  else \
+	    echo "  FAIL: $$p"; grep -E "^  FAIL" $(MMUCMP)/$$p.log | head -20; \
+	    grep -E '^core_cosim_tb: .*disagreed' $(MMUCMP)/$$p.log; \
+	    sed -n '1,40p' $(MMUCMP)/$$p.diff; ok=0; \
+	  fi; \
+	done; \
+	test $$ok -eq 1 && echo "PASS: cosim-mmu"
+
+# ---------------------------------------------------------------------------
+# A second core: AP68030, pin against pin -- M11
+#
+# doc/plan.md layer 2. AP68030 (Inputs/ref/AP68030, GPL-2) is built by
+# Verilator into a bench of our own (sim/ap030/ap030_tb.sv) around the slave
+# models and memory map of rd68031_core_harness.svh; the core runs the same
+# images in core_pins_tb under iverilog; both write their transfers through
+# sim/models/rd68031_busmon.sv, and tools/bus_diff.py pins compares the data
+# transfers in order -- address, FC, SIZ, R/W, termination, data, RMC, CBREQ,
+# CBACK, CIIN, CIOUT -- phase by phase. Clock-level timing is not compared.
+#
+# The AP68030 build is heavy (CLAUDE.md): it runs once, alone, at -j4, and is
+# reused. AP030PROGS picks the programs.
+# ---------------------------------------------------------------------------
+AP030PROGS ?= busprobe mmu_cosim mmu_walk mmu_regs mmu_fault cow_mmu
+APBUILD    := $(BUILD)/ap030
+APBENCH    := $(APBUILD)/obj_bench/ap030_tb
+
+build/programs/busprobe.hex: sim/programs/busprobe.S sim/programs/mmu_common.inc sim/programs/mmu.ld
+	@mkdir -p build/programs
+	@$(CROSS)gcc -mcpu=68030 -Isim/programs -c -o build/programs/busprobe.o $<
+	@$(CROSS)gcc -nostdlib -nostartfiles -T sim/programs/mmu.ld \
+	    -o build/programs/busprobe.elf build/programs/busprobe.o \
+	    2> build/programs/busprobe.link.log || { cat build/programs/busprobe.link.log; exit 1; }
+	@$(CROSS)objcopy -O verilog --verilog-data-width=1 build/programs/busprobe.elf $@
+
+$(APBENCH): sim/ap030/ap030_tb.sv sim/ap030/build_bench.sh sim/models/rd68031_slave.sv \
+            sim/models/rd68031_busmon.sv sim/models/rd68031_knobs.svh
+	@echo "  ap030: building AP68030 into $(APBUILD)/obj_bench (Verilator, alone)"
+	@sh sim/ap030/build_bench.sh $(abspath $(APBUILD))/obj_bench
+
+ap030: dirs $(APBENCH) build/programs/busprobe.hex build/programs/mmu_cosim.hex $(MMUHEX) $(COWMMU).hex
+	@mkdir -p $(APBUILD)/run
+	@iverilog $(IVFLAGS) -I sim/tb -I sim/models -o $(BUILD)/core_pins_tb.vvp -s core_pins_tb \
+	    $(RTL) sim/models/rd68031_slave.sv sim/models/rd68031_busmon.sv sim/tb/core_pins_tb.sv \
+	    > $(BUILD)/core_pins_tb.build.log 2>&1 \
+	  || { grep -v $(NOTES) $(BUILD)/core_pins_tb.build.log; exit 1; }
+	@ok=1; for p in $(AP030PROGS); do \
+	  e=; [ $$p = cow_mmu ] && e="+endaddr=2008 +endval=600d"; \
+	  $(APBENCH) +image=build/programs/$$p.hex +pins=$(APBUILD)/run/$$p.ap.pins $$e \
+	      > $(APBUILD)/run/$$p.ap.log 2>&1; \
+	  vvp $(BUILD)/core_pins_tb.vvp +image=build/programs/$$p.hex +pins=$(APBUILD)/run/$$p.rd.pins $$e \
+	      > $(APBUILD)/run/$$p.rd.log 2>&1; \
+	  grep -h -E '^(PASS|FAIL)' $(APBUILD)/run/$$p.ap.log $(APBUILD)/run/$$p.rd.log | sed 's/^/  /'; \
+	  if python3 tools/bus_diff.py pins $(APBUILD)/run/$$p.ap.pins $(APBUILD)/run/$$p.rd.pins \
+	      > $(APBUILD)/run/$$p.diff 2>&1; then \
+	    echo "  PASS: $$p -- $$(sed -n 1p $(APBUILD)/run/$$p.diff | sed 's/^ *//')"; \
+	  else echo "  FAIL: $$p"; sed -n '1,30p' $(APBUILD)/run/$$p.diff; ok=0; fi; \
+	done; \
+	test $$ok -eq 1 && echo "PASS: ap030"
 
 # ---------------------------------------------------------------------------
 # WinUAE's cputest corpus, on the core

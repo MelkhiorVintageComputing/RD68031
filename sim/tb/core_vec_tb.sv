@@ -62,6 +62,28 @@ module core_vec_tb;
   logic [31:0] rpg  [0:23];
   logic [31:0] rval [0:23];
   logic [31:0] rmsk [0:23];
+  // M11: the MMU's registers in and out, and the translation tables laid down
+  // before the run and compared after it (tools/vectors/gen.c, pmmu).
+  logic [31:0] imt  [0:7];
+  logic [31:0] fmt  [0:7];
+  int unsigned ntbl;
+  logic [31:0] tba  [0:31];
+  logic [31:0] tbv  [0:31];
+  logic [31:0] tbf  [0:31];
+  logic [31:0] got, msk;
+  // The bits each MMU register has (UM 9.7; doc/mmu.md): the comparison is
+  // under these, since the oracle keeps the others (doc/oracles.md).
+  function automatic logic [31:0] mmsk(input int unsigned i);
+    case (i)
+      0:       mmsk = 32'h83FF_FFFF;
+      1, 3:    mmsk = 32'hFFFF_0003;
+      2, 4:    mmsk = 32'hFFFF_FFF0;
+      5, 6:    mmsk = 32'hFFFF_8777;
+      default: mmsk = 32'h0000_EE47;
+    endcase
+  endfunction
+  localparam logic [31:0] TBL_A = 32'h0000_3000, TBL_B = 32'h0000_3100,
+                          TBL_IND = 32'h0000_3080;
 
   int unsigned t, n;
   int unsigned passed, failed, shown;
@@ -184,6 +206,14 @@ module core_vec_tb;
         void'($fscanf(vec, "%h", rval[n]));
         void'($fscanf(vec, "%h", rmsk[n]));
       end
+      for (n = 0; n < 8; n = n + 1) void'($fscanf(vec, "%h", imt[n]));
+      void'($fscanf(vec, "%h", ntbl));
+      for (n = 0; n < ntbl; n = n + 1) begin
+        void'($fscanf(vec, "%h", tba[n]));
+        void'($fscanf(vec, "%h", tbv[n]));
+      end
+      for (n = 0; n < 8; n = n + 1) void'($fscanf(vec, "%h", fmt[n]));
+      for (n = 0; n < ntbl; n = n + 1) void'($fscanf(vec, "%h", tbf[n]));
 
       // ------------------------------------------------------------------
       // Memory, exactly as the oracle laid it out.
@@ -207,6 +237,14 @@ module core_vec_tb;
       for (n = 0; n < nwords; n = n + 1)
         put_w(PROG_BASE + 32'(n * 2), w[n][15:0]);
       for (n = 0; n < npoke; n = n + 1) put_l(pa[n], pv[n]);
+      // The pmmu tree (gen.c, setup): B[$00]-B[$3F] identity when the test
+      // has tables, A[0]-A[3] and the indirect's target cleared, then the
+      // pairs the stream carries; zero for every other test.
+      for (n = 0; n < 'h40; n = n + 1)
+        put_l(TBL_B + 32'(n) * 4, (ntbl != 0) ? ((32'(n) << 8) | 32'd1) : 32'd0);
+      for (n = 0; n < 4; n = n + 1) put_l(TBL_A + 32'(n) * 4, 32'd0);
+      put_l(TBL_IND, 32'd0);
+      for (n = 0; n < ntbl; n = n + 1) put_l(tba[n], tbv[n]);
 
       // ------------------------------------------------------------------
       // Run to the instruction, deposit the state, run exactly one.
@@ -247,6 +285,15 @@ module core_vec_tb;
         // CACR is zero after a reset (UM 6.3.1); the few tests that start
         // elsewhere hold only bits a MOVEC could have left there.
         dut.u_seq.cacr_q = cacrv;
+        // The MMU's registers, with the ATC empty (UM 9.7, 9.4).
+        dut.u_mmu.tc_q    = imt[0];
+        dut.u_mmu.crp_q   = {imt[1], imt[2]};
+        dut.u_mmu.srp_q   = {imt[3], imt[4]};
+        dut.u_mmu.tt0_q   = imt[5];
+        dut.u_mmu.tt1_q   = imt[6];
+        dut.u_mmu.mmusr_q = imt[7][15:0];
+        dut.u_mmu.v_q     = '0;
+        dut.u_mmu.h_q     = '0;
         nacc = 0;
         step_one(400, ok);
         // A trace exception is taken where the next instruction would be
@@ -321,6 +368,38 @@ module core_vec_tb;
         bad = 1'b1;
         $sformat(why, "CACR is %08h, UAE030 says %08h", dut.u_seq.cacr_q, fcacr);
       end
+      // The MMU's registers, on the bits each has.
+      for (n = 0; n < 8; n = n + 1) begin
+        case (n)
+          0: got = dut.u_mmu.tc_q;
+          1: got = dut.u_mmu.crp_q[63:32];
+          2: got = dut.u_mmu.crp_q[31:0];
+          3: got = dut.u_mmu.srp_q[63:32];
+          4: got = dut.u_mmu.srp_q[31:0];
+          5: got = dut.u_mmu.tt0_q;
+          6: got = dut.u_mmu.tt1_q;
+          default: got = {16'd0, dut.u_mmu.mmusr_q};
+        endcase
+        // UM Table 9-3: with I set, W, M and S are undefined; with T set
+        // (PTEST level 0), every other bit is.
+        msk = mmsk(n);
+        if (n == 7 && fmt[7][10]) msk = msk & ~32'h0000_2A00;
+        if (n == 7 && fmt[7][6])  msk = 32'h0000_0040;
+        if (!bad && ((got ^ fmt[n]) & msk) !== 32'd0) begin
+          bad = 1'b1;
+          $sformat(why, "%s is %08h, UAE030 says %08h",
+                   n == 0 ? "TC" : n == 1 ? "CRP(hi)" : n == 2 ? "CRP(lo)" :
+                   n == 3 ? "SRP(hi)" : n == 4 ? "SRP(lo)" : n == 5 ? "TT0" :
+                   n == 6 ? "TT1" : "MMUSR", got, fmt[n]);
+        end
+      end
+      // The tables: the U and M bits a search wrote, and nothing else.
+      for (n = 0; n < ntbl; n = n + 1)
+        if (!bad && peek_l(tba[n]) !== tbf[n]) begin
+          bad = 1'b1;
+          $sformat(why, "the descriptor at %08h is %08h, UAE030 says %08h",
+                   tba[n], peek_l(tba[n]), tbf[n]);
+        end
       if (!bad && dut.u_ifu.pc_d !== fpc) begin
         bad = 1'b1;
         $sformat(why, "the PC is %08h, UAE030 says %08h", dut.u_ifu.pc_d, fpc);

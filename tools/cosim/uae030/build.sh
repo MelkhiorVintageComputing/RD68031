@@ -44,12 +44,46 @@ sed -i 's/^\tx_phys_put_long(addr, v);$/\tuae030_bus_walk = 1; x_phys_put_long(a
 sed -i 's/^\treturn x_phys_get_long(addr);$/\tuae030_bus_walk = 1; uae_u32 v = x_phys_get_long(addr); uae030_bus_walk = 0; return v;/' cpummu030.c
 sed -i 's/^\tdescr\[0\] = x_phys_get_long(addr);$/\tuae030_bus_walk = 1; descr[0] = x_phys_get_long(addr);/; s/^\tdescr\[1\] = x_phys_get_long(addr + 4);$/\tdescr[1] = x_phys_get_long(addr + 4); uae030_bus_walk = 0;/' cpummu030.c
 sed -i 's/^\tv = x_phys_get_ilong(addr);$/\tuae030_bus_ifetch = 1; v = x_phys_get_ilong(addr); uae030_bus_ifetch = 0;/; s/^\tv = x_phys_get_iword(addr);$/\tuae030_bus_ifetch = 1; v = x_phys_get_iword(addr); uae030_bus_ifetch = 0;/' cpummu030.c
-sed -i '0,/^#include "cpummu030.h"/s//#include "cpummu030.h"\nextern int uae030_bus_fc, uae030_bus_walk, uae030_bus_ifetch;/' cpummu030.c
+# 1b'. say what each table search is for: the function code of the access it
+#      translates (uae030_walk_fc), and whether PTEST or PLOAD started it
+#      (uae030_walk_insn) -- so that a search for an instruction fetch, whose
+#      place in the bus stream depends on how far the prefetch runs ahead, can
+#      be told from one for an operand (make cosim-mmu, tools/bus_diff.py).
+sed -i 's/^static uae_u32 mmu030_table_search(uaecptr addr, uae_u32 fc, bool write, int level) {$/&\n\tuae030_walk_fc = fc;/' cpummu030.c
+sed -i 's/^        ret = mmu030_table_search(extra, fc, write, level);$/        uae030_walk_insn = 1; ret = mmu030_table_search(extra, fc, write, level); uae030_walk_insn = 0;/' cpummu030.c
+sed -i 's/^    mmu030_table_search(extra, fc, write, 0);$/    uae030_walk_insn = 1; mmu030_table_search(extra, fc, write, 0); uae030_walk_insn = 0;/' cpummu030.c
+sed -i '0,/^#include "cpummu030.h"/s//#include "cpummu030.h"\nextern int uae030_bus_fc, uae030_bus_walk, uae030_bus_ifetch, uae030_walk_fc, uae030_walk_insn;/' cpummu030.c
+# 1b''. an entry point the vector generator uses to give a test its MMU state:
+#      the six registers, installed the way PMOVE installs them (decoded, with
+#      the ATC flushed), without running an instruction. Appended to the copy;
+#      it only calls the core's own decoders.
+cat >> cpummu030.c <<'UAE030EOF'
+
+/* RD68031 harness (tools/cosim/uae030/build.sh): install the MMU registers. */
+void uae030_install_mmu(uae_u32 tc, uae_u64 crp, uae_u64 srp, uae_u32 tt0, uae_u32 tt1, uae_u16 mmusr)
+{
+	tt0_030 = tt0;
+	tt1_030 = tt1;
+	mmu030.transparent.tt0 = mmu030_decode_tt(tt0_030);
+	mmu030.transparent.tt1 = mmu030_decode_tt(tt1_030);
+	tt_enabled = (tt0_030 & TT_ENABLE) || (tt1_030 & TT_ENABLE);
+	crp_030 = crp;
+	srp_030 = srp;
+	mmu030_decode_rp(crp_030);
+	mmu030_decode_rp(srp_030);
+	mmusr_030 = mmusr;
+	tc_030 = tc;
+	mmu030_decode_tc(tc_030, false);
+	mmu030_flush_atc_all();
+}
+UAE030EOF
 # 1c. per-instruction hook at the top of the 68030 MMU run loop
 sed -i 's/^insretry:$/insretry:\n\t\t\t\tuae030_insn_boundary();/' newcpu.c
 sed -i '0,/^#include "cpummu030.h"/s//#include "cpummu030.h"\nextern void uae030_insn_boundary(void);/' newcpu.c
 grep -q 'uae030_bus_fc = fc' cpummu030.c && grep -q 'uae030_bus_walk = 1; uae_u32 v' cpummu030.c \
   && [ "$(grep -c 'uae030_bus_ifetch = 1; v = x_phys_get_i' cpummu030.c)" = 2 ] \
+  && [ "$(grep -c 'uae030_walk_insn = 1; ' cpummu030.c)" = 2 ] && grep -q '^	uae030_walk_fc = fc;' cpummu030.c \
+  && grep -q '^void uae030_install_mmu' cpummu030.c \
   && grep -q 'uae030_insn_boundary();' newcpu.c && grep -q 'MMU_IPAGECACHE030 0' cpummu030.h \
   || { echo "patch failed" >&2; exit 1; }
 cd "$OUT"

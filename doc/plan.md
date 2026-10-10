@@ -114,10 +114,10 @@ It takes over every flow that ran on Musashi:
 **Status (M6–M7 phase A):** in production. `make ea`, `vectors`/`vectors-all`, `cosim`/
 `cosim-long` and `make cache` run against UAE030; the vector stream carries CACR, the
 trace USP and MSP as well as ISP. The groups are RD68021's plus `movec030`, `illegal030`
-(CALLM/RTM), `cmp2`, `cas`, `bitfield_mem` and `packunpk_mem`; `pmmu` and `cache` wait for
-M11 and M10. The mismatches found on the RTL are triaged in `doc/m6-mismatches.md`.
+(CALLM/RTM), `cmp2`, `cas`, `bitfield_mem` and `packunpk_mem`; `pmmu` came with M11
+part 2; `cache` was not written (`make cache` and `core_cache_tb` cover the data cache). The mismatches found on the RTL are triaged in `doc/m6-mismatches.md`.
 
-New: `make cosim-mmu` runs bare-metal kernels with real 030 page tables:
+`make cosim-mmu` (in production since M11 part 2; `doc/oracles.md`) runs bare-metal kernels with real 030 page tables:
 - programs `sim/programs/mmu_*.S`, such as `cow030.S`, TT-mapped I/O, early termination, indirect descriptors, limit faults, U/M updates, PTEST at every level;
 - compared on registers **and** on the ordered physical data-access stream, table-walk accesses included.
 
@@ -136,7 +136,7 @@ of it (`CPUTEST_MAX` per instruction). Results in `doc/m6-mismatches.md`.
 
 ### Layer 2: second-core cross-checks
 
-**`make ap030`.** The same bus probe and MMU programs run on AP68030 under Verilator and on our core. `tools/bus_diff.py` (generalised from `suska_diff.py`) compares the pin-level cycle streams:
+**`make ap030`** (in production since M11 part 2; `doc/oracles.md`). The same bus probe and MMU programs run on AP68030 under Verilator and on our core. `tools/bus_diff.py` (generalised from `suska_diff.py`) compares the pin-level cycle streams:
 - data cycles, async versus sync termination, burst requests, CIOUT;
 - table-walk reads and the RMC descriptor updates.
 
@@ -237,6 +237,22 @@ MMU versions of `core_paging_tb` and `core_cow_tb`. Part 2 adds the oracle flows
 PMMU vector groups and AP68030 -- and should look first at the open questions
 in `doc/mmu.md` (an RMW cycle missing in the ATC, U at the violating
 descriptor).
+
+**Status (M11, part 2):** the oracle side of the MMU. UAE030 carries TC, CRP, SRP, TT0,
+TT1 and MMUSR in its trace (32 fields) and reports which access each table search
+translates; `make cosim-mmu` runs five MMU programs (part 1's three, `cow_mmu`, and
+`mmu_cosim`, written for it) on UAE030 and the core and compares every register at every
+boundary and the ordered physical data-access stream, table searches and U/M write-backs
+included (`tools/bus_diff.py stream`); `make vectors OP=pmmu` sweeps PMOVE, PTEST, PLOAD
+and PFLUSH with the MMU's registers and a small tree in the vector stream (440 vectors);
+`make ap030` runs a bus probe and the MMU programs on AP68030 and on the core, each on the
+same slave models, and compares their pin-level data transfers (`tools/bus_diff.py pins`).
+Everything found is in `doc/m11-mismatches.md`: no class (a) item; the oracles' quirks;
+what the manual leaves open; and two behaviours where both oracles agree against the core
+(the second page of a misaligned operand is searched after its first part; CAS2 writes
+destination 2 first) for a decision. Layer 2 below is in production as described there,
+with the two cores in two benches on identical models rather than in one (they need
+different simulators).
 
 **Known suspects when real software misbehaves (M13, M14):** the deliberate
 differences from the part that follow the manual instead -- `LINK A7` pushes the

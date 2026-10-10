@@ -73,6 +73,12 @@ keeps each compile near 300 MB.
   test that halts the core costs that test and not the run.
 - `uae030_run`: reset (SSP and PC from physical 0 and 4) and run until the instruction hook
   stops it or the core halts. One run per process.
+- Since M11: `uae030_add_region(base, mask, size, berr)` puts more physical memories in front
+  of the RAM (the core harness's 16-bit, 8-bit and synchronous ports) or a window that
+  answers with a bus error; `uae030_walk_info` says, from the bus hook, which access a table
+  search is translating (its function code) and whether PTEST or PLOAD started it;
+  `uae030_cacr`; and `uae030_set_mmu`, which installs TC, CRP, SRP, TT0, TT1 and MMUSR as
+  PMOVE would and flushes the ATC (the vector generator's `pmmu` group).
 
 **Configured as:** `cpu_model` 68030, `mmu_model` 68030, `cpu_compatible`, `cpu_data_cache`.
 That is WinUAE's "68030 MMU + cache" core, `op_smalltbl_34`. There is no FPU, and
@@ -83,6 +89,10 @@ addressing is 32-bit.
   bypass the emulated ATC, so with them on the ATC's behaviour could not be trusted.
 - Flags for the function code of each physical access, for table-search accesses and for
   instruction fetches, and a hook at the instruction boundary.
+- Since M11: the table search notes the function code it translates for and whether PTEST
+  or PLOAD called it (`uae030_walk_fc`, `uae030_walk_insn`), and an entry point,
+  `uae030_install_mmu`, is appended to the copy of `cpummu030.c`: it calls the core's own
+  register decoders and ATC flush.
 - Not a patch, a link option: the core's misaligned-operand routines are wrapped
   (`-Wl,--wrap`, `OWRAP` in the Makefile) so that the glue sees each misaligned operand as
   the one operand it is.
@@ -92,9 +102,10 @@ addressing is 32-bit.
 | Target | Front-end | Bench | What is compared |
 |---|---|---|---|
 | `make ea` | `uae030_ea` | `core_ea_tb` | LEA's address and MOVE.L's operand fetch for every addressing mode and extension-word shape (703 vectors) |
-| `make vectors OP=<group>...` / `vectors-all` | `vectors_gen` | `core_vec_tb` | one instruction from a random state: every register, the three stack pointers, SR (under `srmask`), PC, VBR, SFC, DFC, CACR, CAAR, and the ordered operand-access list with each written value (12,200 vectors in 31 groups) |
+| `make vectors OP=<group>...` / `vectors-all` | `vectors_gen` | `core_vec_tb` | one instruction from a random state: every register, the three stack pointers, SR (under `srmask`), PC, VBR, SFC, DFC, CACR, CAAR, and the ordered operand-access list with each written value (12,640 vectors in 32 groups since M11's `pmmu`) |
 | `make cosim` / `cosim-long` | `uae030_trace` | `core_cosim_tb` | real programs, every register at every instruction boundary (arith 19,497 and corners 2,157 instructions: the whole of each, so the two targets are the same today) |
 | `make cache` | `uae030_trace` | `core_cosim_tb` | the same programs with `ICACHE_ENTRIES=0` and 64, through `tools/cache_diff.py`, after the directed testbenches, the sweep and the effective addresses at 0 |
+| `make cosim-mmu` (M11) | `uae030_trace -B` | `core_cosim_tb +mmu +mmubus=` | the MMU programs: every register at every boundary, the MMU's six included, and the ordered physical data-access stream with every table-search access and U/M write-back (`tools/bus_diff.py stream`) |
 
 `vectors_gen list` names the groups. `VEC_DEBUG=<index>` prints every bus access the
 oracle makes for one vector, instruction fetches included. `core_vec_tb +faillog=` (the
@@ -102,19 +113,81 @@ Makefile writes `build/vectors.fail`) lists every failing vector with both acces
 
 **The trace format** (`uae030_trace` to `core_cosim_tb`): a header `nstep nfield`, then per
 instruction the PC and `nfield` values: D0-D7, A0-A6, USP, ISP, MSP, SR, VBR, CACR, CAAR,
-SFC, DFC (`nfield` = 24). Registers are only ever appended -- the MMU's at M11 -- and the
-bench skips the ones it does not know. The first record is the state at the entry point:
+SFC, DFC, and since M11 TC, CRP (upper, lower), SRP (upper, lower), TT0, TT1, MMUSR
+(`nfield` = 32). Registers are only ever appended, and the bench skips the ones it does not
+know. The MMU's are compared on the bits UM 9.7 gives each register (TC `$83FFFFFF`, a root
+pointer `$FFFF0003:$FFFFFFF0`, TTx `$FFFF8777`, MMUSR `$EE47`), since the oracle keeps the
+others (Quirks). The first record is the state at the entry point:
 USP, MSP, CAAR, SFC and DFC, which a reset leaves undefined (UM 8.1), are copied from it
 into the core before anything runs, and compared from then on.
 
 **The vector stream** (`vectors_gen` to `core_vec_tb`): RD68021's, with CACR added to both
-the starting and the final state and a value mask added to each access. The format is at
+the starting and the final state and a value mask added to each access; since M11 every
+test also carries the MMU's six registers in and out and a list of long words (the `pmmu`
+group's translation tables) laid down before the run and compared after it. The format is at
 the top of `tools/vectors/gen.c`. A test whose oracle run took a bus or address error (the
 long frames are mostly internal state), made more than 24 accesses, or halted is dropped
 and counted. Groups RD68031 adds: `movec030` (CACR's implemented bits, CAAR, the control
 registers the MC68030 does not have), `illegal030` (the CALLM/RTM encodings), `cmp2`,
 `cas`, `bitfield_mem` and `packunpk_mem` (the memory forms RD68021 could not sweep against
-Musashi). Room is left for `cache` (M10) and `pmmu` (M11).
+Musashi), and `pmmu` (M11, below). M10's `cache` group was not written: the data cache's
+behaviour is invisible to one instruction from a reset cache, and `make cache` and
+`core_cache_tb` cover it.
+
+**The `pmmu` group** (440 vectors): PMOVE to and from every register, with legal values,
+values the configuration check refuses, unimplemented bits set, with and without FD,
+through every control alterable mode and the modes PMOVE does not take; PTEST at levels
+0, 1, 2 and 7, read and write, with and without an address register, for user and
+supervisor data, against a valid page, an invalid one, a write-protected one, one with U
+and M set, one with CI, an indirect descriptor, an early-termination page and an invalid
+or write-protected table descriptor; PTEST level 0 under TT1 with RWM set and clear; PLOAD
+read and write against the same; every PFLUSH form; undefined command words; and every
+instruction in user mode. Each test starts with the ATC empty, TT0 covering the test's own
+fetches, stack and vectors, and a two-level tree (`tools/vectors/gen.c`, `g_pmmu`).
+
+### `make cosim-mmu` (M11)
+
+Five bare-metal programs with real MC68030 translation tables, each run on UAE030 and on
+the core and compared at every instruction boundary on every register and on the ordered
+physical data-access stream:
+
+| Program | What |
+|---|---|
+| `mmu_regs`, `mmu_walk`, `mmu_fault` | part 1's self-checking programs (`doc/mmu.md`), unchanged |
+| `cow_mmu` | `sim/programs/cow.S` built `-DCOW_MMU`: the copy-on-write kernel on the MMU |
+| `mmu_cosim` | written for the comparison (`sim/programs/mmu_cosim.S`): operands across page boundaries with neither page in the ATC; TAS, CAS, CAS2 on pages missing from the ATC or with M clear, and a CAS.W across two pages; a user access through a long descriptor with S set; PTEST across a bus error during the search; PLOAD under TT1; every PFLUSH form and PMOVE with and without FD, each followed by accesses whose searches show what was flushed; 30 pages through the ATC; a user program with translated code, data and stack and a misaligned write into an invalid page; a write-protect fault repaired by its handler; TT1 with CI and the caches on |
+
+The oracle is given the core harness's map with `-r`/`-e` (`MMUMAP` in the Makefile).
+
+**The bus stream** (`uae030_trace -B`, `core_cosim_tb +mmubus=`; the format is at the top
+of `uae030_trace.c`): every physical access but instruction fetches, labelled D (operand),
+T (a table search for an operand, PTEST or PLOAD) or F (a table search for an instruction
+fetch), with CACR.ED, and `I n pc` at each boundary. The core's is taken from the pins,
+with the walker's own flags for T/F. `tools/bus_diff.py stream` cuts both into bytes and
+rejoins them within aligned long words (the two split misaligned operands differently),
+puts the oracle's vector fetch after its frame and sorts each bus fault frame's writes
+(the manual orders neither), masks the frame's internal words and the SSW's internal-use
+bits, drops reads made with the data cache on, and aligns the two with a sequence matcher:
+an access present on one side only, a value difference, or an access "moved" by up to 24
+places. Searches for instruction fetches (F) are compared on their own and reported, not
+failed: when a prefetch needs its page depends on how far it runs ahead.
+
+**What `core_cosim_tb` does that `make cosim` does not need:** the MMU's registers are
+compared under the bits UM 9.7 gives each; every disagreeing register of a boundary is
+reported, and with `+maxfail=N` (`MMU_MAXFAIL`, default 5000) the oracle's registers --
+but not the stack pointers, which differ when the two build frames of different sizes --
+are deposited and the run goes on; when the oracle restarts a faulted instruction (its
+boundary appears twice) or the core reaches the boundary after a posted write that then
+faults, the extra boundary is skipped and noted. Each program's results are in
+`build/cosim-mmu/<program>.log` and `.diff`.
+
+**UAE030's MMU quirks** (`doc/m11-mismatches.md` b1-b14): the registers keep every bit;
+the configuration exception's frame is format $0, and a refused TC keeps E; PLOAD and PTEST
+with TC.E clear use a stale layout; a read-modify-write cycle is searched as a read, then
+again for M; a bus fault is recovered by restarting the instruction, so an access
+abandoned with DF clear is retried forever; PTEST across a bus error leaves MMUSR $FFFF and
+the wrong descriptor address; the long frame's stage B address is the fault address; reset
+reads PC before SSP in data space.
 
 ### Quirks, and what the harness does about them
 
@@ -133,6 +206,11 @@ moves or relabels accesses the oracle made; none invents one.
 | A misaligned or multi-byte operand is several accesses | (granularity, not behaviour) | one operand: the core's unit; bit fields in memory become one operand of up to five bytes, PACK/UNPK's word becomes the two bytes the core moves |
 | An instruction-cache burst fill reads the instruction stream through the data path | -- | labelled an instruction fetch |
 | A jump to an odd address takes its address error at the next instruction | UM 8.1.3 | the vector is dropped (long frame either way) |
+| The MMU configuration exception stacks a four-word format $0 frame | UM 8.1.10, table 8-6: the six-word format $2 frame, the PMOVE's address at +$08 | the format $2 frame's four writes, and ISP four bytes lower (`pmmu`) |
+| A TC the configuration check refuses keeps E | UM 9.7.2: "the E bit is cleared" | E clear (`pmmu`) |
+| PMOVE through `(An)+` or `-(An)` updates An before its F-line exception | PRM 6: control alterable modes only | An unchanged (`pmmu`) |
+| Command words $C000 and $E000, and PFLUSHA with an effective address, run as instructions | PRM 6 defines none of them: F-line (UM 8.1.5) | not generated; `core_m030_tb` covers them |
+| The MMU registers keep every bit written | UM 9.7: unimplemented fields read as zero | compared under the masks of the trace format above |
 
 Two more belong to the harness, not the oracle, and are fixed in it:
 - `uae030_set_state` arms tracing itself and refetches before the trace bits are set; a
@@ -166,10 +244,12 @@ Commits: Hatari b166d8c, WinUAE 858c5f3. It worked. A smoke program
 - **A misaligned longword** is split into aligned accesses.
 
 **Not authoritative for, or not modelled:**
+- **The MMU's corner cases**: see the quirks under `make cosim-mmu`.
 - **Clock counts** (`cpu_cycle_exact` is not used) and **burst fills**. The bus stream is
   a stream of accesses, not of bus cycles; layer 2 is for cycles.
-- **FC of a table-search access.** It is labelled 5 by the harness, and the UM's statement
-  of it is still to be found. The reset-vector and vector-fetch accesses carry a stale FC.
+- **FC of a table-search access.** It is labelled 5 by the harness: UM 7.3.3, "table
+  search accesses ... are always read-modify-write cycles to the supervisor data space".
+  The reset-vector and vector-fetch accesses carry a stale FC.
 - **SSW bit 9** and the other bits the UM calls "internal use" have to be masked in
   comparisons.
 - **Interrupts** are not wired yet. M13's lockstep injects them at the boundary where the
@@ -258,7 +338,7 @@ is the bulk integer corpus; UAE030 and the directed tests cover the rest.
 The M0 spike (`cputestgen-m0.ini`: 68030; ADD.L, MOVE.W, DIVU.W, CAS.L, BFEXTU; 55,042
 tests) proved the build and the decoder; `convert.py dump` still prints decoded tests.
 
-## AP68030: a second core (bus cycles, MMU)
+## AP68030: a second core (bus cycles, MMU) -- in production since M11
 
 **What.** A third party's GPL-2 Verilog MC68030 (`Inputs/ref/AP68030`, commit 33007df). It
 has the caches, the MMU, and synchronous and burst cycles. **It implements this very chip,
@@ -300,14 +380,54 @@ more.
 
 Only 24 address bits are decoded.
 
-**The plan for M1–M2.** Put both cores in one testbench of ours with identical slave
-models, and compare the transaction stream: address, FC, SIZ, R/W, data, RMC, burst and
-order. If clock-for-clock comparison turns out to be too fragile, the transaction stream
-alone is the fallback.
+**`make ap030` (M11).** The M0 plan was to put both cores in one testbench of ours with
+identical slave models. What was built is the same comparison with the two cores in two
+benches, because they need different simulators: AP68030 is built by Verilator, this core
+is checked under iverilog. Identical behaviour comes from identical models, not from one
+bench:
 
-**Questions it raised, for the manual to answer:**
-- The reset vector is read with FC=6.
-- Descriptor fetches are RMC reads, with an RMC write-back for U/M.
+- `sim/ap030/ap030_tb.sv` instantiates `ap030_top` through its ports, with four
+  `rd68031_slave` instances and a BERR window laid out exactly as
+  `sim/tb/rd68031_core_harness.svh` lays them out (32-bit asynchronous at `$0xxx_xxxx`,
+  16-bit at `$1xxx_xxxx`, 8-bit at `$2xxx_xxxx`, 32-bit synchronous with burst at
+  `$3xxx_xxxx`, BERR at `$4xxx_xxxx`); `sim/tb/core_pins_tb.sv` is the core on the harness
+  itself. So our programs run on AP68030 unchanged -- its own bench's 24-bit map is not
+  used -- and every slave answers both cores the same way.
+- Both write their transfers through `sim/models/rd68031_busmon.sv`, which looks only at
+  pins: one line per transfer (per beat of a burst), with address, FC, SIZ, R/W, the
+  termination, the data bus, RMC, CBREQ, CBACK, CIIN and CIOUT. The format is at the top of
+  that file.
+- `sim/models/rd68031_knobs.svh` changes the slave models' knobs (CIIN, wait states) at
+  the bus probe's phases, in both benches alike.
+- `tools/bus_diff.py pins` compares the data transfers -- everything but function codes 2
+  and 6 -- in order, phase by phase (a phase begins at each write to `$8000`), on the
+  bytes each port moved; a write's unused lanes (UM table 7-5) are compared separately.
+  Clock-level timing is not compared, as M0 allowed.
+- `sim/ap030/build_bench.sh` copies AP68030 into `build/ap030/AP68030` and builds the bench
+  into `build/ap030/obj_bench/` (Verilator, `-j4`, a few seconds of C++ here). The run ends
+  at the program's write of 99 to `$8000`, or the end marker `+endaddr=`/`+endval=` give
+  (cow_mmu: `$600D` at `$2008`). `+status=` also logs every STATUS run and every ECS not
+  followed by AS.
+
+The programs (`AP030PROGS`): `sim/programs/busprobe.S` (every size at every alignment on
+every port, MOVEM, MOVEP, a long word across two ports, TAS/CAS/CAS2 on every port, the
+data cache with bursts, CIIN on every read and on one beat, wait states, bus errors, CIOUT
+through TT1, the instruction cache bursting from the synchronous port) and the MMU
+programs `mmu_cosim`, `mmu_walk`, `mmu_regs`, `mmu_fault` and `cow_mmu`. Results and
+triage: `doc/m11-mismatches.md`.
+
+**AP68030's quirks** (each against the manual, `doc/m11-mismatches.md` b15-b17):
+- RMC stays asserted into the read after a CAS whose compare failed (UM figure 7-29).
+- The unused D7-D0 lane of a three-byte write at offset 0 carries OP1, not OP0 (UM table
+  7-5).
+- A user search that meets S in a long table descriptor stops there, and PTEST then
+  reports N = 1 and no W from that same descriptor.
+- It never asserts STATUS for three clocks for an ATC miss, so it cannot speak to UM
+  table 8-2's indication.
+
+**Questions it raised at M0, settled:** the reset vector is read with FC 6 (this core
+does the same; UM 8.1.1, supervisor program space); descriptor fetches are RMC reads with
+an RMC write-back for U/M (UM 7.3.3; this core the same).
 
 ## MAME: the m68030 and the Sun-3/80
 

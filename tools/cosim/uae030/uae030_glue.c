@@ -49,6 +49,21 @@ static uint64_t insn_count;
 int uae030_bus_fc = 5;
 int uae030_bus_walk = 0;
 int uae030_bus_ifetch = 0;
+/* Set by the patched table search: the function code of the access it is
+ * translating, and whether PTEST or PLOAD started it. */
+int uae030_walk_fc = 5;
+int uae030_walk_insn = 0;
+
+/* Extra physical regions in front of the RAM (uae030_add_region): each its
+ * own store, repeated through its window, or a window that answers every
+ * access with a bus error. */
+#define UAE030_NREG 8
+static struct {
+	uint32_t base, mask, size;
+	int berr;
+	uint8_t *mem;
+} region[UAE030_NREG];
+static int nregion;
 
 /* A misaligned operand in progress: the core splits it into aligned bus
  * accesses inside mmu030_{get,put}_*_unaligned, which are wrapped at link
@@ -275,51 +290,66 @@ void __wrap_mmu030_put_long_unaligned(uaecptr a, uae_u32 v, uae_u32 fc, int fl)
 	op_end(v);
 }
 
-/* The physical address map: RAM from 0, or a window folded onto it. */
-static inline int map(uint32_t a, int size, uint32_t *off)
+/* The physical address map: the extra regions first, then RAM from 0, or a
+ * window folded onto it. Returns where the access's first byte is, or NULL
+ * for a bus error. */
+static inline uint8_t *map_ptr(uint32_t a, int size)
 {
+	for (int i = 0; i < nregion; i++) {
+		if ((a & region[i].mask) != region[i].base)
+			continue;
+		if (region[i].berr)
+			return NULL;
+		uint32_t o = a % region[i].size;
+		if ((uint64_t)o + size > region[i].size)
+			return NULL;
+		return region[i].mem + o;
+	}
 	if (alias_window && a < alias_window)
 		a %= ram_size;
-	if (a < ram_size && (uint64_t)a + size <= ram_size) {
-		*off = a;
-		return 1;
-	}
-	return 0;
+	if (a < ram_size && (uint64_t)a + size <= ram_size)
+		return ram + a;
+	return NULL;
 }
 
 static inline bool in_ram(uint32_t a, int size)
 {
-	uint32_t o;
-	return map(a, size, &o);
+	return map_ptr(a, size) != NULL;
 }
 
 static uint32_t phys_read(uint32_t a, int size)
 {
-	uint32_t o;
-	if (!map(a, size, &o)) {
+	uint8_t *p = map_ptr(a, size);
+	if (!p) {
 		bool ins = uae030_bus_ifetch || (!uae030_bus_walk && (uae030_bus_fc & 3) == 2);
 		bus_report(a, size, 0, 0, 1);
+		/* The exception longjmps out of whoever set these: a table search
+		 * caught by the MMU code would otherwise leave every later access
+		 * labelled a table search access. */
+		uae030_bus_walk = 0;
+		uae030_bus_ifetch = 0;
 		hardware_exception2(a, 0, true, ins, size == 1 ? sz_byte : size == 2 ? sz_word : sz_long);
 		return 0xffffffff;
 	}
 	uint32_t v = 0;
 	for (int i = 0; i < size; i++)
-		v = (v << 8) | ram[o + i];
+		v = (v << 8) | p[i];
 	bus_report(a, size, 0, v, 0);
 	return v;
 }
 
 static void phys_write(uint32_t a, int size, uint32_t v)
 {
-	uint32_t o;
-	if (!map(a, size, &o)) {
+	uint8_t *p = map_ptr(a, size);
+	if (!p) {
 		bus_report(a, size, 1, v, 1);
+		uae030_bus_walk = 0;
 		hardware_exception2(a, v, false, false, size == 1 ? sz_byte : size == 2 ? sz_word : sz_long);
 		return;
 	}
 	bus_report(a, size, 1, v, 0);
 	for (int i = size - 1; i >= 0; i--) {
-		ram[o + i] = (uint8_t)v;
+		p[i] = (uint8_t)v;
 		v >>= 8;
 	}
 }
@@ -358,12 +388,12 @@ void wait_cpu_cycle_write(uaecptr a, int mode, uae_u32 v)
 uae_u32 wait_cpu_cycle_read_ce020(uaecptr a, int mode) { return wait_cpu_cycle_read(a, mode); }
 void wait_cpu_cycle_write_ce020(uaecptr a, int mode, uae_u32 v) { wait_cpu_cycle_write(a, mode, v); }
 
-uae_u8 *memory_get_real_address(uaecptr a) { uint32_t o; return map(a, 1, &o) ? ram + o : NULL; }
+uae_u8 *memory_get_real_address(uaecptr a) { return map_ptr(a, 1); }
 int memory_valid_address(uaecptr a, uae_u32 s) { return in_ram(a, s); }
 void memory_clear(void) { /* keep the loaded image across the reset */ }
 
 /* debugger / logging peeks: no bus activity */
-static uint8_t peek8(uint32_t a) { uint32_t o; return map(a, 1, &o) ? ram[o] : 0; }
+static uint8_t peek8(uint32_t a) { uint8_t *p = map_ptr(a, 1); return p ? *p : 0; }
 uint32_t STMemory_ReadLong(uint32_t a) { return (peek8(a) << 24) | (peek8(a + 1) << 16) | (peek8(a + 2) << 8) | peek8(a + 3); }
 uint16_t STMemory_ReadWord(uint32_t a) { return (peek8(a) << 8) | peek8(a + 1); }
 uint8_t STMemory_ReadByte(uint32_t a) { return peek8(a); }
@@ -375,7 +405,7 @@ static void REGPARAM2 flat_lput(uaecptr a, uae_u32 v) { phys_write(a, 4, v); }
 static void REGPARAM2 flat_wput(uaecptr a, uae_u32 v) { phys_write(a, 2, v & 0xffff); }
 static void REGPARAM2 flat_bput(uaecptr a, uae_u32 v) { phys_write(a, 1, v & 0xff); }
 static int REGPARAM2 flat_check(uaecptr a, uae_u32 s) { return in_ram(a, s); }
-static uae_u8 *REGPARAM2 flat_xlate(uaecptr a) { uint32_t o; return map(a, 1, &o) ? ram + o : ram; }
+static uae_u8 *REGPARAM2 flat_xlate(uaecptr a) { uint8_t *p = map_ptr(a, 1); return p ? p : ram; }
 
 static addrbank flat_bank = {
 	flat_lget, flat_wget, flat_bget, flat_lput, flat_wput, flat_bput,
@@ -442,6 +472,34 @@ void uae030_init(uint32_t ram_bytes, int data_cache)
 }
 
 void uae030_set_alias(uint32_t window) { alias_window = window; }
+
+int uae030_add_region(uint32_t base, uint32_t mask, uint32_t size, int berr)
+{
+	if (nregion >= UAE030_NREG)
+		return -1;
+	region[nregion].base = base & mask;
+	region[nregion].mask = mask;
+	region[nregion].size = berr ? 0 : size;
+	region[nregion].berr = berr;
+	region[nregion].mem = berr ? NULL : calloc(1, size);
+	return nregion++;
+}
+
+uint8_t *uae030_region_mem(int i) { return (i >= 0 && i < nregion) ? region[i].mem : NULL; }
+
+void uae030_walk_info(int *fc, int *insn)
+{
+	*fc = uae030_walk_fc;
+	*insn = uae030_walk_insn;
+}
+
+uint32_t uae030_cacr(void) { return regs.cacr; }
+
+extern void uae030_install_mmu(uae_u32 tc, uae_u64 crp, uae_u64 srp, uae_u32 tt0, uae_u32 tt1, uae_u16 mmusr);
+void uae030_set_mmu(const uae030_state *s)
+{
+	uae030_install_mmu(s->tc, s->crp, s->srp, s->tt0, s->tt1, s->mmusr);
+}
 uint8_t *uae030_ram(void) { return ram; }
 uint32_t uae030_ram_size(void) { return ram_size; }
 

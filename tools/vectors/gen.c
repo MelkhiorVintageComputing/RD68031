@@ -30,10 +30,10 @@
  * a register, an aligned memory operand, a MISALIGNED one, and the two that
  * have a side effect on an address register.
  *
- * Not yet here, and with room left for them: the MMU instructions and the
- * cache behaviour (M10, M11). Each is one more group in GROUPS[]; a group that
- * needs the MMU or the data cache on sets the test's starting CACR (and, at
- * M11, the MMU registers the stream will then carry) in its own builder.
+ * The MMU instructions are the `pmmu` group (M11): every test carries the
+ * MMU's six registers in and out, and a test that needs translation tables
+ * carries them too, as memory laid down before the run and compared after it
+ * -- which is how the U and M bits a search writes are checked.
  *
  * THE OUTPUT, read positionally by sim/tb/core_vec_tb.sv with $fscanf("%h"):
  *
@@ -57,6 +57,14 @@
  *                                          reaches
  *       nacc                              how many operand accesses it made
  *         per access: addr  rw  bytes  prog  value  mask
+ *       tc crph crpl srph srpl tt0 tt1 mmusr   the MMU's registers it starts
+ *                                         from (M11): installed with the ATC
+ *                                         empty; zero for every group but pmmu
+ *       ntbl  then ntbl pairs of          long words laid down before the run
+ *         address and value               -- translation tables -- and
+ *                                         compared after it
+ *       tc crph crpl srph srpl tt0 tt1 mmusr   the MMU's registers after it
+ *       ntbl values                       those long words after it, in order
  *
  * `rw` is 1 for a read. `prog` is 1 for a program-space reference -- UM 2.4.11
  * to 2.4.14 and 4.2; see doc/oracles.md for why the generator decides it from
@@ -124,6 +132,8 @@ struct test {
     unsigned int poke_a[4], poke_v[4];
     unsigned int srmask;      /* which status-register bits to compare */
     int          bcdfill;     /* the data block is to be valid BCD */
+    unsigned int imt[8];      /* TC, CRP hi/lo, SRP hi/lo, TT0, TT1, MMUSR */
+    int          tables;      /* lay down the pmmu translation tables */
 };
 
 #define MAXTESTS 400000
@@ -212,6 +222,8 @@ static void emit(int nw, const unsigned int *w, int pcrel, int flow)
      * operand by operand. The movec030 group writes it. */
     t->icacr = 0;
     t->bcdfill = 0;
+    memset(t->imt, 0, sizeof t->imt);
+    t->tables = 0;
 }
 
 /* Several starting states for one instruction. */
@@ -1359,6 +1371,328 @@ static void g_packunpk_mem(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* The MMU instructions -- M11                                          */
+/*                                                                     */
+/* PRM 6 ("MC68030 only") and UM 9.7-9.8. One instruction from a state  */
+/* that includes the MMU's registers, with the ATC empty, and for the   */
+/* instructions that search, a small fixed translation tree:            */
+/*                                                                     */
+/*   TC  $80888800: E, PS 256, IS 8, TIA 8, TIB 8 -- logical bits 23-16 */
+/*       index table A, bits 15-8 table B                              */
+/*   CRP = SRP = $7FFF0002:$3000 -- A at $3000, short                   */
+/*   A[0] -> B at $3100; A[1] an early-termination page descriptor      */
+/*   for $0001xxxx; A[2] invalid; A[3] -> B with WP                     */
+/*   B[i] maps page $ii00 to itself for $00-$27 and $30-$3F, and:       */
+/*     $28 invalid, $29 WP, $2A U and M already set, $2B CI,            */
+/*     $2C indirect, through $3080, to page $2C00                       */
+/*   TT0 $00008143 ($00xxxxxx, supervisor spaces), so that the test's   */
+/*   own fetches, stack and vectors are never searched.                 */
+/*                                                                     */
+/* The tables are laid down by the stream and compared after the run,   */
+/* which checks the U and M bits PLOAD writes and PTEST must not.       */
+/* ------------------------------------------------------------------ */
+
+#define TBL_A   0x3000u
+#define TBL_B   0x3100u
+#define TBL_IND 0x3080u
+#define TC_ON   0x80888800u
+
+static const unsigned int MS_ON[8] = {
+    TC_ON, 0x7FFF0002u, TBL_A, 0x7FFF0002u, TBL_A, 0x00008143u, 0, 0
+};
+
+/* The tree, as (address, value) pairs: what the stream carries. */
+#define NTBL 24
+static unsigned int tbl_a[NTBL], tbl_v[NTBL];
+static int ntbl_fixed;
+static void tbl_build(void)
+{
+    int n = 0, i;
+    if (ntbl_fixed) return;
+    tbl_a[n] = TBL_A;       tbl_v[n++] = TBL_B | 2;          /* A[0] */
+    tbl_a[n] = TBL_A + 4;   tbl_v[n++] = 0x00000001u;        /* A[1]: early termination */
+    tbl_a[n] = TBL_A + 8;   tbl_v[n++] = 0;                  /* A[2]: invalid */
+    tbl_a[n] = TBL_A + 12;  tbl_v[n++] = TBL_B | 2 | 4;      /* A[3]: WP */
+    for (i = 0x20; i < 0x30; i++) {
+        unsigned int v = ((unsigned)i << 8) | 1;
+        if (i == 0x28) v = 0;
+        if (i == 0x29) v |= 4;
+        if (i == 0x2A) v |= 0x18;
+        if (i == 0x2B) v |= 0x40;
+        if (i == 0x2C) v = TBL_IND | 2;
+        tbl_a[n] = TBL_B + 4u * (unsigned)i; tbl_v[n++] = v;
+    }
+    tbl_a[n] = TBL_IND;     tbl_v[n++] = 0x00002C01u;        /* the indirect's target */
+    ntbl_fixed = n;
+}
+
+/* The identity entries the test never inspects are written once, as part
+ * of the fixed memory image, on both sides: B[$00]-B[$1F] and B[$30]-B[$3F]
+ * (core_vec_tb writes the same). */
+static void mmu_state(const unsigned int *ms, int tables)
+{
+    struct test *t = &tests[ntests - 1];
+    int i;
+    for (i = 0; i < 8; i++) t->imt[i] = ms[i];
+    t->tables = tables;
+}
+
+/* The address register an instruction's <ea> names, set to an address. */
+static void set_a(int r, unsigned int v) { tests[ntests - 1].a[r] = v; }
+
+#define OPND 0x2200u    /* PMOVE's memory operand, through (A1) */
+
+/* PMOVE: command words, PRM 6. */
+#define PM_TC    0x4000u
+#define PM_SRP   0x4800u
+#define PM_CRP   0x4C00u
+#define PM_TT0   0x0800u
+#define PM_TT1   0x0C00u
+#define PM_MMUSR 0x6000u
+#define PM_RD    0x0200u   /* register to memory */
+#define PM_FD    0x0100u
+
+static void pm_one(unsigned int cw, const unsigned int *ms, unsigned int v0, unsigned int v1,
+                   unsigned int r_tc)
+{
+    unsigned int st[8];
+    memcpy(st, ms, sizeof st);
+    plain2(0xF011, cw, 1, 0);               /* PMOVE (A1) */
+    st[0] = r_tc;
+    mmu_state(st, 1);
+    set_a(1, OPND);
+    poke(OPND, v0);
+    poke(OPND + 4, v1);
+}
+
+static void g_pmmu(void)
+{
+    static const unsigned int tcv[] = {
+        0x00000000u, TC_ON, 0x82888800u /* SRE */, 0x81888800u /* FCL: 8+8+8+8 + 3 */,
+        0x80888700u /* sum 31 */, 0x80788900u /* PS 7 */, 0x80F84500u /* PS 32K, IS 8, 4+5 */,
+        0x80888808u /* TID ignored after a zero TIC? */, 0x03FFFFFFu /* E clear */,
+        0x80C0AA00u, 0x80D0A900u /* PS 8K */, 0xFFFFFFFFu,
+    };
+    static const unsigned int rpv[][2] = {
+        { 0x7FFF0002u, TBL_A }, { 0x00000002u, TBL_A }, { 0x80000003u, TBL_A },
+        { 0x7FFF0001u, 0x00000000u }, { 0x00000000u, TBL_A } /* DT 0 */,
+        { 0xFFFFFFFFu, 0xFFFFFFFFu }, { 0x0000FFFCu, 0x0000300Fu } /* reserved bits */,
+    };
+    static const unsigned int ttv[] = {
+        0x00000000u, 0x00008143u, 0xFFFFFFFFu, 0x0000877Fu, 0x40FF8507u, 0x12008270u,
+    };
+    static const unsigned int regs[] = { PM_TC, PM_SRP, PM_CRP, PM_TT0, PM_TT1, PM_MMUSR };
+    unsigned int ms_off_tc[8];
+    unsigned int w[6];
+    int i, j, fd, r;
+
+    tbl_build();
+    memcpy(ms_off_tc, MS_ON, sizeof ms_off_tc);
+
+    /* PMOVE <register> to memory, each register from a varied starting value
+     * (TC with E clear: a random enabled TC would translate the test). */
+    for (r = 0; r < 6; r++)
+        for (i = 0; i < NPER; i++) {
+            unsigned int st[8];
+            memcpy(st, MS_ON, sizeof st);
+            /* Only bits each register has (UM 9.7, doc/mmu.md): the oracle
+             * keeps the others (doc/oracles.md), and a value with them set
+             * would compare that rather than PMOVE. Those are checked by the
+             * writes below, whose final registers are compared under the
+             * same masks. */
+            st[0] = rnd() & 0x03FFFFFFu;
+            st[1] = (rnd() & 0xFFFF0000u) | 2; st[2] = rnd() & 0xFFFFFFF0u;
+            st[3] = (rnd() & 0xFFFF0000u) | 3; st[4] = rnd() & 0xFFFFFFF0u;
+            st[5] = rnd() & 0xFFFF0777u;        /* not enabled: the test runs through */
+            st[6] = rnd() & 0xFFFF0777u;
+            st[7] = rnd() & 0xEE47u;
+            plain2(0xF011, regs[r] | PM_RD, 1, 0);
+            mmu_state(st, 1);
+            set_a(1, OPND);
+        }
+    /* PMOVE memory to <register>, with and without FD, from a state with
+     * translation off and the tree ready. */
+    for (fd = 0; fd < 2; fd++) {
+        for (i = 0; i < (int)(sizeof tcv / sizeof tcv[0]); i++)
+            pm_one(PM_TC | (fd ? PM_FD : 0), ms_off_tc, tcv[i], 0, 0);
+        for (i = 0; i < (int)(sizeof rpv / sizeof rpv[0]); i++) {
+            pm_one(PM_SRP | (fd ? PM_FD : 0), ms_off_tc, rpv[i][0], rpv[i][1], 0);
+            pm_one(PM_CRP | (fd ? PM_FD : 0), ms_off_tc, rpv[i][0], rpv[i][1], 0);
+            /* ... and with translation on: the new root pointer is used */
+            pm_one(PM_CRP | (fd ? PM_FD : 0), ms_off_tc, rpv[i][0], rpv[i][1], TC_ON);
+        }
+        for (i = 0; i < (int)(sizeof ttv / sizeof ttv[0]); i++) {
+            pm_one(PM_TT0 | (fd ? PM_FD : 0), ms_off_tc, ttv[i], 0, 0);
+            pm_one(PM_TT1 | (fd ? PM_FD : 0), ms_off_tc, ttv[i], 0, 0);
+        }
+    }
+    for (i = 0; i < NPER; i++) {
+        pm_one(PM_MMUSR, ms_off_tc, rnd(), 0, 0);
+    }
+    pm_one(PM_MMUSR | PM_FD, ms_off_tc, 0x12345678u, 0, 0);     /* FD with MMUSR */
+    pm_one(PM_MMUSR | PM_FD | PM_RD, ms_off_tc, 0, 0, 0);
+
+    /* PMOVE through the other control alterable modes, both directions. */
+    for (j = 0; j < N_EA_CTL; j++)
+        for (r = 0; r < 2; r++) {
+            unsigned int cw = PM_TT1 | (r ? PM_RD : 0);
+            unsigned int st[8];
+            int n = 0, k;
+            memcpy(st, MS_ON, sizeof st);
+            st[0] = 0;
+            memset(w, 0, sizeof w);
+            w[n++] = 0xF000u | (unsigned)(EA_CTL[j].mode << 3) | (unsigned)EA_CTL[j].reg;
+            w[n++] = cw;
+            for (k = 0; k < EA_CTL[j].next; k++) w[n++] = EA_CTL[j].ext[k];
+            emitn(2, n, w, 0, 0);
+            mmu_state(st, 1);
+            tests[ntests - 2].imt[0] = 0;
+            memcpy(tests[ntests - 2].imt, st, sizeof st);
+            tests[ntests - 2].tables = 1;
+        }
+    /* ... and the modes PMOVE does not take (UM 9.6, "only control-alterable
+     * addressing modes"): Dn, An, (An)+, -(An), (d16,PC), #<data>. */
+    {
+        static const unsigned int bad_ea[] = { 0x01, 0x09, 0x19, 0x21, 0x3A, 0x3C };
+        for (i = 0; i < 6; i++)
+            for (r = 0; r < 2; r++) {
+                unsigned int st[8];
+                memcpy(st, MS_ON, sizeof st);
+                st[0] = 0;
+                memset(w, 0, sizeof w);
+                w[0] = 0xF000u | bad_ea[i];
+                w[1] = PM_TC | (r ? PM_RD : 0);
+                w[2] = 0x0010; w[3] = 0x0020;
+                emit(4, w, bad_ea[i] == 0x3A, 1);
+                mmu_state(st, 1);
+                set_a(1, OPND);
+            }
+    }
+
+    /* PTEST: levels 0, 1, 2 and 7, read and write, against every kind of
+     * entry in the tree; level 7 also with an address register (A3). The
+     * function code from the instruction (#1, #5), and once each from D1,
+     * SFC and DFC. A2 holds the logical address. */
+    {
+        static const unsigned int la[] = {
+            0x00002480u, 0x00002800u, 0x00002910u, 0x00002A20u, 0x00002B30u,
+            0x00002C40u, 0x00012340u, 0x00022340u, 0x00032340u, 0x00FF2340u,
+        };
+        static const unsigned int lv[] = { 0, 1, 2, 7 };
+        int l, rw, f;
+        for (i = 0; i < (int)(sizeof la / sizeof la[0]); i++)
+            for (l = 0; l < 4; l++)
+                for (rw = 0; rw < 2; rw++)
+                    for (f = 0; f < 2; f++) {
+                        unsigned int fc = f ? 0x15u : 0x11u;      /* #5, #1 */
+                        unsigned int cw = 0x8000u | (lv[l] << 10) | (rw ? 0x200u : 0) | fc;
+                        plain2(0xF012, cw, 1, 0);                 /* PTEST (A2) */
+                        mmu_state(MS_ON, 1);
+                        set_a(2, la[i]);
+                        if (lv[l] == 7) {
+                            plain2(0xF012, cw | 0x100u | (3u << 5), 1, 0);  /* A3 */
+                            mmu_state(MS_ON, 1);
+                            set_a(2, la[i]);
+                        }
+                    }
+        /* the function code from D1, SFC, DFC */
+        for (i = 0; i < 3; i++) {
+            unsigned int fcf = (i == 0) ? 0x09u : (i == 1) ? 0x00u : 0x01u;
+            plain2(0xF012, 0x9E00u | fcf, 2, 0);              /* PTESTR level 7 */
+            for (j = 0; j < 2; j++) {
+                tests[ntests - 1 - j].d[1] = 0x00000001u + 4u * (unsigned)j;
+                memcpy(tests[ntests - 1 - j].imt, MS_ON, sizeof MS_ON);
+                tests[ntests - 1 - j].tables = 1;
+                tests[ntests - 1 - j].a[2] = 0x00002910u;
+            }
+        }
+        /* level 0 under TT1: T, whatever R/W says when RWM is set; when it is
+         * clear, R/W decides (UM 9.8, PTEST) */
+        for (rw = 0; rw < 2; rw++)
+            for (j = 0; j < 2; j++) {
+                unsigned int st[8];
+                memcpy(st, MS_ON, sizeof st);
+                st[6] = j ? 0x00008151u : 0x00008051u;    /* FC 5; RWM, or R/W = 0 (write) */
+                plain2(0xF012, 0x8000u | (rw ? 0x200u : 0) | 0x15u, 1, 0);
+                mmu_state(st, 1);
+                set_a(2, 0x00002480u);
+            }
+    }
+
+    /* PLOAD, read and write, every kind of entry: the U and M bits it writes
+     * (in the tables, compared after), MMUSR untouched. */
+    {
+        static const unsigned int la[] = {
+            0x00002480u, 0x00002800u, 0x00002910u, 0x00002A20u, 0x00002B30u,
+            0x00002C40u, 0x00012340u, 0x00022340u, 0x00032340u,
+        };
+        int rw, f;
+        for (i = 0; i < (int)(sizeof la / sizeof la[0]); i++)
+            for (rw = 0; rw < 2; rw++)
+                for (f = 0; f < 2; f++) {
+                    plain2(0xF012, 0x2000u | (rw ? 0x200u : 0) | (f ? 0x15u : 0x11u), 1, 0);
+                    mmu_state(MS_ON, 1);
+                    set_a(2, la[i]);
+                }
+    }
+
+    /* PFLUSH: every form, from a state with translation on (the ATC is empty,
+     * so what is checked is that each is legal and touches nothing). */
+    {
+        static const unsigned int cw[] = {
+            0x2400u,                    /* PFLUSHA */
+            0x30F1u, 0x3015u, 0x3080u,  /* PFLUSH #1,#7 / #5,#0 / SFC,#4 */
+            0x30E9u,                    /* PFLUSH D1,#7 */
+            0x3001u,                    /* PFLUSH DFC,#0 */
+            0x38F5u, 0x3815u, 0x38E9u,  /* PFLUSH ... ,(A2) */
+        };
+        for (i = 0; i < (int)(sizeof cw / sizeof cw[0]); i++) {
+            plain2((cw[i] & 0x0800u) ? 0xF012u : 0xF000u, cw[i], 1, 0);
+            mmu_state(MS_ON, 1);
+            set_a(2, 0x00002480u);
+        }
+    }
+
+    /* Undefined command words and forms (F-line, UM 8.1.5): PMOVE group 011
+     * with another register, group 111, PFLUSH's undefined modes, PFLUSHA
+     * with an <ea>, PTEST level 0 with an address register, PLOAD with its
+     * reserved bits. */
+    {
+        static const unsigned int bad[][2] = {
+            /* Not here: command words $C000 and $E000 and PFLUSHA with an
+             * <ea>, which PRM 6 does not define and the oracle executes as
+             * if they were something (doc/m11-mismatches.md, b-pmmu);
+             * core_m030_tb checks the F-line for them. */
+            { 0xF011, 0x6400u }, { 0xF011, 0x7000u },
+            { 0xF000, 0x2800u }, { 0xF000, 0x3400u },
+            { 0xF012, 0x8115u }, { 0xF012, 0x2035u },
+            { 0xF011, 0x4400u }, { 0xF011, 0x5000u }, { 0xF011, 0x0000u },
+        };
+        for (i = 0; i < (int)(sizeof bad / sizeof bad[0]); i++) {
+            plain2(bad[i][0], bad[i][1], 1, 1);
+            mmu_state(MS_ON, 1);
+            set_a(1, OPND);
+            set_a(2, 0x00002480u);
+        }
+    }
+
+    /* Privilege: every instruction in user mode -- UM 9.8, the privilege
+     * check is on the operation word. */
+    {
+        static const unsigned int cw[] = { PM_TC, PM_TC | PM_RD, 0x2400u, 0x9E15u, 0x2215u };
+        for (i = 0; i < (int)(sizeof cw / sizeof cw[0]); i++) {
+            user_mode(cw[i] == 0x2400u ? 0xF000u : 0xF011u, cw[i], 1);
+            for (j = 0; j < 2; j++) {
+                memcpy(tests[ntests - 1 - j].imt, MS_ON, sizeof MS_ON);
+                tests[ntests - 1 - j].imt[0] = 0;
+                tests[ntests - 1 - j].tables = 1;
+                tests[ntests - 1 - j].a[1] = OPND;
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* The catalogue                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -1396,9 +1730,9 @@ static const struct group GROUPS[] = {
     { "illegal030", g_illegal030 },
     { "traps",   g_traps   },
     { "trace",   g_trace   },
-    /* M10: "cache" (data-cache behaviour, CACR ED/WA/FD set in the starting
-     * state); M11: "pmmu" (PMOVE, PTEST, PLOAD, PFLUSH, with the MMU registers
-     * added to the stream). */
+    { "pmmu",    g_pmmu    },
+    /* M10's "cache" (data-cache behaviour, CACR ED/WA/FD set in the starting
+     * state) is not here: make cache and core_cache_tb cover it. */
 };
 #define NGROUPS ((int)(sizeof GROUPS / sizeof GROUPS[0]))
 
@@ -1426,6 +1760,8 @@ struct result {
     unsigned int srmask;
     int          nacc;
     struct acc   acc[MAXACC];
+    unsigned int fmt[8];        /* the MMU's registers after */
+    unsigned int tblv[NTBL];    /* the tables after */
 };
 
 static struct result *res;      /* shared with the child that runs the oracle */
@@ -1496,6 +1832,7 @@ static void on_exc(int vector, void *u)
     }
 }
 
+static int mmu_dirty = 1;
 static void setup(int i, uae030_state *st, void *u)
 {
     struct test *t;
@@ -1523,6 +1860,31 @@ static void setup(int i, uae030_state *st, void *u)
         wr16(PROG_BASE + (unsigned)j * 2, t->w[j]);
     for (j = 0; j < t->npoke; j++)
         wr32(t->poke_a[j], t->poke_v[j]);
+    /* The pmmu tree: the identity entries nobody inspects, then the pairs
+     * the stream carries. Zero everywhere else, for every other test. */
+    for (j = 0; j < 0x40; j++)
+        wr32(TBL_B + 4u * (unsigned)j, t->tables ? (((unsigned)j << 8) | 1u) : 0);
+    for (j = 0; j < 4; j++) wr32(TBL_A + 4u * (unsigned)j, 0);
+    wr32(TBL_IND, 0);
+    if (t->tables) {
+        tbl_build();
+        for (j = 0; j < ntbl_fixed; j++) wr32(tbl_a[j], tbl_v[j]);
+    }
+    /* Only when this test has MMU state, or the last one did: installing the
+     * registers re-decodes them and flushes the ATC, which every other group
+     * has no need of (and was generated without, before M11). */
+    if (t->tables || mmu_dirty) {
+        uae030_state ms;
+        mmu_dirty = t->tables;
+        memset(&ms, 0, sizeof ms);
+        ms.tc    = t->imt[0];
+        ms.crp   = ((uint64_t)t->imt[1] << 32) | t->imt[2];
+        ms.srp   = ((uint64_t)t->imt[3] << 32) | t->imt[4];
+        ms.tt0   = t->imt[5];
+        ms.tt1   = t->imt[6];
+        ms.mmusr = (uint16_t)t->imt[7];
+        uae030_set_mmu(&ms);
+    }
 
     for (j = 0; j < 8; j++) st->d[j] = t->d[j];
     for (j = 0; j < 7; j++) st->a[j] = t->a[j];
@@ -1674,6 +2036,45 @@ static void normalise(const struct test *t, struct result *r, const uae030_state
             }
         }
     }
+    /* UM 8.1.10 and table 8-6: the MMU configuration exception (vector 56)
+     * stacks the six-word format $2 frame, with the PMOVE's address at +$08.
+     * The oracle stacks a four-word format $0 frame. Its three writes are
+     * recorded as the manual's four, in the order the frame is built from
+     * the top: the instruction address, the format word, the PC, the SR; and
+     * the stack pointer it leaves is four bytes lower. */
+    if (r->exc == 56 && r->nacc + 1 <= MAXACC) {
+        unsigned int sp0 = t->isp;
+        for (j = 0; j + 2 < r->nacc; j++)
+            if (!r->acc[j].rw && r->acc[j].bytes == 2 && r->acc[j].addr == sp0 - 2
+                && r->acc[j].value == 0x00E0u) {
+                struct acc pc = r->acc[j + 1], sr = r->acc[j + 2];
+                for (e = r->nacc; e > j + 3; e--) r->acc[e] = r->acc[e - 1];
+                r->nacc++;
+                r->acc[j] = pc;
+                r->acc[j].addr = sp0 - 4; r->acc[j].bytes = 4; r->acc[j].value = PROG_BASE;
+                r->acc[j + 1] = sr;
+                r->acc[j + 1].addr = sp0 - 6; r->acc[j + 1].bytes = 2; r->acc[j + 1].value = 0x20E0u;
+                r->acc[j + 1].mask = 0xFFFFFFFFu;
+                r->acc[j + 2] = pc;
+                r->acc[j + 2].addr = sp0 - 10;
+                r->acc[j + 3] = sr;
+                r->acc[j + 3].addr = sp0 - 12;
+                r->isp -= 4;
+                break;
+            }
+    }
+    /* UM 9.7.2: a TC the configuration check refuses is written all the
+     * same, "and the E bit is cleared". The oracle keeps E. */
+    if (r->exc == 56 && (t->w[0] & 0xFFC0u) == 0xF000u && (t->w[1] & 0xE200u) == 0x4000u
+        && ((t->w[1] >> 10) & 7) == 0)
+        r->fmt[0] &= ~0x80000000u;
+    /* PRM 6, PMOVE: "only control alterable addressing modes" -- not (An)+
+     * or -(An), which are an F-line exception (UM 8.1.5) before anything is
+     * done. The oracle takes the exception having updated An; the register
+     * is put back. */
+    if ((t->w[0] & 0xFFC0u) == 0xF000u && r->exc == 11
+        && (((t->w[0] >> 3) & 7) == 3 || ((t->w[0] >> 3) & 7) == 4))
+        r->a[t->w[0] & 7] = t->a[t->w[0] & 7];
     /* PRM 4, DIVU and DIVS: "C -- Always cleared." On an overflow the oracle
      * leaves C as it was. */
     {
@@ -1709,6 +2110,20 @@ static void result(int i, const uae030_state *s, void *u)
     r->dfc  = s->dfc;
     r->caar = s->caar;
     r->cacr = s->cacr;
+    r->fmt[0] = s->tc;
+    r->fmt[1] = (unsigned int)(s->crp >> 32);
+    r->fmt[2] = (unsigned int)s->crp;
+    r->fmt[3] = (unsigned int)(s->srp >> 32);
+    r->fmt[4] = (unsigned int)s->srp;
+    r->fmt[5] = s->tt0;
+    r->fmt[6] = s->tt1;
+    r->fmt[7] = s->mmusr;
+    if (t->tables)
+        for (j = 0; j < ntbl_fixed; j++) {
+            const uint8_t *m = uae030_ram() + tbl_a[j];
+            r->tblv[j] = ((unsigned)m[0] << 24) | ((unsigned)m[1] << 16)
+                       | ((unsigned)m[2] << 8) | m[3];
+        }
     r->srmask = undefined_ccr(t, s->sr, r->exc);
     normalise(t, r, s);
     /* The status register an exception stacked, at the bottom of the frame
@@ -1833,6 +2248,16 @@ int main(int argc, char **argv)
         for (j = 0; j < r->nacc; j++)
             printf(" %x %x %x %x %x %x", r->acc[j].addr, r->acc[j].rw,
                    r->acc[j].bytes, r->acc[j].prog, r->acc[j].value, r->acc[j].mask);
+        printf("\n");
+        for (j = 0; j < 8; j++) printf("%x ", t->imt[j]);
+        printf("\n%x", t->tables ? ntbl_fixed : 0);
+        if (t->tables)
+            for (j = 0; j < ntbl_fixed; j++) printf(" %x %x", tbl_a[j], tbl_v[j]);
+        printf("\n");
+        for (j = 0; j < 8; j++) printf("%x ", r->fmt[j]);
+        printf("\n");
+        if (t->tables)
+            for (j = 0; j < ntbl_fixed; j++) printf("%x ", r->tblv[j]);
         printf("\n");
     }
     return 0;

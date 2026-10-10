@@ -68,6 +68,23 @@ void uae030_init(uint32_t ram_bytes, int data_cache);
 /* Physical addresses below `window` (a power of two, at least the RAM size)
  * address the RAM modulo its size; 0 turns aliasing off (the default). */
 void uae030_set_alias(uint32_t window);
+/* One more physical region, consulted before the RAM: addresses with
+ * (a & mask) == base reach a zeroed store of `size` bytes (a power of two)
+ * repeated through the window, or, with berr set, answer with a bus error --
+ * the way the core harness's other ports and its bus-error window answer.
+ * Returns the region's number, or -1 when there is no room (eight at most). */
+int uae030_add_region(uint32_t base, uint32_t mask, uint32_t size, int berr);
+uint8_t *uae030_region_mem(int i);
+/* From inside the bus hook, for an access of kind UAE030_KIND_WALK: the
+ * function code of the access the search translates, and whether PTEST or
+ * PLOAD started it (then 1). */
+void uae030_walk_info(int *fc, int *insn);
+/* The cache control register, cheaply, from inside a hook. */
+uint32_t uae030_cacr(void);
+/* From inside the instruction hook (or before the run): install TC, CRP, SRP,
+ * TT0, TT1 and MMUSR from *s as PMOVE would, without the configuration check,
+ * and flush the ATC. */
+void uae030_set_mmu(const uae030_state *s);
 uint8_t *uae030_ram(void);
 uint32_t uae030_ram_size(void);
 int uae030_load(const char *path, uint32_t phys);

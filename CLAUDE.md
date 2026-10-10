@@ -153,16 +153,21 @@ make check    # the gate: ucode-check, lint, audit, sim, AC timing
 ```
 
 The oracles, none of which is in `check` because each takes minutes; `doc/oracles.md`
-has the state of each, and `doc/m6-mismatches.md` what they found.
+has the state of each, and `doc/m6-mismatches.md` and `doc/m11-mismatches.md` what they
+found.
 
 ```sh
 make uae030           # build the UAE030 oracle and its front-ends (heavy: run it alone)
 make ea               # every addressing mode and extension-word shape, against UAE030
-make vectors OP=alu   # one instruction group, against UAE030
+make vectors OP=alu   # one instruction group, against UAE030 (OP=pmmu: the MMU instructions)
 make vectors-all      # every group there is
 make cosim            # real programs, every register at every instruction
 make cosim-long       # ... the whole of each program
 make cputest          # WinUAE's cputest corpus (CPUTEST_SEL=ADD,MOVE.L CPUTEST_MAX=N)
+make cosim-mmu        # MMU programs: every register, and the physical data-access stream
+                      # with every table search and U/M write-back (COSIMMMU=...)
+make ap030            # AP68030 against the core, pin against pin, on identical slave
+                      # models (AP030PROGS=...; its Verilator build is heavy: alone)
 make cache            # the same results with no instruction cache (ICACHE_ENTRIES=0 and 64)
 make timing-verbose   # the AC solver, with the binding constraint named
 make cycles           # instruction clock counts, each a regression check
