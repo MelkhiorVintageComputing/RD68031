@@ -253,7 +253,9 @@ is searched": the core searched both pages before the operand's first cycle.
 Both oracles search the second page of a read when the operand's cycles reach
 it, after the first page's part has gone (for a write UAE030 does, and AP68030
 searches both first -- `doc/m11-mismatches.md` c12), and the user decided to
-follow them, for every operand. That is also UM 7.1.1's per-cycle abort ("if
+follow them, for every operand, and after phase B confirmed UAE030's order
+for writes as well (c12: AP68030's write order is a divergence of AP68030's,
+not a defect of the core's). That is also UM 7.1.1's per-cycle abort ("if
 a miss occurs in the address translation cache ... the processor aborts the
 cycle before asserting AS") (`doc/mmu.md`, "Where translation happens";
 `doc/m11-mismatches.md`, Q-A).

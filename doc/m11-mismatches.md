@@ -34,15 +34,16 @@ The user weighed the open questions below and decided:
 Nothing else was changed. Q-E (STATUS and ECS for an ATC miss) has no oracle
 evidence either way and stays open.
 
-**One thing the change uncovered (c12, open).** Q-A was put as "both oracles
+**One thing the change uncovered (c12, decided).** Q-A was put as "both oracles
 agree", and for reads and for a read-modify-write's read they do. For a
 **write** across into a page the ATC does not have, they do not: UAE030 writes
 the first part and then searches the second page, as the core now does for
 every operand; AP68030 searches both pages before the write's first part, as
 part 1's core did -- which is why no comparison showed it until the core
 moved. The change was made uniformly, as decided; AP68030's write order is
-listed as c12 for the user to confirm or overrule. The fault frames are the
-same either way.
+listed as c12. The user decided after phase B to keep UAE030's order for
+writes too, the same rule as reads; AP68030's order is recorded as a
+divergence. The fault frames are the same either way.
 
 **What the change to Q-A has to hold, and how it does** (`doc/mmu.md` has the
 table):
@@ -163,7 +164,7 @@ after -- agreed from the first run.
 | c9 | When a prefetch needs its page searched (the F stream) | | searches again after a flush where the core does not prefetch | later than the core | not fixed; reported, not failed |
 | c10 | CBREQ on the second cycle of a long word read from a 16-bit port, data cache on: `R $1000E032 SIZ=2` | not asserted | -- | asserted | UM 7.3.7: CBREQ is asserted for a cachable read that misses; 6.1.3.1 for a misaligned access. Whether the second cycle of a dynamically sized long word is one is not said |
 | c11 | ATC replacement | not-recently-used (doc/mmu.md) | its own | its own | "pseudo least recently used" (9.4). In every pattern run -- 23 pages (`mmu_walk` 30-36), 30 pages then the last 8 then the first 8 (`mmu_cosim` 19-21) -- all three made the same searches |
-| c12 | *(found in phase B)* A misaligned **write** across into a page the ATC does not have: when is the second page searched? | after the first part (since phase B, Q-A) | after the first part | **before the first part**, with the first page's: `mmu_cosim` phase 1 (`MOVE.L #$11223344,$010008FD`: AP68030 `R $9040, R $9220, W $9220, R $9040, R $9224, W $9224, W $C8FD, W $C900`), phase 23 (`W $D9FE`, user data), `mmu_fault` phase 15 (`W $CBFF`), `cow_mmu` (`W $47FE`, `W $48FF`, `W $4AFE`) | not fixed (UM 7.1.1 aborts "the cycle" on a miss, which reads as per cycle). The part-1 comparison had the core searching every operand's pages up front, which matched AP68030 on writes and hid this; Q-A's "both oracles agree" holds for reads and read-modify-write reads only. The frames are the same either way -- AP68030 also writes the first part and faults on the residual (`mmu_fault` phase 15: SSW $0135 on both). Left as Q-A decided, for the user to confirm |
+| c12 | *(found in phase B)* A misaligned **write** across into a page the ATC does not have: when is the second page searched? | after the first part (since phase B, Q-A) | after the first part | **before the first part**, with the first page's: `mmu_cosim` phase 1 (`MOVE.L #$11223344,$010008FD`: AP68030 `R $9040, R $9220, W $9220, R $9040, R $9224, W $9224, W $C8FD, W $C900`), phase 23 (`W $D9FE`, user data), `mmu_fault` phase 15 (`W $CBFF`), `cow_mmu` (`W $47FE`, `W $48FF`, `W $4AFE`) | decided: kept (UM 7.1.1 aborts "the cycle" on a miss, which reads as per cycle). The part-1 comparison had the core searching every operand's pages up front, which matched AP68030 on writes and hid this; Q-A's "both oracles agree" holds for reads and read-modify-write reads only. The frames are the same either way -- AP68030 also writes the first part and faults on the residual (`mmu_fault` phase 15: SSW $0135 on both). The user decided after phase B to keep it: one rule for every operand, as UAE030 |
 
 ---
 
