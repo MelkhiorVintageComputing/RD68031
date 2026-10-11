@@ -26,6 +26,7 @@
 |   24-27 tables on the 16-bit, 8-bit and synchronous ports
 |   30-36 the ATC: 22 entries and the replacement of a 23rd
 |   40-41 a page with CI: CIOUT, and the data cache inhibited
+|   60-75 operands across a cachable page and a CI one, the data cache on
 
 #include "mmu_common.inc"
 
@@ -448,6 +449,201 @@ main:
         CHECK   %d7, 6
         CHECK   NCFG, 0                  | every one of them consistent
 
+| ===========================================================================
+| Phases 60-75 -- an operand across the boundary between a cachable page and
+| a CI page, with the data cache on: each cycle's CIOUT, and what the cache
+| does with the cycle, are those of the page the cycle is in (UM 6.1, "whenever
+| the appropriate CI bit is set for either a read or a write access and an
+| external bus cycle is required, CIOUT is asserted and the instruction and
+| data caches are ignored for the access"; UM 6.1.2.1, "when CIOUT is asserted,
+| the data cache is completely ignored, even on write cycles operating in the
+| write-allocation mode"; UM 6.1.2, a misaligned access's two entries "are
+| treated independently"). doc/bugs-found.md, M11 phase B.
+|
+| Pages $0140_4000 and $0140_7000 are cachable, at frame $C000; $0140_5000
+| and $0140_6000 are CI, at frame $D000. core_mmu_tb checks that every cycle
+| of these phases to frame $C000 has CIOUT negated and every one to $D000 has
+| it asserted, and counts them.
+|
+| Memory is changed behind the cache through TT0 at the frames' aliases $0001_C000
+| and $0001_D000 (the 32-bit port repeats every 64K), with WA clear so that
+| those writes, the phase markers and the stored results leave the cache
+| alone; WA is set only around the writes under test. Nothing else here reads
+| data -- no PMOVE, no CHECK -- because the test's second long words share line
+| 0 with the marker, SCR and the results. What a phase read is stored at XR and
+| checked at the end with the cache off; three of the values depend on whether
+| the core has a data cache, and core_mmu_tb checks those.
+| ===========================================================================
+        .equ    XR,     0x8A00
+        .equ    AC,     0x0001C000
+        .equ    AD,     0x0001D000
+        WRRP    %crp, 0x7FFF0002, tcx
+        WRREG32 %tc, 0x80C0AA00
+        pflusha
+        move.l  #0x0900, %d0             | ED, and CD: empty
+        movec   %d0, %cacr
+        move.l  #0xA0A1A2A3, AC+0xFFC
+        move.l  #0xB0B1B2B3, AD
+
+        | A long, cachable then CI; page 5 searched between the two parts.
+        PHASE   60
+        move.l  0x01404FFE, %d3
+        move.l  %d3, XR
+        move.l  #0xB4B5B6B7, AD
+        move.l  0x01405000, %d3          | CI: not cached by the long above
+        move.l  %d3, XR+4
+        PHASE   61
+        move.l  0x01404FFC, %d3          | cachable: cached by it
+        move.l  %d3, XR+8
+
+        | A word, cachable then CI.
+        move.l  #0x0900, %d0
+        movec   %d0, %cacr
+        move.l  #0xC0C1C2C3, AD
+        PHASE   62
+        moveq   #0, %d3
+        move.w  0x01404FFF, %d3
+        move.l  %d3, XR+12
+        move.l  #0xC4C5C6C7, AD
+        move.l  0x01405000, %d3          | CI: not cached
+        move.l  %d3, XR+16
+
+        | A long, CI then cachable; page 7 searched between the two parts.
+        move.l  #0x0900, %d0
+        movec   %d0, %cacr
+        move.l  #0xD0D1D2D3, AD+0xFFC
+        move.l  #0xE0E1E2E3, AC
+        PHASE   64
+        move.l  0x01406FFE, %d3
+        move.l  %d3, XR+20
+        move.l  #0xE4E5E6E7, AC
+        PHASE   65
+        move.l  0x01407000, %d3          | cachable: cached, the old value
+        move.l  %d3, XR+24
+        move.l  0x01406FFC, %d3          | CI: the bus
+        move.l  %d3, XR+28
+
+        | A word, CI then cachable.
+        move.l  #0x0900, %d0
+        movec   %d0, %cacr
+        move.l  #0xF0F1F2F3, AC
+        PHASE   66
+        moveq   #0, %d3
+        move.w  0x01406FFF, %d3
+        move.l  %d3, XR+32
+        move.l  #0xF4F5F6F7, AC
+        PHASE   67
+        move.l  0x01407000, %d3          | cachable: cached, the old value
+        move.l  %d3, XR+36
+
+        | A long written, cachable then CI, both pages in the ATC. Page 5's
+        | long word is made valid in the cache first, through a moment with
+        | page 5 cachable: the write's second part must leave it alone.
+        move.l  #0x0900, %d0
+        movec   %d0, %cacr
+        move.l  #0xA0A1A2A3, AC+0xFFC
+        move.l  #0xB0B1B2B3, AD
+        move.l  #0x0000D001, tcxb+20     | B[5] cachable
+        pflusha
+        PHASE   80
+        move.l  0x01404FFC, %d3
+        move.l  0x01405000, %d3
+        move.l  #0x0000D041, tcxb+20     | B[5] CI again
+        pflusha
+        lea     0x01404FFC, %a0
+        ploadw  #FC_SD, (%a0)
+        lea     0x01405000, %a0
+        ploadw  #FC_SD, (%a0)
+        PHASE   68                       | WA after the marker, which it would allocate
+        move.l  #0x2100, %d0             | ED, WA
+        movec   %d0, %cacr
+        move.l  #0x12345678, 0x01404FFE
+        move.l  #0x0100, %d0
+        movec   %d0, %cacr
+        PHASE   69
+        move.l  0x01404FFC, %d3          | a hit, updated
+        move.l  %d3, XR+40
+        move.l  0x01405000, %d3          | a hit on the entry the write ignored
+        move.l  %d3, XR+44
+
+        | A word written, cachable then CI; page 5 searched between the parts.
+        move.l  #0x0900, %d0
+        movec   %d0, %cacr
+        pflusha
+        PHASE   80
+        move.l  0x01404FFC, %d3
+        PHASE   70
+        move.l  #0x2100, %d0
+        movec   %d0, %cacr
+        move.w  #0xBEEF, 0x01404FFF
+        move.l  #0x0100, %d0
+        movec   %d0, %cacr
+        PHASE   71
+        move.l  0x01404FFC, %d3          | a hit, updated
+        move.l  %d3, XR+48
+        move.l  0x01405000, %d3          | CI: the bus
+        move.l  %d3, XR+52
+
+        | A long written, CI then cachable, both pages in the ATC, page 7's
+        | long word valid in the cache: the write's second part updates it.
+        move.l  #0x0900, %d0
+        movec   %d0, %cacr
+        move.l  #0x01020304, AC
+        PHASE   80
+        move.l  0x01407000, %d3
+        lea     0x01406FFC, %a0
+        ploadw  #FC_SD, (%a0)
+        lea     0x01407000, %a0
+        ploadw  #FC_SD, (%a0)
+        PHASE   72
+        move.l  #0x2100, %d0
+        movec   %d0, %cacr
+        move.l  #0x89ABCDEF, 0x01406FFE
+        move.l  #0x0100, %d0
+        movec   %d0, %cacr
+        PHASE   73
+        move.l  0x01407000, %d3          | a hit, updated
+        move.l  %d3, XR+56
+        move.l  0x01406FFC, %d3          | CI: the bus
+        move.l  %d3, XR+60
+
+        | A word written, CI then cachable; page 7 searched between the parts.
+        move.l  #0x0900, %d0
+        movec   %d0, %cacr
+        PHASE   80
+        move.l  0x01407000, %d3
+        pflusha
+        PHASE   74
+        move.l  #0x2100, %d0
+        movec   %d0, %cacr
+        move.w  #0x7788, 0x01406FFF
+        move.l  #0x0100, %d0
+        movec   %d0, %cacr
+        PHASE   75
+        move.l  0x01407000, %d3          | a hit, updated
+        move.l  %d3, XR+64
+        move.l  0x01406FFC, %d3          | CI: the bus
+        move.l  %d3, XR+68
+        moveq   #0, %d0
+        movec   %d0, %cacr
+        PHASE   76
+
+        CHECK   XR,    0xA2A3B0B1
+        CHECK   XR+4,  0xB4B5B6B7
+        CHECK   XR+8,  0xA0A1A2A3
+        CHECK   XR+12, 0x0000A3C0
+        CHECK   XR+16, 0xC4C5C6C7
+        CHECK   XR+20, 0xD2D3E0E1
+        CHECK   XR+28, 0xD0D1D2D3
+        CHECK   XR+32, 0x0000D3F0
+        CHECK   XR+40, 0xA0A11234
+        CHECK   XR+48, 0xA0A112BE
+        CHECK   XR+52, 0xEF78B2B3
+        CHECK   XR+56, 0xCDEF0304
+        CHECK   XR+60, 0xD0D189AB
+        CHECK   XR+64, 0x88EF0304
+        CHECK   XR+68, 0xD0D18977
+
         WRREG32 %tc, 0
         FINISH
 
@@ -560,6 +756,11 @@ tci:    .long   0, 0, 0, 0, 0, tcib + 2, 0, 0
 tcib:   .long   0, 0x0000C041, 0x0000C001, 0     | B[1] CI, B[2] not
         .org    0x1A00
 tps:    .long   0, 0x0000C001, 0, 0              | A[1]: frame $C000, U set by the first
+        .org    0x1A40
+tcx:    .long   0, 0, 0, 0, 0, tcxb + 2, 0, 0    | phases 60-75
+        .org    0x1A80
+tcxb:   .long   0, 0, 0, 0                       | B[4], B[7] cachable at $C000;
+        .long   0x0000C001, 0x0000D041, 0x0000D041, 0x0000C001 | B[5], B[6] CI at $D000
 
         .section .pages, "aw"
         .set    pa, 0xC000

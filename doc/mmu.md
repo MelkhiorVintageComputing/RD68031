@@ -160,6 +160,7 @@ What follows from it:
 | a posted write across two pages | the sequencer has gone on; the write is set aside while its second page is searched, and counts as outstanding throughout (`post_busy`): nothing else is taken by the bus unit, and the microwords that wait for posted writes wait for it. A refusal of its second page is its fault, taken where rule 9 says. PMOVE to a register waits for it before it commits, so that an instruction after the write cannot change the translation of the write's second page |
 | the data cache, half a hit | a read whose first long word hits starts its cycles at the second, and is looked up there (UM 6.1.2, 7.2.7); one whose last long word hits stops short of it, and its second page is never looked up. The cycles that complete a long word from a narrow port stay inside that long word, and so inside its page |
 | a burst | the operand's first cycle never asks for one when it spans two lines (UM 6.1.3.2); the cycle that enters the second page may, as any later cycle of an operand may, once and if CBREQ has not already been asserted for the operand |
+| CIOUT and the data cache | each cycle has its own page's CI: CIOUT, whether a read beat fills the data cache, whether a narrow port's long word is completed, and what a write does to its long word in that page. A read from a cachable page into a CI one caches the first long word and not the second, and the reverse; a write's long word in its second page waits in the cache for that page's translation (`doc/caches.md`; `doc/bugs-found.md`, M11 phase B, which is the defect of deciding it all by the first page) |
 | OCS | the cycle the set-aside operand resumes with is not the operand's first, and has no OCS (UM 7.1.1) |
 | STATUS | three clocks for the second page's search, as for any search an access starts |
 
@@ -289,9 +290,9 @@ CI the caches "are ignored for the access" (UM 6.1):
 
 | | Instruction cache | Data cache |
 |---|---|---|
-| how it is told | `ic_inhibit`, with the prefetch's answer: a prefetch is translated when the bus unit starts it, after the fetch unit asked for it | `dc_inhibit`, with the request: the operand's first page |
+| how it is told | `ic_inhibit`, with the prefetch's answer: a prefetch is translated when the bus unit starts it, after the fetch unit asked for it -- an aligned long word, in one page | by the page each cycle is in: a read beat's CIOUT with its data (`bnow_ci`); a write's first page's CI with the write (`dc_inhibit`), and its second page's, if it has one, when that page's first cycle starts (`dc_wb_go`/`dc_wb_drop`) |
 | a read that misses | not filled; no CBREQ (the bus unit withholds it) | not filled; no CBREQ |
-| a write | -- | the cache not touched at all (6.1.2.1) |
+| a write | -- | the cache not touched at all (6.1.2.1) for its long word in a CI page; its long word in a cachable page treated as any write's |
 | a read that hits | served (6.1: "the state of the corresponding CI bits in the MMU are also ignored") | served |
 
 A write the MMU refuses invalidates the data-cache entries holding its refused
@@ -372,7 +373,7 @@ two watched pages. It drives MMUDIS for `mmu_regs` and pulls RESET at its end.
 | Program | What |
 |---|---|
 | `mmu_regs.S` | every register through PMOVE and what it keeps; the configuration exception for TC (sum, PS, the first-zero rule) and both root pointers, with its frame; PMOVEFD; PLOADR and PLOADW with their history writes counted; PTEST level 0 with each bit; PFLUSHA, PFLUSH by mask and with an address; FC from an immediate, Dn, SFC and DFC; TT1 with CI, R/W, RWM, FC mask, TAS, both registers matching; the instruction and data caches inhibited; MMUDIS; RESET |
-| `mmu_walk.S` | every page size, 256 bytes to 32K; two, three, four and five levels; short and long descriptors; FCL; IS with its ATC consequence; SRE; early termination short, long with a limit, and at the root with and without a limit; indirect descriptors short, long and to a table, left unwritten; root and long-descriptor limits upper and lower; S and WP with PTEST's S and W and the history rule around a supervisor violation; tables on 16-bit, 8-bit and synchronous ports; PTEST at every level with An; 23 pages through the ATC, replacement counted; a CI page |
+| `mmu_walk.S` | every page size, 256 bytes to 32K; two, three, four and five levels; short and long descriptors; FCL; IS with its ATC consequence; SRE; early termination short, long with a limit, and at the root with and without a limit; indirect descriptors short, long and to a table, left unwritten; root and long-descriptor limits upper and lower; S and WP with PTEST's S and W and the history rule around a supervisor violation; tables on 16-bit, 8-bit and synchronous ports; PTEST at every level with An; 23 pages through the ATC, replacement counted; a CI page; reads and writes across a cachable page and a CI page, both ways, CIOUT checked on every cycle and the data cache's contents after each |
 | `mmu_fault.S` | invalid, write-protected, supervisor-only, limit and bus-error faults, each handled with PTEST, repaired and rerun by RTE; CAS on a write-protected page faulting on its read; a long word read and one written across into a refused page, the residual in the frame; a prefetch into an invalid page never used; an instruction in an invalid page; a refused write with the data cache on; a user-mode program fetched, run and given its stack through the tables |
 
 The three programs make 72, 80 and 57 checks of themselves, and the testbench

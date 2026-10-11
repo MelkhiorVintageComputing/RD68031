@@ -77,9 +77,14 @@ module core_mmu_tb;
   int c_wclk [0:NPH-1];   // clocks the walker was busy
   int c_wn   [0:NPH-1];   // ... in how many searches
   int c_wpre [0:NPH-1];   // table search cycles before the phase's first operand cycle
+  int c_frc  [0:NPH-1];   // cycles to physical frame $C000 (mmu_walk 60-79)
+  int c_frd  [0:NPH-1];   // ... to frame $D000
+  int c_frbad[0:NPH-1];   // ... with CIOUT not the frame's: asserted to $C000, negated to $D000
   bit d_seen;             // ... which has been seen
   logic [31:0] pg_watch, pg2_watch;
+  bit  frames_ci;         // mmu_walk, phases 60-79: frame $C000 cachable, $D000 CI
   bit  is_regs;
+  bit  is_walkp;
   int  rmc_breaks;
   bit  walk_seen;
 
@@ -89,7 +94,7 @@ module core_mmu_tb;
       c_wr[i] = 0; c_ww[i] = 0; c_wbad[i] = 0; c_b4[i] = 0; c_c3[i] = 0;
       c_cio[i] = 0; c_cbr[i] = 0; c_pf[i] = 0; c_pfci[i] = 0; c_pg[i] = 0;
       c_pgci[i] = 0; c_pg2[i] = 0; c_st3[i] = 0; c_wclk[i] = 0; c_wn[i] = 0;
-      c_wpre[i] = 0;
+      c_wpre[i] = 0; c_frc[i] = 0; c_frd[i] = 0; c_frbad[i] = 0;
     end
     d_seen = 1'b0;
     ph = 0;
@@ -103,6 +108,7 @@ module core_mmu_tb;
   always @(negedge as_n_o) begin
     #1;
     if (rst_n && as_oe && ph < NPH) begin
+      frames_ci = is_walkp && (ph >= 60) && (ph < 80);
       is_walk = (fc_o == 3'd5) && rmc_oe && !rmc_n_o
              && (((a_o[15:12] >= 4'h9) && (a_o[15:12] <= 4'hB)) || (a_o[31:28] == 4'h4));
       if (is_walk) begin
@@ -128,6 +134,16 @@ module core_mmu_tb;
           if (!ciout_n_o) c_pgci[ph] = c_pgci[ph] + 1;
         end
         if ((a_o & 32'hFFFF_FF00) == pg2_watch) c_pg2[ph] = c_pg2[ph] + 1;
+        // mmu_walk's phases 60-79 map their cachable pages to frame $C000
+        // and their CI pages to $D000: CIOUT on each cycle is its frame's.
+        if (frames_ci && (a_o[31:12] == 20'h0000C)) begin
+          c_frc[ph] = c_frc[ph] + 1;
+          if (!ciout_n_o) c_frbad[ph] = c_frbad[ph] + 1;
+        end
+        if (frames_ci && (a_o[31:12] == 20'h0000D)) begin
+          c_frd[ph] = c_frd[ph] + 1;
+          if (ciout_n_o) c_frbad[ph] = c_frbad[ph] + 1;
+        end
       end
     end
   end
@@ -220,6 +236,14 @@ module core_mmu_tb;
                                     pn, p, c_wpre[p], n));
   endtask
 
+  // mmu_walk's phases 60-79: cycles to the cachable frame and to the CI one.
+  task automatic exp_fr(input string pn, input int p, input int fc, input int fd);
+    check(c_frc[p] == fc, $sformatf("%s phase %0d: %0d cycles to the cachable frame $C000, want %0d",
+                                    pn, p, c_frc[p], fc));
+    check(c_frd[p] == fd, $sformatf("%s phase %0d: %0d cycles to the CI frame $D000, want %0d",
+                                    pn, p, c_frd[p], fd));
+  endtask
+
   task automatic exp_b4(input string pn, input int p, input int b4);
     check(c_b4[p] == b4, $sformatf("%s phase %0d: %0d search cycles to the bus-error region, want %0d",
                                    pn, p, c_b4[p], b4));
@@ -264,6 +288,9 @@ module core_mmu_tb;
     for (i = 0; i < NPH; i = i + 1)
       check(c_wbad[i] == 0, $sformatf("%s phase %0d: %0d table search cycles with CIOUT or CBREQ",
                                       pn, i, c_wbad[i]));
+    for (i = 0; i < NPH; i = i + 1)
+      check(c_frbad[i] == 0, $sformatf("%s phase %0d: %0d cycles whose CIOUT is not their page's",
+                                       pn, i, c_frbad[i]));
     check(rmc_breaks == 0, $sformatf("%s: RMC negated %0d times inside a table search",
                                      pn, rmc_breaks));
     $display("  %s: %0d self-checks, %0d clocks", pn, peek_l(A_NCHK), n);
@@ -273,9 +300,10 @@ module core_mmu_tb;
     int i;
     for (i = 0; i < NPH; i = i + 1)
       if (c_wr[i] || c_ww[i] || c_c3[i] || c_cio[i] || c_cbr[i] || c_pg[i] || c_pg2[i])
-        $display("  %s phase %0d: walk r%0d w%0d b4 %0d (%0d searches, %0d clocks, %0d before the first operand cycle) | sync %0d ciout %0d cbreq %0d | fetch %0d/%0d | pg %0d/%0d pg2 %0d | status3 %0d",
+        $display("  %s phase %0d: walk r%0d w%0d b4 %0d (%0d searches, %0d clocks, %0d before the first operand cycle) | sync %0d ciout %0d cbreq %0d | fetch %0d/%0d | pg %0d/%0d pg2 %0d | status3 %0d | frames %0d/%0d",
                  pn, i, c_wr[i], c_ww[i], c_b4[i], c_wn[i], c_wclk[i], c_wpre[i], c_c3[i], c_cio[i],
-                 c_cbr[i], c_pf[i], c_pfci[i], c_pg[i], c_pgci[i], c_pg2[i], c_st3[i]);
+                 c_cbr[i], c_pf[i], c_pfci[i], c_pg[i], c_pgci[i], c_pg2[i], c_st3[i],
+                 c_frc[i], c_frd[i]);
   endtask
 
   string img_regs, img_walk, img_fault;
@@ -357,7 +385,9 @@ module core_mmu_tb;
     if (!$test$plusargs("only_regs")) begin
       pg_watch  = 32'h0000_CB00;
       pg2_watch = 32'h0000_CC00;
+      is_walkp  = 1'b1;
       run_prog("mmu_walk", img_walk, 1_500_000);
+      is_walkp  = 1'b0;
       if ($test$plusargs("counts")) dump_counts("mmu_walk");
       `include "core_mmu_walk_exp.svh"
 

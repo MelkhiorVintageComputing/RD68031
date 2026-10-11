@@ -442,6 +442,10 @@ EXEMPT = [
     ('dcache', 'dw_data_q', '... its data'),
     ('dcache', 'dw_en_q',   '... whether the cache takes part'),
     ('dcache', 'dw_wa_q',   '... and whether it allocates'),
+    ('dcache', 'dw_xp_q',   '... and whether its second long word is in another '
+                            'page, which keeps the captured write until the bus '
+                            'unit settles that long word (biu.wb_pend): no '
+                            'longer than the write operand'),
     ('ifu', 'ckpt_busy_q',  'RTE is in the middle of putting this pipe back, '
                             'so it does not fetch. It cannot be live across a '
                             'fault: a fault while RTE reads its own frame is a '
@@ -584,6 +588,11 @@ EXEMPT = [
     ('biu', 'op_lp1',       '... the logical page'),
     ('biu', 'op_pb1',       '... its physical base'),
     ('biu', 'op_ci1',       '... and its cache inhibit'),
+    ('biu', 'wb_pend',      'a write across two pages whose second page\'s long '
+                            'word the data cache has not yet settled. Settled '
+                            'when that page\'s first cycle starts or is refused, '
+                            'or on the edge the operand ends -- in a bus error '
+                            'too -- so it never outlives the operand'),
     ('biu', 'mmudis_q',     'MMUDIS as the operand under way was translated '
                             'with -- UM 9.2.3. Lives no longer than the operand'),
     ('biu', 'pk_valid',     'an operand set aside while the table walker '

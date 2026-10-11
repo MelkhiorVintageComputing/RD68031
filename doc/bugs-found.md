@@ -923,3 +923,55 @@ descriptors unchanged after the search, the address PTEST returns, and the
 MMUSR of an indirect descriptor pointing at a table descriptor -- I and three
 tables, no W; `core_mmu_tb` counts two history writes, not three, for each
 indirect search.
+
+---
+
+## M11 · An operand across two pages was cached by its first page's CI
+
+**What:** since M11 phase B a misaligned operand that crosses a page boundary is
+translated page by page: the bus unit looks the second page up when the
+operand's cycles reach it, and drives CIOUT on those cycles from that page's CI.
+But the data cache was told only the first page's: `dc_inhibit`, the CI of the
+page the request starts in, decided at the take whether every read cycle of the
+operand might fill the cache (and whether a narrow port's long word was
+completed), and whether the write touched the cache at all. So a read from a
+cachable page into a CI page filled the CI page's long word -- with CIOUT
+asserted on the very cycle that brought it -- and a later read of it hit, when
+UM 6.1 says that with CI set "CIOUT is asserted and the instruction and data
+caches are ignored for the access". The reverse lost the cachable page's fill,
+which only costs a miss; but a write from a CI page into a cachable one left the
+cachable page's long word, if it was valid, holding its old value while memory
+took the new one -- a stale hit -- and a write from a cachable page into a CI
+one updated the CI page's long word, against UM 6.1.2.1, "when CIOUT is
+asserted, the data cache is completely ignored, even on write cycles".
+
+**Found by:** review of M11 phase B -- the page-by-page translation re-bases
+`op_pb1`/`op_ci1` for the second page, and nothing re-based the cache's view.
+Confirmed by the tests below, whose first run, on the unfixed core, failed
+eleven checks in `core_mmu_tb`: the CI page's long word read back stale after
+the crossing read (`mmu_walk` checks 82 and 85, `$B0B1B2B3` for `$B4B5B6B7`),
+the cachable page's long word was not cached after a CI-to-cachable read
+(phases 65 and 67), and the CI page's long word was written by the
+cachable-to-CI write (phase 69). CIOUT itself was right on every cycle. UAE030
+does what the unfixed core did on the cachable-to-CI side (`doc/m11-mismatches.md`
+c13); AP68030 agrees with the fixed core.
+
+**Fixed by:** cachability by cycle. The data cache's `lk_fill` no longer
+includes CI; each read beat carries its own cycle's CIOUT (`bnow_ci`), and a
+beat with it fills nothing, while the bus unit completes no long word from a
+narrow port on a CIOUT cycle (`need_fill`). A write takes its first page's long
+word with its first page's CI as before; its second page's long word, when it
+is in another page (`dc_xpage`), waits for that page's translation: updated as
+a write to it would be when the page's first cycle starts and the page is
+cachable (`dc_wb_go`), left alone when it is CI, and invalidated if the operand
+is refused there or ends before it gets there (`dc_wb_drop`). While it waits
+(`wb_pend`) no read is answered from the cache. An instruction prefetch is an
+aligned long word, in one page, and was never affected.
+
+**Stops it coming back:** `mmu_walk.S` phases 60-75: a long and a word, read and
+written, from a cachable page into a CI one and back, with the data cache and
+WA on, the second page both in the ATC and searched between the parts. The
+program checks what it reads after memory changes behind the cache;
+`core_mmu_tb` checks that every cycle to the cachable frame has CIOUT negated
+and every cycle to the CI frame has it asserted, counts them per phase, and
+checks the values that depend on whether the core has a data cache.

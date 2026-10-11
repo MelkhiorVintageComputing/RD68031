@@ -236,8 +236,11 @@ module rd68031_top #(
   // required, CIOUT is asserted and the instruction and data caches are
   // ignored for the access" (UM 6.1). The bus unit translates every cycle it
   // starts (doc/mmu.md) and drives CIOUT from the translation, gives the data
-  // cache the request's CI with the request (`dc_inhibit`), and the
-  // instruction cache a prefetch's with its answer (`ic_inhibit`).
+  // cache each read cycle's CIOUT with its data (`bnow_ci`), a write's first
+  // page's CI with the write (`dc_inhibit`) and its second page's, if it has
+  // one, when that page is translated (`dc_wb_go`, `dc_wb_drop`); and the
+  // instruction cache a prefetch's with its answer (`ic_inhibit`) -- a
+  // prefetch is an aligned long word, in one page.
   // ==========================================================================
   logic        req_burst, fetch_burst;
   logic        ic_inhibit, dc_inhibit;
@@ -268,6 +271,7 @@ module rd68031_top #(
   logic        burst_tail;
   // The beat ending now, for the data cache, and the data cache's answers.
   logic        bnow_valid, bnow_err, bnow_ciin, bnow_dfill, bnow_brq, bnow_first;
+  logic        bnow_ci, dc_xpage, dc_wb_go, dc_wb_drop;
   logic [31:0] bnow_data, bnow_addr;
   logic  [1:0] bnow_num, bnow_port;
   logic  [2:0] bnow_fc;
@@ -452,6 +456,9 @@ module rd68031_top #(
           .cach_op     (cach_op),
           .cdis_sync_n (cdis_sync_n),
           .dc_inhibit  (dc_inhibit),
+          .wr_xpage    (dc_xpage),
+          .wb_go       (dc_wb_go),
+          .wb_drop     (dc_wb_drop),
           .lk_addr     (req_addr),
           .lk_fc       (req_fc),
           .lk_bytes    (req_bytes),
@@ -481,7 +488,8 @@ module rd68031_top #(
           .bn_fc       (bnow_fc),
           .bn_dfill    (bnow_dfill),
           .bn_brq      (bnow_brq),
-          .bn_first    (bnow_first));
+          .bn_first    (bnow_first),
+          .bn_ci       (bnow_ci));
     end else begin : g_nodcache
       // No data cache: nothing ever hits, nothing is filled, no burst is asked
       // for, and the bus runs every operand exactly as written.
@@ -497,6 +505,7 @@ module rd68031_top #(
       assign unused_nodcache = &{1'b1, dc_wr_take, bnow_valid, bnow_err, bnow_data,
                                  bnow_addr, bnow_num, bnow_port, bnow_ciin,
                                  bnow_fc, bnow_dfill, bnow_brq, bnow_first,
+                                 bnow_ci, dc_xpage, dc_wb_go, dc_wb_drop,
                                  dc_inhibit, dc_inv, dc_inv_addr, dc_inv_fc,
                                  dc_inv_bytes};
     end
@@ -527,6 +536,9 @@ module rd68031_top #(
       .dc_data        (dc_data),
       .dc_wr_take     (dc_wr_take),
       .dc_inhibit     (dc_inhibit),
+      .dc_xpage       (dc_xpage),
+      .dc_wb_go       (dc_wb_go),
+      .dc_wb_drop     (dc_wb_drop),
       .dc_inv         (dc_inv),
       .dc_inv_addr    (dc_inv_addr),
       .dc_inv_fc      (dc_inv_fc),
@@ -618,6 +630,7 @@ module rd68031_top #(
       .bnow_dfill     (bnow_dfill),
       .bnow_brq       (bnow_brq),
       .bnow_first     (bnow_first),
+      .bnow_ci        (bnow_ci),
       .burst_tail     (burst_tail),
 
       .reset_req      (reset_req),

@@ -45,6 +45,10 @@
 //     it came second on the bus. "Since the write to the cache completes before
 //     the write to external memory, the cache contains the new value even if
 //     the external write terminates in a bus error" (UM 6.1.2).
+//   - ... except a write's second long word when it is in another page, which
+//     waits for that page's translation (`wb_go`, `wb_drop`). The bus unit
+//     answers no read from the cache meanwhile, and takes nothing else until
+//     the write's last cycle, so the captured write is still this one.
 //   - A CACR clear lands on the edge its MOVEC commits, after anything else
 //     that edge does.
 
@@ -57,16 +61,29 @@ module rd68031_dcache (
     input  logic [31:0] caar,
     input  logic  [3:0] cach_op,      // {CED, CD, CEI, CI}, pulsed by MOVEC
     input  logic        cdis_sync_n,
-    // The MMU's cache inhibit for this access -- the CI bit of the ATC entry or
-    // TTx register that maps it, which also drives CIOUT (UM 6.1, 5.7.2), from
-    // rd68031_mmu through the bus unit. A read that hits ignores it -- "whenever a read access occurs
-    // and the required ... data operand is resident in the appropriate on-chip
+    // The MMU's cache inhibit -- the CI bit of the ATC entry or TTx register
+    // that maps a page, which also drives CIOUT (UM 6.1, 5.7.2), from
+    // rd68031_mmu through the bus unit. It is a page's, and a misaligned
+    // operand's two long words may be in two pages with two different CI bits,
+    // so each long word goes by its own page's (doc/bugs-found.md, M11 phase
+    // B). A read that hits ignores it -- "whenever a read access occurs and
+    // the required ... data operand is resident in the appropriate on-chip
     // cache ... the state of the corresponding CI bits in the MMU are also
-    // ignored"; a read that misses does not fill; and a write ignores the cache
-    // altogether -- "when CIOUT is asserted, the data cache is completely
-    // ignored, even on write cycles operating in the write-allocation mode"
-    // (UM 6.1.2.1).
+    // ignored" (UM 6.1); a read cycle with CIOUT does not fill (`bn_ci`); and
+    // a write ignores the cache altogether for a long word in a CI page --
+    // "when CIOUT is asserted, the data cache is completely ignored, even on
+    // write cycles operating in the write-allocation mode" (UM 6.1.2.1).
+    //
+    // `dc_inhibit` is the CI of the page the presented request starts in,
+    // sampled with a write as it is taken. A write that crosses into a second
+    // page (`wr_xpage`) leaves its long word there alone until the bus unit
+    // has that page's translation: `wb_go` when it is cachable, and the long
+    // word is treated then as it would have been with the first; `wb_drop`
+    // when the operand will not write it after all, and it is invalidated.
     input  logic        dc_inhibit,
+    input  logic        wr_xpage,
+    input  logic        wb_go,
+    input  logic        wb_drop,
 
     // The sequencer's request, as presented: a combinational lookup ----------
     input  logic [31:0] lk_addr,
@@ -107,7 +124,8 @@ module rd68031_dcache (
     input  logic  [2:0] bn_fc,
     input  logic        bn_dfill,     // the operand it belongs to may fill this cache
     input  logic        bn_brq,       // the cycle asserted CBREQ
-    input  logic        bn_first      // the first cycle of its operand
+    input  logic        bn_first,     // the first cycle of its operand
+    input  logic        bn_ci         // the cycle asserted CIOUT
 );
 
   localparam int TW = 27;             // FC2-FC0, A31-A8
@@ -139,6 +157,7 @@ module rd68031_dcache (
   logic [39:0] dw_data_q;
   logic        dw_en_q;        // the cache takes part in this write at all
   logic        dw_wa_q;        // ... and allocates on a miss
+  logic        dw_xp_q;        // ... its second long word is in another page
 
   // ==========================================================================
   // Control bits
@@ -195,10 +214,12 @@ module rd68031_dcache (
 
   // An external read is "cachable" when the cache is enabled, CDIS, CIIN and
   // CIOUT are negated and the MMU validates it (UM 6.1); and a frozen cache is
-  // not filled (UM 6.3.1.5). CIIN is the bus's, cycle by cycle. A
-  // read-modify-write's read is forced to miss but its data still "update[s] a
-  // matching entry ... or creates a new entry" (UM 6.1.2.2).
-  assign lk_fill  = lk_read && lk_space_ok && ed && !fd && !dc_inhibit;
+  // not filled (UM 6.3.1.5). CIIN and CIOUT are the bus's, cycle by cycle --
+  // CIOUT because it is a page's, and an operand's cycles may be in two
+  // (`bn_ci`, below). A read-modify-write's read is forced to miss but its
+  // data still "update[s] a matching entry ... or creates a new entry" (UM
+  // 6.1.2.2).
+  assign lk_fill  = lk_read && lk_space_ok && ed && !fd;
 
   // UM 6.1.3.2: the burst is asked for when "a read cycle ... misses due to the
   // indexed tag not matching" or "tag matches, but all long words in the line
@@ -350,6 +371,14 @@ module rd68031_dcache (
   assign w_go  = dw_v_q && dw_en_q;
   assign wspan = (wm_b != 4'b0000);
 
+  // The second long word: with the first, a clock after the take, when both
+  // are in one page; when the bus unit has its page's translation, and only if
+  // that is cachable, when it is in another. The write is the last the bus
+  // unit took, so the captured write is still this one.
+  logic wb_now;
+  assign wb_now = dw_xp_q ? (wb_go && ed && (dw_fc_q != rd68031_pkg::FC_CPU))
+                          : w_go;
+
   logic w_upd_a, w_upd_b;      // bytes go into the entry
   logic w_val_a;               // ... and it becomes valid (WA, aligned long)
   logic w_rep_a;               // ... with its line's tag replaced
@@ -357,9 +386,10 @@ module rd68031_dcache (
   assign w_val_a = w_go && !whit_a && dw_wa_q && wfull;
   assign w_rep_a = w_val_a && !wtok_a;
   assign w_upd_a = (w_go && whit_a) || w_val_a;
-  assign w_upd_b = w_go && wspan && whit_b;
+  assign w_upd_b = wb_now && wspan && whit_b;
   assign w_clr_a = w_go && !whit_a && dw_wa_q && !wfull && !wtok_a;
-  assign w_clr_b = w_go && wspan && !whit_b && dw_wa_q && !wtok_b;
+  assign w_clr_b = (wb_now && wspan && !whit_b && dw_wa_q && !wtok_b)
+                || (wb_drop && dw_xp_q && wtok_b);
 
   // ==========================================================================
   // A long word from the bus -- UM 6.1.3
@@ -396,7 +426,7 @@ module rd68031_dcache (
   // A beat that is this cache's: it belongs to an operand that may fill, and
   // no clear has landed since that operand's first cycle.
   logic f_use;
-  assign f_use = bn_dfill && (!dkill_q || bn_first);
+  assign f_use = bn_dfill && !bn_ci && (!dkill_q || bn_first);
 
   logic f_narrow;
   assign f_narrow = (bn_port == rd68031_pkg::DSACK_8)
@@ -548,6 +578,7 @@ module rd68031_dcache (
       dw_data_q  <= '0;
       dw_en_q    <= 1'b0;
       dw_wa_q    <= 1'b0;
+      dw_xp_q    <= 1'b0;
     end else begin
       if (f_good && f_narrow && !f_wr) begin
         asm_v_q    <= 1'b1;
@@ -578,6 +609,7 @@ module rd68031_dcache (
         dw_data_q  <= lk_wdata;
         dw_en_q    <= lk_space_ok && ed && !dc_inhibit;
         dw_wa_q    <= wa && !fd;
+        dw_xp_q    <= wr_xpage;
       end
     end
   end

@@ -57,3 +57,37 @@
       $display("  timing: one short level, U set -- %0d clocks a search", c_wclk[30] / 22);
       // PS 512 to 16K: one search each, U written by the first.
       exp_walk("mmu_walk", 45, 6, 1);
+      // Operands across a cachable page (frame $C000) and a CI page (frame
+      // $D000), the data cache on: each cycle's cachability is its own page's
+      // (doc/bugs-found.md, M11 phase B). Every cycle's CIOUT is checked
+      // against its frame by run_prog; these are how many there are, and the
+      // values that depend on whether there is a data cache to hold them.
+      exp_fr("mmu_walk", 60, 1, 2);              // the long; then the CI long word, again
+      exp_fr("mmu_walk", 61, HAS_DC ? 0 : 1, 0); // the cachable long word was cached
+      exp_fr("mmu_walk", 62, 1, 2);              // the same for a word
+      exp_fr("mmu_walk", 64, 1, 1);              // CI then cachable
+      exp_fr("mmu_walk", 65, HAS_DC ? 0 : 1, 1); // the cachable part cached, the CI part not
+      exp_fr("mmu_walk", 66, 1, 1);
+      exp_fr("mmu_walk", 67, HAS_DC ? 0 : 1, 0);
+      exp_fr("mmu_walk", 68, 1, 1);              // writes: each part its cycle
+      exp_fr("mmu_walk", 69, HAS_DC ? 0 : 1, HAS_DC ? 0 : 1);
+      exp_fr("mmu_walk", 70, 1, 1);
+      exp_fr("mmu_walk", 71, HAS_DC ? 0 : 1, 1);
+      exp_fr("mmu_walk", 72, 1, 1);
+      exp_fr("mmu_walk", 73, HAS_DC ? 0 : 1, 1);
+      exp_fr("mmu_walk", 74, 1, 1);
+      exp_fr("mmu_walk", 75, HAS_DC ? 0 : 1, 1);
+      // A read of the cachable page's long word, after memory changed behind
+      // the cache: the copy the crossing read cached, or memory.
+      check(peek_l(32'h0000_8A18) == (HAS_DC ? 32'hE0E1E2E3 : 32'hE4E5E6E7),
+            $sformatf("mmu_walk phase 65: the cachable page's long word reads %08h",
+                      peek_l(32'h0000_8A18)));
+      check(peek_l(32'h0000_8A24) == (HAS_DC ? 32'hF0F1F2F3 : 32'hF4F5F6F7),
+            $sformatf("mmu_walk phase 67: the cachable page's long word reads %08h",
+                      peek_l(32'h0000_8A24)));
+      // The CI page's long word, valid in the cache from before its page was
+      // made CI: the write's CI part left it alone (UM 6.1.2.1), and a read
+      // hits it whatever CI says (UM 6.1). With no cache, memory.
+      check(peek_l(32'h0000_8A2C) == (HAS_DC ? 32'hB0B1B2B3 : 32'h5678B2B3),
+            $sformatf("mmu_walk phase 69: the CI page's long word reads %08h",
+                      peek_l(32'h0000_8A2C)));

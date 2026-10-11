@@ -133,8 +133,16 @@ drives CIOUT from the translation, and tells each cache:
 | Input | When | Effect | UM |
 |---|---|---|---|
 | `ic_inhibit` (`rd68031_ifu`) | with the prefetch's answer: the prefetch is translated when the bus unit starts it, after the fetch unit asked for it, so the verdict comes back with the long word, as CIIN does | the long word is not cached; the bus unit has already withheld CBREQ | 6.1 |
-| `dc_inhibit` (`rd68031_dcache`) | with the request: the CI of the page the operand's bus cycles start in, looked up combinationally as the request is presented | a read that misses is not cached and asks for no burst; a write ignores the data cache altogether, a hit included | 6.1, 6.1.2.1: "when CIOUT is asserted, the data cache is completely ignored, even on write cycles" |
+| `bnow_ci` (`rd68031_dcache`) | with each read beat: that cycle's CIOUT, its own page's CI | the long word it brings is not cached; the bus unit withholds CBREQ on it and completes no long word from a narrow port after it | 6.1 |
+| `dc_inhibit` (`rd68031_dcache`) | with a write, as it is taken: the CI of the page the operand starts in, looked up combinationally as the request is presented | the write ignores the data cache altogether for its long word in that page, a hit included | 6.1, 6.1.2.1: "when CIOUT is asserted, the data cache is completely ignored, even on write cycles" |
+| `dc_xpage`, `dc_wb_go`, `dc_wb_drop` | a write whose second long word is in another page: when its first cycle in that page starts, or the operand stops short of it | that long word is left alone until then; updated as a write to it would be if the page is cachable (`wb_go`), still left alone if it is CI, invalidated if the page is refused or the operand ends first (`wb_drop`). No read is answered from the cache in between | 6.1, 6.1.2.1 |
 | either | -- | a read that HITS is served whatever it says, and is never translated | 6.1: "the MMU is completely ignored ... the state of the corresponding CI bits in the MMU are also ignored"; figure 9-8 |
+
+Cachability is a page's, and an operand across a page boundary has two pages
+(`doc/mmu.md`): each cycle is cached or not as its own CIOUT says, never as the
+operand's first page says (`doc/bugs-found.md`, M11 phase B). A read that hits
+is still served whatever its page says -- including a long word cached from a
+page that has since been made CI, which UM 6.1 leaves the program to clear.
 
 A write the MMU refuses "is aborted, the corresponding entry is invalidated, and
 a bus error exception is taken" (6.1.2). The cache takes a write when the bus

@@ -86,7 +86,8 @@ module rd68031_biu #(
     // What the data cache says about the request presented -- rd68031_dcache.
     // `req_dfill`: what the bus reads for it may be cached, so it reports its
     // beats as the data cache's and, unless it is a read-modify-write, runs the
-    // cycles that complete a long word from a narrow port. `dc_on`: it is a
+    // cycles that complete a long word from a narrow port -- each cycle as its
+    // own page's CI allows, which is not the request's to know (`bnow_ci`). `dc_on`: it is a
     // read the cache is looked up for; `dc_hit_a`/`dc_hit_b` which of its
     // (at most two) long words hit, `dc_span` whether there are two, `dc_nb`
     // how many of its bytes are in the second, and `dc_data` the bytes that hit,
@@ -103,8 +104,22 @@ module rd68031_biu #(
     output logic        dc_wr_take,
     // The MMU's cache inhibit for the request presented: the CI bit of the ATC
     // entry or TTx register that maps the operand's first page (UM 6.1). The
-    // data cache samples it with the request -- rd68031_dcache.
+    // data cache samples it with a write it takes, for the long word in that
+    // page -- rd68031_dcache. A read's cycles are cached or not as each one's
+    // own CIOUT says (`bnow_ci`).
     output logic        dc_inhibit,
+    // The write being taken crosses into a second page, whose translation is
+    // not known until its cycles reach it (doc/mmu.md): the data cache leaves
+    // the long word in that page alone until then. `dc_wb_go`: that page's
+    // first cycle is starting, and the page is cachable -- the long word is
+    // updated now, as a write to it would be. `dc_wb_drop`: the operand will
+    // not write that page -- refused there, or ended by a bus error before it
+    // got there -- and the long word is invalidated. A CI second page gets
+    // neither: "when CIOUT is asserted, the data cache is completely ignored"
+    // (UM 6.1.2.1).
+    output logic        dc_xpage,
+    output logic        dc_wb_go,
+    output logic        dc_wb_drop,
     // A write the MMU refused: the data cache entries it touches are
     // invalidated -- UM 6.1.2, "the write is aborted, the corresponding entry
     // is invalidated, and a bus error exception is taken". The residual's
@@ -242,6 +257,7 @@ module rd68031_biu #(
     output logic        bnow_dfill,   // its operand may fill the data cache
     output logic        bnow_brq,     // the cycle asserted CBREQ
     output logic        bnow_first,   // the first cycle of its operand
+    output logic        bnow_ci,      // the cycle asserted CIOUT: its page is CI
     // A burst is under way past its first long word: from the rising edge after
     // that long word to the one that ends the last. Registered.
     output logic        burst_tail,
@@ -387,6 +403,7 @@ module rd68031_biu #(
   logic [31:0] op_lp1;
   logic [31:0] op_pb1;
   logic        op_ci1;
+  logic        wb_pend;      // a write's second page's long word, not yet settled in the data cache
   logic        op_posted;    // a posted write: no acknowledge -- rule 9
   logic        rst_post_q;   // the operand RTE handed back is a posted write
   // A bus error on this CPU-space operand is a bus error and not an answer: a
@@ -980,7 +997,7 @@ module rd68031_biu #(
   // again. So a read the cache is looked up for waits that one edge and is
   // looked up again.
   logic bnow_dc;
-  assign bnow_dc  = beat_end && cyc_rw && op_dfill && !cyc_abt;
+  assign bnow_dc  = beat_end && cyc_rw && op_dfill && !cyc_ciout && !cyc_abt;
 
   // ... and only a request the bus has not already taken: the sequencer holds
   // its request up until it is acknowledged, and a read whose first long word
@@ -990,8 +1007,11 @@ module rd68031_biu #(
   logic seq_op_busy;
   assign seq_op_busy = (op_active && !op_isfetch && !op_posted && !op_istw)
                     || (pk_valid && !pk_posted);
+  // Nor while a write across two pages has its second page's long word still
+  // to settle in the cache (`wb_pend`, below): a read hitting it would read
+  // what the write is about to change.
   assign hit_take = req_valid && dc_full && !rst_pend_q && !post_flt_end
-                 && !seq_op_busy;
+                 && !seq_op_busy && !wb_pend;
   assign rd_block = req_valid && dc_on && !rst_pend_q && bnow_dc;
   assign req_bus  = req_valid && !hit_take && !rd_block;
   // Data beats instruction fetch, a held-back read included.
@@ -1008,8 +1028,10 @@ module rd68031_biu #(
   // from the byte after the last one received, wrapping within it, SIZ giving
   // the bytes still missing; and only then the operand's next long word.
   //
-  // Not on a cycle that ended in a bus error, or that had CIIN -- the entry is
-  // not going to be cached, so there is nothing to complete; not for a
+  // Not on a cycle that ended in a bus error, or that had CIIN, or that had
+  // CIOUT -- the entry is not going to be cached, so there is nothing to
+  // complete (an operand's cycles in a CI page, the page they are in, which
+  // may not be its first's: doc/mmu.md); not for a
   // read-modify-write, whose locked sequence is the operand's cycles and no
   // others; and never on a 32-bit port, which supplies the whole long word in
   // one cycle (UM 7.2.7).
@@ -1044,8 +1066,8 @@ module rd68031_biu #(
   assign nx_addr   = op_addr + {29'd0, xfer_done};
   assign nx_rem    = op_rem - xfer_done;
   assign ent_done  = (nx_rem == op_tail) || (nx_addr[31:2] != cyc_addr[31:2]);
-  assign need_fill = op_fillc && !cyc_fill && ent_done && !bad_now && !term_rty
-                  && (got_now != 4'b1111);
+  assign need_fill = op_fillc && !cyc_ciout && !cyc_fill && ent_done && !bad_now
+                  && !term_rty && (got_now != 4'b1111);
 
   // Where the completion starts, and how much of it there is: the first byte
   // missing after the run received, and the bytes missing.
@@ -1151,6 +1173,7 @@ module rd68031_biu #(
   assign bnow_dfill = op_dfill;
   assign bnow_brq   = cyc_brq;
   assign bnow_first = op_first && (bt_k == 2'd0);
+  assign bnow_ci    = cyc_ciout;
 
   // ==========================================================================
   // Write: the internal-to-external multiplexer -- UM Table 7-5
@@ -1588,7 +1611,13 @@ module rd68031_biu #(
   assign mmudis_sync_n = op_mid ? mmudis_q : mmudis_raw_n;
   // UM 6.1: "whenever the appropriate CI bit is set for either a read or a
   // write access and an external bus cycle is required, CIOUT is asserted and
-  // the instruction and data caches are ignored for the access".
+  // the instruction and data caches are ignored for the access". It is the
+  // page's, and an operand across two pages has two: each cycle is cached, or
+  // not, as its own CIOUT says -- a read's beats by `bnow_ci`, the cycles that
+  // complete a long word by `need_fill` -- and a write's long word in each
+  // page as that page says. For the first page that is known as the write is
+  // taken; for the second, when its first cycle starts (doc/mmu.md,
+  // doc/bugs-found.md M11 phase B).
   assign dc_inhibit = l1_ci;
 
   logic [2:0] this_n;
@@ -1626,6 +1655,25 @@ module rd68031_biu #(
                   && !next_ciout && (next_fc != rd68031_pkg::FC_CPU)
                   && !next_fill
                   && (next_last[31:4] == next_addr[31:4]);
+
+  // The write being taken crosses into a second page (doc/mmu.md), and the
+  // data cache's handling of its long word there waits for that page.
+  assign dc_xpage   = (((next_addr ^ next_last) & ~l_mask) != 32'd0);
+
+  // A write taken across two pages, its second page's long word not yet
+  // settled in the data cache. It settles when the operand's first cycle in
+  // that page starts or is refused -- a continuing operand's (`cont_new`) or
+  // one coming back from being set aside for the page's search (`take_pk`) --
+  // or, if the operand ends before it gets there, as it ends.
+  logic wb_at, wb_end;
+  assign wb_at      = wb_pend && (cont_new || take_pk)
+                   && ((st_p_nxt == rd68031_pkg::ST_S0) || (st_p_nxt == rd68031_pkg::ST_ABT));
+  // The table walker's operands run while the write is set aside, and their
+  // ends are not its end.
+  assign wb_end     = wb_pend && !wb_at && beat_end && op_active && op_finishing
+                   && !op_istw;
+  assign dc_wb_go   = wb_at && (st_p_nxt == rd68031_pkg::ST_S0) && !l1_ci;
+  assign dc_wb_drop = (wb_at && (st_p_nxt == rd68031_pkg::ST_ABT)) || wb_end;
 
   // A faulted operand finishes too: the requester has to be unstalled either way,
   // and req_fault is what tells it which happened.
@@ -1711,6 +1759,7 @@ module rd68031_biu #(
       op_lp1     <= '0;
       op_pb1     <= '0;
       op_ci1     <= 1'b0;
+      wb_pend    <= 1'b0;
       pk_valid   <= 1'b0;
       pk_addr    <= '0;
       pk_rem     <= 3'd0;
@@ -2077,6 +2126,12 @@ module rd68031_biu #(
         rmc_hold <= 1'b0;
       end
 
+      // A write across two pages: its second page's long word waits in the
+      // data cache for that page's translation. A new one may be taken on the
+      // very edge the last one ends.
+      if (dc_wr_take && dc_xpage) wb_pend <= 1'b1;
+      else if (wb_at || wb_end)   wb_pend <= 1'b0;
+
       // A read the data cache holds whole: answered on this edge, no bus cycle
       // -- UM 6.1, "when a hit occurs in the instruction or data cache ... the
       // information is transferred from the cache (on a read)". Last, so that a
@@ -2221,7 +2276,7 @@ module rd68031_biu #(
               && (beat_q == 3'd0)
               && !term_err && !term_rty && !berr_s && (op_rem == xfer_n)
               && !cyc_fill && (op_tail == 3'd0)
-              && !(op_fillc && (port_code != rd68031_pkg::DSACK_32));
+              && !(op_fillc && !cyc_ciout && (port_code != rd68031_pkg::DSACK_32));
 
       beat_q <= (st_p == rd68031_pkg::ST_ABT) ? 3'd1 : beat_nxt;
 
