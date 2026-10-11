@@ -1971,12 +1971,6 @@ static void normalise(const struct test *t, struct result *r, const uae030_state
         for (j = 1; j < r->nacc && r->acc[j].rw; j++)
             if (r->acc[j].bytes == 2 && r->acc[j].addr == sp + 6) { move_acc(r, j, 0); break; }
     }
-    /* PRM 4, CAS2: "Update 1 -> Destination 1; Update 2 -> Destination 2".
-     * The oracle writes destination 2 first; the two writes are put in the
-     * order the operation lists them. */
-    if ((t->w[0] & 0xF9FFu) == 0x08FCu && r->nacc == 4 && !r->acc[2].rw && !r->acc[3].rw
-        && r->acc[2].addr == r->acc[1].addr && r->acc[3].addr == r->acc[0].addr)
-        move_acc(r, 3, 2);
     /* UM 8.4 (the format $2 frame): for CHK, CHK2, TRAPcc, TRAPV
      * and the zero divide, the instruction address is "the address of the
      * instruction that caused the exception". For all but CHK the oracle

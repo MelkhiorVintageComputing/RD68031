@@ -304,24 +304,6 @@ module core_vec_tb;
           step_one(400, ok);
       end
 
-      // CAS2's two writes. Since M11 part 2 the core writes destination 2
-      // first, which is UAE030's own order and AP68030's
-      // (doc/manual-contradictions.md 26, doc/m11-mismatches.md Q-B); the
-      // stream still records them destination 1 first, because tools/vectors/
-      // gen.c normalised UAE030's order at M6 (doc/m6-mismatches.md b5). Until
-      // the generator stops doing that, the core's two are put in the
-      // stream's order here, and nothing else about them is excused.
-      if (((w[0][15:0] == 16'h0CFC) || (w[0][15:0] == 16'h0EFC)) && (nacc == 4)
-          && !acc_rw[2] && !acc_rw[3]) begin : cas2_order
-        logic [31:0] sw_addr, sw_data;
-        logic        sw_prog;
-        logic  [2:0] sw_bytes;
-        sw_addr  = acc_addr[2];  acc_addr[2]  = acc_addr[3];  acc_addr[3]  = sw_addr;
-        sw_data  = acc_data[2];  acc_data[2]  = acc_data[3];  acc_data[3]  = sw_data;
-        sw_prog  = acc_prog[2];  acc_prog[2]  = acc_prog[3];  acc_prog[3]  = sw_prog;
-        sw_bytes = acc_bytes[2]; acc_bytes[2] = acc_bytes[3]; acc_bytes[3] = sw_bytes;
-      end
-
       // ------------------------------------------------------------------
       // Compare.
       // ------------------------------------------------------------------

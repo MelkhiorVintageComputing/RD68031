@@ -617,7 +617,7 @@ register write land in the other order (`doc/bugs-found.md`, M6).
 
 At M6 UAE030's "destination 2 first" was taken for an oracle quirk on the
 strength of the listing (`doc/m6-mismatches.md` b5, normalised in the vector
-generator). At M11 part 2 a second, independent implementation, AP68030 --
+generator until M11 phase B, which removed the normalisation). At M11 part 2 a second, independent implementation, AP68030 --
 a pin-level core -- wrote destination 2 first as well (`doc/m11-mismatches.md`,
 Q-B: bus probe phase 6, `W $E048` then `W $E040`). Two implementations that
 share no code agree, and the manual's line is not a bus order; the user
