@@ -239,18 +239,29 @@ the contradictions themselves are `doc/manual-contradictions.md` 19-25.
 |---|---|---|
 | ATC replacement | "a pseudo least recently used algorithm ... a validity bit and an internal history bit" (9.4), no more | the lowest invalid entry, else the lowest whose history bit is clear; set on load and on use, all but the newest cleared once every valid entry's is set (`doc/mmu.md`). A program cannot tell the difference unless it counts table searches |
 | who searches | "microcode and dedicated logic" (9.1) | a hardware walker beside the bus unit; the same bus cycles, the same results (`doc/mmu.md`) |
-| when a misaligned operand's second page is searched | not said; the part presumably searches when the cycle reaches the page | before the operand's first cycle, with the first page's: the same cycles in a different order, only for an operand that crosses into a page the ATC does not have |
 | ECS for a cycle the MMU aborts | "the processor aborts the cycle before asserting AS" -- after ECS (7.1.1) | no ECS: no cycle starts, as for a cache hit |
 | an RMW cycle that misses in the ATC | searched (9.2.1, figure 9-8) -- or a bus error for the handler to PLOAD (9.10.3's example) | searched -- manual-contradictions 19 |
 | U in the descriptor whose S bit makes the violation | figure 9-29 writes it, 9.5.1.1 does not | not written -- manual-contradictions 21 |
-| PTEST's N after a bus error | "the actual number of tables accessed" | the table whose fetch failed counts |
+| PTEST's N after a bus error | "the actual number of tables accessed" | the table whose fetch failed counts. The oracles answer differently from the core and from each other; the user decided at M11 part 2 to keep this (`doc/m11-mismatches.md` c2) |
+| how far a user search goes after a long table descriptor with S set | "the table search is completed" (9.5.5.3) | to its end, the page descriptor read -- as UAE030; AP68030 stops at the descriptor. Kept by the user's decision at M11 part 2 (`doc/m11-mismatches.md` c3) |
 | PLOAD with a TTx register matching | not said | PLOAD searches the tables anyway |
 | reserved bits of TTx and MMUSR | not said | not kept: they read zero, as TC's and the root pointers' do by the manual |
 | PMOVE register-to-memory with FD set | not said; the format has the bit | accepted, FD ignored |
 
+Until M11 part 2 the table also had "when a misaligned operand's second page
+is searched": the core searched both pages before the operand's first cycle.
+Both oracles search the second page of a read when the operand's cycles reach
+it, after the first page's part has gone (for a write UAE030 does, and AP68030
+searches both first -- `doc/m11-mismatches.md` c12), and the user decided to
+follow them, for every operand. That is also UM 7.1.1's per-cycle abort ("if
+a miss occurs in the address translation cache ... the processor aborts the
+cycle before asserting AS") (`doc/mmu.md`, "Where translation happens";
+`doc/m11-mismatches.md`, Q-A).
+
 **How it is checked:** `core_mmu_tb` (`doc/mmu.md`, the tests), which counts
 the table search cycles of every phase -- and so would see a different search
-order or a different replacement.
+order or a different replacement -- and `make cosim-mmu` and `make ap030`,
+which compare the order of the search cycles against the operand's own.
 
 ---
 

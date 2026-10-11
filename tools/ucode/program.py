@@ -2592,19 +2592,34 @@ u('the second differs',
   next='cas2_fail')
 
 label('cas2_swap')
-# PRM 4: "Update 1 -> Destination 1; Update 2 -> Destination 2", in that order.
-u('both matched: back to the first address',
-  asrc='T0', alu='A', dst='XW', size='WORD', rmc=1)
-u('... which is the register it names',
+# Destination 2 is written first, then destination 1. PRM 4's operation reads
+# "Update 1 -> Destination 1; Update 2 -> Destination 2", and RD68021 and this
+# design wrote them in that order until M11; but that line is a statement of
+# the result, not of the bus order -- it is not a bus specification, and UM
+# figure 7-29 does not order the writes ("if CAS2 instruction and only one
+# operand written, then go to ..."). Two independent implementations, UAE030
+# and AP68030, both write destination 2 first (doc/m11-mismatches.md, Q-B),
+# and the user decided at M11 to follow them (doc/manual-contradictions.md 26).
+# Where the operands overlap, PRM 4 makes the result undefined ("if the
+# operands overlap in memory, the results of any memory update are
+# undefined"), so no program can tell but by the bus.
+#
+# A fault on either write reruns the whole locked sequence with DF set (UM
+# 8.2.3, doc/checkpoint.md rule 5): one on the first write -- destination 2 --
+# has written nothing; one on the second -- destination 1 -- reads destination
+# 2's update back and fails its second compare.
+u('both matched: the second extension word',
+  asrc='T1', alu='A', dst='XW', size='WORD', rmc=1)
+u('... names the second address',
   asrc='XREG', alu='A', dst='EA', size='LONG', rmc=1)
-u('the first update goes there',
+u('the second update goes there first',
   bus='WRITE', fc='DATA', asel='EA', asrc='DREG_XU', alu='A', szsel='CAS',
   rmc=1)
-u('and the second address',
-  asrc='T1', alu='A', dst='XW', size='WORD', rmc=1)
+u('and back to the first address',
+  asrc='T0', alu='A', dst='XW', size='WORD', rmc=1)
 u('... likewise',
   asrc='XREG', alu='A', dst='EA', size='LONG', rmc=1)
-u('the second update goes there, and the bus is let go',
+u('the first update goes there, and the bus is let go',
   bus='WRITE', fc='DATA', asel='EA', asrc='DREG_XU', alu='A', szsel='CAS',
   rmc=1, pf='ADV', seq='DECODE')
 
@@ -3779,8 +3794,12 @@ u('TC, TT0 or TT1: one long word',
 u('... held for the register',
   asrc='RDATA', alu='A', dst='T1', size='LONG')
 label('mmu_pm_wr')
+# It waits for a posted write first. A write that crosses into another page is
+# translated there only when its cycle into that page comes (rd68031_biu,
+# doc/mmu.md), so a PMOVE committed while it is still under way would have TC,
+# a root pointer or TTx change under an access that came before it.
 u('into the register -- rd68031_mmu',
-  mmu='WR')
+  mmu='WR', sync=1)
 u('a configuration it refuses is the MMU configuration exception -- UM 8.1.10, '
   '9.7.5.3',
   seq='COND', cond='MMUCFG', next='exc_mmu_config')

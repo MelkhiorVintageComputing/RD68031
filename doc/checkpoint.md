@@ -251,18 +251,25 @@ its last (UM 9.5.2, "ensuring that the entire table search completes without
 interruption"); a bus error on one of its cycles ends it with the B bit, not
 with an exception; and the exception comes on the retry, at the access, by
 which time the search is over. Interrupts are taken at instruction boundaries.
-A posted write's fault cannot land inside one either: the search runs bus
-cycles, and the bus unit takes nothing while a posted write is outstanding, so
-the write has finished or faulted before the search begins. Whatever the search
+A posted write's fault cannot land inside one either. The bus unit takes
+nothing while a posted write is outstanding, so a search runs either after the
+write has finished or faulted, or for the write itself: a write that crosses
+into a page the ATC does not have is set aside, its first page's bytes
+written, while its second page is searched (`doc/mmu.md`, since M11 part 2),
+and its fault, if the page is refused, comes on the cycle into that page once
+the search is over -- as for any access. Whatever the search
 did stands: the U and M bits it set in the tables, and the entry it loaded --
 UM 9.4 keeps an entry with B set until a PFLUSH, a PLOAD or the replacement
 algorithm removes it. A rerun searches again if the entry has gone.
 
 The table walker's registers are therefore cycle-level, like the bus unit's, and
 are in `EXEMPT` (`mmu.w_*`). So are the bus unit's copies of an operand's
-translation (`op_pmask`, `op_pb1`, ...): what the MMU said when the operand was
-taken holds until it is done, and RTE's rerun of a faulted operand is a new
-candidate, looked up again.
+translation (`op_pmask`, `op_pb1`, ...): what the MMU said of the page the
+operand's cycles are in holds until they leave it, and RTE's rerun of a faulted
+operand is a new candidate, looked up again. So is an operand set aside while
+its second page is searched (`pk_*`): no fault is taken while it waits, and it
+is back in the operand registers -- where a fault on its residual finds it --
+before anything else is taken.
 
 The refusal itself is taken where a BERR would be: the cycle that would have
 started is `ST_ABT`, which drives no pin and ends in S5 with a bus error, and
@@ -607,7 +614,10 @@ the MC68030's, written now for the milestones that will need them.
      included, so the compare sees memory as it is when the rerun happens. A
      CAS2 whose SECOND write faulted therefore reads its first update back
      and fails its compare: what UM 8.2.3 says, and a handler that wants the
-     swap finished completes it and clears `DF` instead.
+     swap finished completes it and clears `DF` instead. (Since M11 part 2
+     CAS2 writes destination 2 first, as both oracles do --
+     `doc/manual-contradictions.md` 26 -- so the update read back is
+     destination 2's and the compare that fails is the second.)
    - What the handler is asked to emulate is the operation, not the addressing:
      the effective address was evaluated before the locked sequence began, and
      an `(An)+` or `-(An)` it named has already been stepped, once, when the
@@ -793,7 +803,7 @@ it is aimed at is not a check:
 | a long frame whose `+$1C` cannot be read, with both ends and the version word readable | RTE takes a bus error mid-load and goes on with the machine half restored -- UM 8.1.13 halts it |
 | CAS on a missing page, its handler setting Z and clearing `DF` | RTE runs any of the CAS again: the page is still missing, so a rerun would fault a second time, and the testbench counts bus errors |
 | CAS whose write faults while the handler's side of the system changes the operand | RTE reruns the write alone. The rerun has to read the new value, fail the compare and write nothing |
-| CAS2 faulted on each of its four accesses | the rerun starts anywhere but the beginning of the locked sequence, or with the wrong address in `ea`; on the second write, the first update has to be read back |
+| CAS2 faulted on each of its four accesses | the rerun starts anywhere but the beginning of the locked sequence, or with the wrong address in `ea`; on the second write (destination 1's, since M11), the first update -- destination 2's -- has to be read back |
 | TAS whose write faults while the byte is changed | the rerun writes `$80` with Z set instead of testing the new byte |
 | a traced `MOVE` whose read faults, with and without an interrupt arriving at the same time | the trace is taken at the end of the bus error's exception processing, or lost; the interrupt is taken anywhere but at the handler's first boundary |
 

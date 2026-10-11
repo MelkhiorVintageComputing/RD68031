@@ -577,15 +577,34 @@ EXEMPT = [
     ('biu', 'op_burst',     'the operand now running may ask for a line fill. '
                             'A request, reissued with the request.'),
     ('biu', 'op_brq_used',  '... and has had its CBREQ'),
-    ('biu', 'op_pmask',     'the translation it was taken with: the page '
-                            'offset mask. Recomputed from the ATC and the TTx '
-                            'registers when RTE hands the operand back'),
-    ('biu', 'op_lp1',       '... the logical page of its first byte'),
-    ('biu', 'op_pb1',       '... that page\'s physical base'),
-    ('biu', 'op_pb2',       '... and the next one\'s, if it crosses'),
-    ('biu', 'op_ci1',       '... their cache inhibits'),
-    ('biu', 'op_ci2',       '... likewise'),
-    ('biu', 'op_f2',        '... and whether the second page refused it'),
+    ('biu', 'op_pmask',     'the translation of the page the operand\'s '
+                            'cycles are in: the page offset mask. Recomputed '
+                            'from the ATC and the TTx registers when RTE hands '
+                            'the operand back'),
+    ('biu', 'op_lp1',       '... the logical page'),
+    ('biu', 'op_pb1',       '... its physical base'),
+    ('biu', 'op_ci1',       '... and its cache inhibit'),
+    ('biu', 'mmudis_q',     'MMUDIS as the operand under way was translated '
+                            'with -- UM 9.2.3. Lives no longer than the operand'),
+    ('biu', 'pk_valid',     'an operand set aside while the table walker '
+                            'searches its next page. Cycle-level: no fault is '
+                            'taken while it waits (rule 11), and it is back in '
+                            'op_* before anything else is taken'),
+    ('biu', 'pk_addr',      '... its residual\'s address'),
+    ('biu', 'pk_rem',       '... and length'),
+    ('biu', 'pk_fc',        '... its space'),
+    ('biu', 'pk_rw',        '... direction'),
+    ('biu', 'pk_rmc',       '... and lock'),
+    ('biu', 'pk_data',      '... what it has read, or is still to write'),
+    ('biu', 'pk_posted',    '... whether it is a posted write'),
+    ('biu', 'pk_cpflt',     '... whether a bus error on it is a fault'),
+    ('biu', 'pk_burst',     '... whether it may ask for a line fill'),
+    ('biu', 'pk_brq_used',  '... and has had its CBREQ'),
+    ('biu', 'pk_ciin',      '... CIIN on its cycles so far'),
+    ('biu', 'pk_dfill',     '... what the data cache said of it when it was '
+                            'taken'),
+    ('biu', 'pk_fillc',     '... likewise'),
+    ('biu', 'pk_tail',      '... likewise'),
     ('biu', 'op_istw',      'the operand is the table walker\'s, which no fault '
                             'is ever taken on (rule 11)'),
     ('biu', 'tw_ack',       'a walker operand has finished: lives one clock'),

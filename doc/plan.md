@@ -250,7 +250,9 @@ same slave models, and compares their pin-level data transfers (`tools/bus_diff.
 Everything found is in `doc/m11-mismatches.md`: no class (a) item; the oracles' quirks;
 what the manual leaves open; and two behaviours where both oracles agree against the core
 (the second page of a misaligned operand is searched after its first part; CAS2 writes
-destination 2 first) for a decision. Layer 2 below is in production as described there,
+destination 2 first) for a decision -- decided in phase B: the core now does both
+the oracles' way, and keeps its own answer to two others (PTEST's N after a bus error;
+the extent of a search after an S violation). Layer 2 below is in production as described there,
 with the two cores in two benches on identical models rather than in one (they need
 different simulators).
 

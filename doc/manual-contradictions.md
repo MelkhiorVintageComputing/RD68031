@@ -591,3 +591,38 @@ unpredictable" -- and say nothing about a hit faulting. Figure 9-8's second
 branch exits on "INSTRUCTION OR DATA CACHE HIT" before any TTx or ATC test.
 So a hit is served whatever the ATC holds, and keeping the caches coherent
 with the tables is the software's, as the paragraphs say.
+
+---
+
+## 26. Which destination CAS2 writes first
+
+**Followed since M11 part 2: destination 2, then destination 1 -- the order of
+both oracles. Until then: destination 1 first, from PRM 4's operation listing.**
+
+PRM 4, CAS2, "Operation": "If Z, Update 1 → Destination 1; Update 2 →
+Destination 2". UM figure 7-29, the read-modify-write flowchart, does not
+order the writes: after a write it says only "if CAS2 instruction and only
+one operand written, then go to" the next write. UM 8.2.2 calls the
+instruction "up to four long word transfers" and orders none of them. PRM 4
+makes the result undefined where it could be seen in memory -- "if the
+operands overlap in memory, the results of any memory update are undefined".
+
+So the order is visible only on the bus and in a fault on the second write,
+and the one sentence that seems to fix it is a statement of the result, not a
+bus specification: the same listing puts "Destination 1 → Compare 1;
+Destination 2 → Compare 2" in that order too, and a later sentence of the same
+page ("If Dc1 and Dc2 specify the same data register and the comparison
+fails, memory operand 1 is stored in the data register") makes that
+register write land in the other order (`doc/bugs-found.md`, M6).
+
+At M6 UAE030's "destination 2 first" was taken for an oracle quirk on the
+strength of the listing (`doc/m6-mismatches.md` b5, normalised in the vector
+generator). At M11 part 2 a second, independent implementation, AP68030 --
+a pin-level core -- wrote destination 2 first as well (`doc/m11-mismatches.md`,
+Q-B: bus probe phase 6, `W $E048` then `W $E040`). Two implementations that
+share no code agree, and the manual's line is not a bus order; the user
+decided to follow them. `cas2_swap` in `tools/ucode/program.py` writes
+destination 2 first. A fault on either write still reruns the whole locked
+sequence with DF set (UM 8.2.3, `doc/checkpoint.md` rule 5); on the second
+write, now destination 1's, the rerun reads destination 2's update back and
+fails its second compare. `core_fault_tb` faults each of the four accesses.

@@ -169,7 +169,7 @@ wire        cbreq_pin = cbreq_oe ? cbreq_n_o : 1'bz;
 // for the operand, `fetch_ciout` for the prefetch. Since M11 the bus unit asks
 // the MMU (rd68031_mmu) rather than its requesters; core_mmu_tb tests the real
 // one.
-wire [31:0] mmu_l1_addr, mmu_l2_addr;
+wire [31:0] mmu_l1_addr;
 wire        mmu_ci = dut.take_fetch ? fetch_ciout : req_ciout;
 
 rd68031_biu dut (
@@ -197,10 +197,10 @@ rd68031_biu dut (
     .fetch_ack (fetch_ack), .fetch_last (fetch_last), .fetch_rdata (fetch_rdata),
     .fetch_fault (fetch_fault), .fetch_ciin (fetch_ciin), .fetch_ci (),
     .bus_abort (1'b0),
-    .l1_addr (mmu_l1_addr), .l2_addr (mmu_l2_addr), .l_fc (), .l_rw (), .l_rmc (),
-    .l1_kind (2'b00), .l2_kind (2'b00),
-    .l1_pb (mmu_l1_addr & 32'hFFFF_FF00), .l2_pb (mmu_l2_addr & 32'hFFFF_FF00),
-    .l1_ci (mmu_ci), .l2_ci (mmu_ci), .l_mask (32'h0000_00FF), .l_take (),
+    .l1_addr (mmu_l1_addr), .l_fc (), .l_rw (), .l_rmc (),
+    .l1_kind (2'b00),
+    .l1_pb (mmu_l1_addr & 32'hFFFF_FF00),
+    .l1_ci (mmu_ci), .l_mask (32'h0000_00FF), .l_take (),
     .wq_valid (), .wq_addr (), .wq_fc (), .wq_wr (),
     .mmu_busy (1'b0), .mmu_sts (1'b0),
     .tw_valid (1'b0), .tw_addr (32'd0), .tw_wr (1'b0), .tw_wdata (32'd0),

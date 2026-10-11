@@ -1118,10 +1118,10 @@ module rd68031_ucode_rom (
         11'd1044 : rom_q <= 110'h000100000024D001B62410105400;   // the second destination less the second compare operand
         11'd1045 : rom_q <= 110'h0001000000001000000010105CCA;   // ... likewise
         11'd1046 : rom_q <= 110'h0000000000001000000010107000;   // the second differs
-        11'd1047 : rom_q <= 110'h00010000000008A0001810106000;   // both matched: back to the first address
-        11'd1048 : rom_q <= 110'h0001000000001140010010106400;   // ... which is the register it names
-        11'd1049 : rom_q <= 110'h000100000024100000A817906800;   // the first update goes there
-        11'd1050 : rom_q <= 110'h00010000000008A0001C10106C00;   // and the second address
+        11'd1047 : rom_q <= 110'h00010000000008A0001C10106000;   // both matched: the second extension word
+        11'd1048 : rom_q <= 110'h0001000000001140010010106400;   // ... names the second address
+        11'd1049 : rom_q <= 110'h000100000024100000A817906800;   // the second update goes there first
+        11'd1050 : rom_q <= 110'h00010000000008A0001810106C00;   // and back to the first address
         11'd1051 : rom_q <= 110'h0001000000001140010010101000;   // ... likewise
         11'd1052 : rom_q <= 110'h00000000000008A0001C10107400;   // one of them differed: the second extension word
         11'd1053 : rom_q <= 110'h0000000000241460002410107800;   // the second destination goes into the second compare register
@@ -1440,7 +1440,7 @@ module rd68031_ucode_rom (
         11'd1366 : rom_q <= 110'h0000000000001000000010157642;   // a root pointer?
         11'd1367 : rom_q <= 110'h000000000000100000001015723A;   // the status register?
         11'd1368 : rom_q <= 110'h0000000000001040002A17556400;   // TC, TT0 or TT1: one long word / ... held for the register
-        11'd1369 : rom_q <= 110'h0800000000001000000010156800;   // into the register -- rd68031_mmu
+        11'd1369 : rom_q <= 110'h0900000000001000000010156800;   // into the register -- rd68031_mmu
         11'd1370 : rom_q <= 110'h0000000000001000000010113E62;   // a configuration it refuses is the MMU configuration exception -- UM 8.1.10, 9.7.5.3
         11'd1371 : rom_q <= 110'h0000000000801000000010157001;   // done
         11'd1372 : rom_q <= 110'h0000000000001040002917556400;   // MMUSR: one word / ... held for the register

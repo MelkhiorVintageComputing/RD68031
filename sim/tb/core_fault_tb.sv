@@ -1435,26 +1435,27 @@ module core_fault_tb;
 
     // ======================================================================
     // CAS2 -- the gap left open at M4 -- with a fault on each of its four
-    // accesses in turn: the two locked reads, then the two writes (PRM 4,
-    // "Update 1 -> Destination 1; Update 2 -> Destination 2"). Each frame
-    // says RM; the handler only returns, with DF set, and RTE reruns the
-    // whole instruction (UM 8.2.3).
+    // accesses in turn: the two locked reads, destination 1 then 2, then the
+    // two writes, destination 2 then 1 (since M11: the order both oracles
+    // use, doc/m11-mismatches.md Q-B). Each frame says RM; the handler only
+    // returns, with DF set, and RTE reruns the whole instruction (UM 8.2.3).
     //
     //   k = 0, 1, 2: nothing has reached memory when the fault comes, and the
     //                rerun does the whole swap.
-    //   k = 3:       the first write has landed. Rerunning "the entire
-    //                instruction" reads it back, so the first compare now
-    //                fails: both destinations go into the compare registers
-    //                and nothing more is written. That is what UM 8.2.3 says
-    //                RTE does with DF set; a handler that wants the swap
-    //                finished instead completes it and clears DF (k = 4).
+    //   k = 3:       the first write, destination 2's, has landed.
+    //                Rerunning "the entire instruction" reads it back, so the
+    //                second compare now fails: both destinations go into the
+    //                compare registers and nothing more is written. That is
+    //                what UM 8.2.3 says RTE does with DF set; a handler that
+    //                wants the swap finished instead completes it and clears
+    //                DF (k = 4).
     //   k = 4:       the first read faults and the handler completes the
     //                instruction itself -- UM 8.2.2, RM set and DF cleared.
     // ======================================================================
     for (int k = 0; k < 5; k++) begin
       logic [31:0] fa;
       logic        frw;
-      fa  = (k == 1 || k == 3) ? 32'h3100 : 32'h3000;
+      fa  = (k == 1 || k == 2) ? 32'h3100 : 32'h3000;
       frw = (k < 2 || k == 4);
       base_setup();
       poke_w(CODE + 32'h000, 16'h207C);  // movea.l #0x3000,%a0
@@ -1529,10 +1530,10 @@ module core_fault_tb;
                         k, peek_l(32'h3000), peek_l(32'h3100), dut.u_seq.dreg[0],
                         dut.u_seq.dreg[1], dut.u_seq.dreg[5][7:0]));
       else
-        check(peek_l(32'h3000) === 32'hAAAA_AAAA && peek_l(32'h3100) === 32'h2222_2222
-              && dut.u_seq.dreg[0] === 32'hAAAA_AAAA && dut.u_seq.dreg[1] === 32'h2222_2222
+        check(peek_l(32'h3000) === 32'h1111_1111 && peek_l(32'h3100) === 32'hBBBB_BBBB
+              && dut.u_seq.dreg[0] === 32'h1111_1111 && dut.u_seq.dreg[1] === 32'hBBBB_BBBB
               && dut.u_seq.dreg[5][2] === 1'b0,
-              $sformatf("CAS2, access 3: the rerun read the first write back, failed the compare and wrote nothing more -- UM 8.2.3 (memory %08h %08h, D0 %08h, D1 %08h, CCR %02h)",
+              $sformatf("CAS2, access 3: the rerun read destination 2's update back, failed the second compare and wrote nothing more -- UM 8.2.3 (memory %08h %08h, D0 %08h, D1 %08h, CCR %02h)",
                         peek_l(32'h3000), peek_l(32'h3100), dut.u_seq.dreg[0],
                         dut.u_seq.dreg[1], dut.u_seq.dreg[5][7:0]));
       wr_protect = 1'b0;

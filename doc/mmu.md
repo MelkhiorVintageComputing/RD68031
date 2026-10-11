@@ -11,7 +11,7 @@ encodings ("MC68030 only").
 
 | | |
 |---|---|
-| RTL | `rtl/rd68031_mmu.sv` (registers, ATC, walker), `rtl/rd68031_mmu_xl.sv` (one lookup); translation of every cycle in `rtl/rd68031_biu.sv`; the instructions in `tools/ucode/program.py` (`mmu_op`) and `rtl/rd68031_seq.sv` |
+| RTL | `rtl/rd68031_mmu.sv` (registers, ATC, walker), `rtl/rd68031_mmu_xl.sv` (one lookup); translation of every cycle, and the operand set aside for its second page's search, in `rtl/rd68031_biu.sv`; the instructions in `tools/ucode/program.py` (`mmu_op`) and `rtl/rd68031_seq.sv` |
 | Tests | `core_mmu_tb` with `sim/programs/mmu_regs.S`, `mmu_walk.S`, `mmu_fault.S`; `core_m030_tb` for the decode |
 | Not here | the oracle comparison (`make cosim-mmu`, the PMMU vector groups, AP68030) -- M11 part 2 |
 
@@ -113,32 +113,64 @@ branch, UM 6.1): it is served whatever the ATC says.
 
 ## Where translation happens -- the bus unit
 
-**Every bus cycle is translated before it starts.** The bus unit's candidate
-for the next operand -- the sequencer's request, a prefetch, RTE's rerun of a
-faulted operand, a posted write -- is looked up at its first byte and its last
-(`rd68031_mmu_xl`, two instances): an operand is at most five bytes and a page
-at least 256, so it is in at most two pages, and the bytes the data cache will
-answer are left out. Then:
+**Every bus cycle is translated before it starts.** The bus unit looks up a
+cycle when it is the first of a new operand -- the sequencer's request, a
+prefetch, RTE's rerun of a faulted operand, a posted write -- and again when it
+is the first cycle of an operand that enters a page other than the one its
+cycles have been in (`rd68031_mmu_xl`, one instance for the bus unit). An
+operand is at most five bytes and a page at least 256, so that is at most once
+more; the bytes the data cache will answer are never in a cycle and are never
+looked up. Then:
 
-- **a table search is needed** for its first page, or its first is fine and its
-  second needs one: the operand waits, and the walker runs;
-- **its first page is refused**: it "starts" as `ST_ABT`, a cycle that drives no
-  pin and ends half a clock later in S5 with a bus error -- which the operand
+- **a table search is needed**: the cycle does not start, and the walker runs.
+  For the first page that is before anything of the operand has moved; for
+  the second it is between the first page's cycles and the second's, so the
+  bytes in the first page have already gone -- written, for a write -- and
+  the operand is **set aside** (`pk_*` in `rd68031_biu`) while the walker's
+  own operands use the engine, then taken back, looked up again, and run on;
+- **the page is refused**: the cycle "starts" as `ST_ABT`, which drives no pin
+  and ends half a clock later in S5 with a bus error -- which the operand
   engine reports exactly as it reports BERR, so the frame, the SSW, the
-  residual, posted writes, prefetch faults and RTE's rerun all work unchanged;
-- **otherwise it starts**, and the bus unit keeps both pages' translations for
-  the operand's other cycles -- each page's physical base, CI, and whether the
-  second refused it. The cycle that would cross into a refused second page is
-  the `ST_ABT` one, with the residual in the frame: "+$10 the logical address of
-  the retried cycle -- for an operand split across a page boundary, of its
-  residual" (`doc/checkpoint.md`).
+  residual, posted writes, prefetch faults and RTE's rerun all work
+  unchanged. For the second page, the first part has gone and the frame
+  carries the residual: "+$10 the logical address of the retried cycle -- for
+  an operand split across a page boundary, of its residual"
+  (`doc/checkpoint.md`), SIZE the residual's;
+- **otherwise it starts**, and the bus unit keeps the page's translation --
+  its physical base and CI -- for the operand's other cycles in it.
 
-Keeping an operand's translation until it is done is UM 9.2.3's rule for
-MMUDIS ("the disabling of address translation does not become effective until
-the entire transfer is complete"), and it is what lets a PFLUSH or a PMOVE run
-while a prefetch or a posted write is still on the bus without that operand's
-second cycle finding the ATC changed under it. RTE's rerun of an operand is a
-new candidate: it is translated afresh.
+So a misaligned operand across two pages, neither in the ATC, is: the first
+page's search, the operand's cycles in the first page, the second page's
+search, the cycles in the second -- `MOVE.L $010002FE,D1` reads `R $9040, W
+$9040, R $9208, W $9208` (the search for page B[2]), `R $C2FE`, `R $9040, R
+$920C, W $920C` (B[3]), `R $C300`. That is UM 7.1.1's order applied to each
+cycle as it comes -- "if a miss occurs in the address translation cache (ATC)
+of the memory management unit (MMU), or if the MMU finds a fault with the
+access, the processor aborts the cycle before asserting AS" -- and the
+oracles': both of them for a read and for a read-modify-write's read; for a
+write, UAE030's, where AP68030 searches both pages before the first part
+(`doc/m11-mismatches.md`, Q-A and c12). Until M11 part 2 the core searched
+both pages before the first cycle; the user decided to change it.
+
+What follows from it:
+
+| | |
+|---|---|
+| a read-modify-write across two pages (`CAS.W`, `CAS.L` misaligned) | RMC stays asserted from the operand's first cycle through the second page's search -- whose cycles assert it anyway (UM 9.5.2) -- to the operand's last cycle; the arbiter grants nothing in between (UM 7.7.4). Protection is checked page by page, for an RMW as for a write (UM 8.2.3): a write-protected second page refuses the read's second part, the first having been read, and RTE with DF set reruns the whole instruction (`doc/checkpoint.md` rule 5) |
+| a posted write across two pages | the sequencer has gone on; the write is set aside while its second page is searched, and counts as outstanding throughout (`post_busy`): nothing else is taken by the bus unit, and the microwords that wait for posted writes wait for it. A refusal of its second page is its fault, taken where rule 9 says. PMOVE to a register waits for it before it commits, so that an instruction after the write cannot change the translation of the write's second page |
+| the data cache, half a hit | a read whose first long word hits starts its cycles at the second, and is looked up there (UM 6.1.2, 7.2.7); one whose last long word hits stops short of it, and its second page is never looked up. The cycles that complete a long word from a narrow port stay inside that long word, and so inside its page |
+| a burst | the operand's first cycle never asks for one when it spans two lines (UM 6.1.3.2); the cycle that enters the second page may, as any later cycle of an operand may, once and if CBREQ has not already been asserted for the operand |
+| OCS | the cycle the set-aside operand resumes with is not the operand's first, and has no OCS (UM 7.1.1) |
+| STATUS | three clocks for the second page's search, as for any search an access starts |
+
+Keeping each page's translation until the operand is out of it is what lets a
+PFLUSH run while a prefetch or a posted write is still on the bus without that
+page's later cycles finding the ATC changed under them. **MMUDIS** as the MMU
+sees it is held from the edge an operand is taken to the edge it finishes,
+including while it is set aside: UM 9.2.3, "the disabling of address
+translation does not become effective until the entire transfer is complete".
+RTE's rerun of an operand is a new candidate: it is translated afresh, page by
+page.
 
 The physical address goes to A31-A0; the operand engine, the caches and the
 fault frame keep working with the logical one (`cyc_addr` against
@@ -239,7 +271,7 @@ FAULTS table in `tools/ucode/frames.py` and `doc/checkpoint.md`:
 | invalid descriptor, limit violation, supervisor violation, bus error during the search | on the retry, at an entry with B | DF, RW, SIZE, FC of the access |
 | WP, for a write | on the retry, at an entry with WP | DF, a write |
 | WP, for any cycle of a read-modify-write | on the READ -- UM 8.2.3 | DF, RM, RW = read |
-| the second page of a misaligned operand | at the cycle into that page, its first part done | DF, the residual's SIZE; +$10 the residual's logical address |
+| the second page of a misaligned operand | at the cycle into that page, its first part done -- searched after that part, if the ATC does not have the page | DF, the residual's SIZE; +$10 the residual's logical address |
 | an instruction prefetch | when the word is used (8.1.2), as for BERR | FC/FB and RC/RB, the data half clear |
 
 A prefetch into a refused page that is never used takes no exception -- the
@@ -344,7 +376,11 @@ two watched pages. It drives MMUDIS for `mmu_regs` and pulls RESET at its end.
 | `mmu_fault.S` | invalid, write-protected, supervisor-only, limit and bus-error faults, each handled with PTEST, repaired and rerun by RTE; CAS on a write-protected page faulting on its read; a long word read and one written across into a refused page, the residual in the frame; a prefetch into an invalid page never used; an instruction in an invalid page; a refused write with the data cache on; a user-mode program fetched, run and given its stack through the tables |
 
 The three programs make 72, 80 and 57 checks of themselves, and the testbench
-554 in all, the per-phase bus counts and the RESET pin's effect among them.
+556 in all, the per-phase bus counts and the RESET pin's effect among them --
+and, since M11 part 2, how many search cycles come before a phase's first
+operand cycle: for `mmu_fault.S`'s read and write across a page boundary,
+only the first page's search (3, where searching both pages up front made 5
+and 6).
 STATUS is checked too: three clocks for each search an access starts (22 for
 the 22 pages of `mmu_walk.S`'s replacement phase), none for PLOAD's. Under
 `make cache`, with both caches built out, the counts that depend on a cache
@@ -378,5 +414,8 @@ access reached the bus:
   own S bit makes a user access a violation gets its U bit (figure 9-29 draws
   the update before the S check; 9.5.1.1 says "except after a supervisor
   violation is detected"). This design does not set it.
-- **N after a bus error**: counted here as an accessed table.
+- **N after a bus error**: counted here as an accessed table. The oracles
+  differ from the core and from each other; at M11 part 2 the user decided to
+  keep it (`doc/m11-mismatches.md` c2), and likewise the extent of a user
+  search after a long descriptor with S set (c3).
 - **PLOAD and TTx**: PLOAD searches whatever TTx say.

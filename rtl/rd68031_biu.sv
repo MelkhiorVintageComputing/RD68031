@@ -53,11 +53,14 @@
 // complete each long word it touches (UM 6.1.3.1, figures 6-5 to 6-10).
 //
 // EVERY CYCLE IS TRANSLATED BEFORE IT STARTS (M11, doc/mmu.md). A new operand
-// is looked up in rd68031_mmu at its first and last byte; one that needs a
-// table search waits while the MMU's walker runs its own operands through this
-// engine, one the MMU refuses "starts" as ST_ABT and ends with a bus error, and
-// one that may go keeps its pages' translations until it is done. The engine
-// and the caches work in logical addresses; only A31-A0 are physical.
+// is looked up in rd68031_mmu at its first byte, and an operand that crosses
+// into another page is looked up again at the cycle that enters it -- UM
+// 7.1.1, a miss in the ATC aborts "the cycle". One that needs a table search
+// waits while the MMU's walker runs its own operands through this engine --
+// set aside (`pk_*`) if part of it has already gone -- one the MMU refuses
+// "starts" as ST_ABT and ends with a bus error, and one that may go keeps its
+// page's translation for the rest of its cycles in that page. The engine and
+// the caches work in logical addresses; only A31-A0 are physical.
 
 module rd68031_biu #(
     parameter bit ADDR_HIZ_BETWEEN_CYCLES = 1'b1
@@ -178,22 +181,20 @@ module rd68031_biu #(
     input  logic        bus_abort,
 
     // The MMU -- rd68031_mmu, doc/mmu.md ---------------------------------------
-    // Every cycle is translated before it starts (UM 9.2.1). A new operand is
-    // looked up at its first and its last byte, which are in at most two pages,
-    // and the translations are kept for the operand's other cycles: what the
-    // MMU said when an operand was taken holds until it is done, which is UM
-    // 9.2.3's rule for MMUDIS and serves for a PFLUSH run meanwhile too.
+    // Every cycle is translated before it starts (UM 9.2.1). An operand is
+    // looked up at its first byte when it is taken, and again at the first
+    // cycle that enters its next page, if it crosses into one; each page's
+    // translation is kept for the operand's other cycles in that page. MMUDIS
+    // as the MMU sees it is held for as long as an operand is under way -- UM
+    // 9.2.3, "the disabling of address translation does not become effective
+    // until the entire transfer is complete".
     output logic [31:0] l1_addr,
-    output logic [31:0] l2_addr,
     output logic  [2:0] l_fc,
     output logic        l_rw,
     output logic        l_rmc,
     input  logic  [1:0] l1_kind,      // 00 go, 01 refused, 10 search first
-    input  logic  [1:0] l2_kind,
     input  logic [31:0] l1_pb,        // the physical page base
-    input  logic [31:0] l2_pb,
     input  logic        l1_ci,
-    input  logic        l2_ci,
     input  logic [31:0] l_mask,       // the page offset bits
     output logic        l_take,       // the operand looked up is taken
     // A table search, for the operand that has to wait for one.
@@ -346,10 +347,11 @@ module rd68031_biu #(
       .clk (clk), .rst_n (rst_n), .d (cdis_n_i), .q (cdis_sync_n));
 
   // UM 5.11.2: MMUDIS "dynamically disables the translation of addresses by the
-  // MMU". The MMU is M11; until then the synchronised level goes to the top
-  // level's sink.
+  // MMU". Synchronised here, and held for the MMU while an operand is under
+  // way -- below, with the translation.
+  logic mmudis_raw_n;
   rd68031_sync #(.WIDTH (1), .RESET_VAL (1'b1)) u_sync_mmudis (
-      .clk (clk), .rst_n (rst_n), .d (mmudis_n_i), .q (mmudis_sync_n));
+      .clk (clk), .rst_n (rst_n), .d (mmudis_n_i), .q (mmudis_raw_n));
 
   logic br_sync_n;
   logic bgack_sync_n;
@@ -377,15 +379,14 @@ module rd68031_biu #(
   logic        op_first;     // no bus cycle of this operand has started yet -- OCS
   logic        op_isfetch;   // the request came from the instruction fetch unit
   logic        op_istw;      // ... or from the MMU's table walker
-  // The operand's translation, taken when it was: the page offset mask, the
-  // logical base of the page its first byte is in, and each page's physical
-  // base and cache inhibit -- and whether its second page refused it, which
-  // ends the operand there with a bus error (UM 9.2.1, doc/mmu.md).
+  // The translation of the page the operand's cycles are in now: the page
+  // offset mask, that page's logical base, its physical base and its cache
+  // inhibit. Taken when the operand is, and again when a cycle of it enters
+  // the next page (UM 9.2.1, doc/mmu.md).
   logic [31:0] op_pmask;
   logic [31:0] op_lp1;
-  logic [31:0] op_pb1, op_pb2;
-  logic        op_ci1, op_ci2;
-  logic        op_f2;
+  logic [31:0] op_pb1;
+  logic        op_ci1;
   logic        op_posted;    // a posted write: no acknowledge -- rule 9
   logic        rst_post_q;   // the operand RTE handed back is a posted write
   // A bus error on this CPU-space operand is a bus error and not an answer: a
@@ -411,6 +412,31 @@ module rd68031_biu #(
   logic [29:0] ent_q;        // the long word the last read cycle carried
   logic  [3:0] ent_got;      // ... the bytes of it read so far, by offset
   logic        ent_bad;      // ... and CIIN or BERR on one of them
+
+  // An operand set aside part-way: its first page's bytes have gone, and the
+  // page its next cycle enters needs a table search (UM 9.2.1). The walker's
+  // operands go through this same engine, so the operand's state waits here
+  // while they run, and comes back as it was -- the residual, what has been
+  // read or is still to be written, and how far its line fill and CBREQ got.
+  // Nothing else is taken while one waits: the walker's operands, then this
+  // one, then whatever is next. Cycle-level, as the operand registers are: no
+  // fault is taken while it waits (doc/checkpoint.md rule 11), and one on its
+  // residual is taken once it is back in op_*.
+  logic        pk_valid;
+  logic [31:0] pk_addr;
+  logic  [2:0] pk_rem;
+  logic  [2:0] pk_fc;
+  logic        pk_rw;
+  logic        pk_rmc;
+  logic [39:0] pk_data;
+  logic        pk_posted;
+  logic        pk_cpflt;
+  logic        pk_burst;
+  logic        pk_brq_used;
+  logic        pk_ciin;
+  logic        pk_dfill;
+  logic        pk_fillc;
+  logic  [2:0] pk_tail;
 
   // Declared here, above the logic that reads them, rather than beside the
   // logic that drives them: Quartus, Vivado and Questa all refuse a use above
@@ -587,11 +613,13 @@ module rd68031_biu #(
   // it. All three are assigned with the data cache's logic below.
   logic hit_take, rd_block, req_bus, fetch_go;
   // A table search holds everything but its own operands -- UM 9.5.2, "the
-  // entire table search completes without interruption".
+  // entire table search completes without interruption" -- and an operand set
+  // aside for one comes back before anything else.
   assign want_cycle = op_continuing
                    || (!post_flt_end && (tw_valid
                                          || (!mmu_busy
-                                             && (req_bus || fetch_go || rst_self))));
+                                             && (pk_valid || req_bus || fetch_go
+                                                 || rst_self))));
 
   logic bus_is_idle;
   assign bus_is_idle = (st_p == rd68031_pkg::ST_IDLE)
@@ -958,8 +986,10 @@ module rd68031_biu #(
   // its request up until it is acknowledged, and a read whose first long word
   // the bus has just brought in may hit whole in the middle of its own second
   // cycle. A posted write in flight is not the sequencer's current request.
+  // One set aside for a table search still is.
   logic seq_op_busy;
-  assign seq_op_busy = op_active && !op_isfetch && !op_posted && !op_istw;
+  assign seq_op_busy = (op_active && !op_isfetch && !op_posted && !op_istw)
+                    || (pk_valid && !pk_posted);
   assign hit_take = req_valid && dc_full && !rst_pend_q && !post_flt_end
                  && !seq_op_busy;
   assign rd_block = req_valid && dc_on && !rst_pend_q && bnow_dc;
@@ -1313,17 +1343,21 @@ module rd68031_biu #(
   assign post_flt_end = op_finishing && op_posted && term_err;
   // The table walker's operands outrank everything, and while a search is
   // under way nothing else is taken.
-  logic take_tw;
+  // An operand set aside for its next page's search comes back as soon as
+  // the search is over, before anything new is taken.
+  logic take_tw, take_pk;
   assign take_tw    = !op_continuing && !post_flt_end && tw_valid;
+  assign take_pk    = !op_continuing && !post_flt_end && pk_valid && !mmu_busy;
   assign take_rst   = !op_continuing && !post_flt_end && rst_pend_q && !mmu_busy
+                   && !pk_valid
                    && (req_valid || rst_post_q) && (rst_bytes != 3'd0);
   assign req_start  = take_req && (st_p_nxt == rd68031_pkg::ST_S0);
   assign dc_wr_take = take_req && (st_p_nxt == rd68031_pkg::ST_S0)
                    && (req_kind == rd68031_pkg::CT_WRITE);
   assign take_req   = !op_continuing && !post_flt_end && !rst_pend_q && !mmu_busy
-                   && req_bus;
+                   && !pk_valid && req_bus;
   assign take_fetch = !op_continuing && !post_flt_end && fetch_go && !mmu_busy
-                   && !rst_self;
+                   && !pk_valid && !rst_self;
 
   // UM 8.2.1: with DF cleared "it assumes that the data input buffer value on
   // the stack is valid for a read or that the data has been correctly written
@@ -1338,15 +1372,18 @@ module rd68031_biu #(
   assign rst_done = rst_pend_q && !rst_post_q && !op_continuing && req_valid
                  && (rst_bytes == 3'd0);
 
-  // A posted write is outstanding, or RTE has one to rerun.
-  assign post_busy = (op_active && op_posted) || rst_self;
+  // A posted write is outstanding -- in flight, or set aside for its next
+  // page's search -- or RTE has one to rerun.
+  assign post_busy = (op_active && op_posted) || (pk_valid && pk_posted) || rst_self;
 
   // OCS for a cycle starting at this edge: the first of a new operand, or the
   // next of one none of whose cycles has finished yet (op_first, as this edge
-  // leaves it).
+  // leaves it). Not the cycle an operand set aside resumes with: its first
+  // page's cycles have run, and OCS is "the first external bus cycle of an
+  // operand transfer" only (UM 7.1.1).
   logic first_now;
   assign first_now = take_tw || take_rst || take_req || take_fetch
-                  || (op_first && !(beat_end && op_active));
+                  || (!take_pk && op_first && !(beat_end && op_active));
 
   // CPU space synthesises its address from the type field -- UM figure 7-42.
   logic [31:0] cpu_space_addr;
@@ -1381,6 +1418,15 @@ module rd68031_biu #(
       next_rmc   = 1'b1;
       next_burst = 1'b0;
       next_spent = 1'b0;
+    end else if (take_pk) begin
+      // The operand set aside, at the first byte of its next page.
+      next_addr  = pk_addr;
+      next_rem   = pk_rem;
+      next_fc    = pk_fc;
+      next_rw    = pk_rw;
+      next_rmc   = pk_rmc;
+      next_burst = pk_burst;
+      next_spent = pk_brq_used;
     end else if (take_rst) begin
       next_addr  = rst_addr;
       next_rem   = rst_bytes;
@@ -1460,51 +1506,62 @@ module rd68031_biu #(
   // ==========================================================================
   // Translation -- UM 9.2.1, figure 9-8; doc/mmu.md
   //
-  // A new operand -- the sequencer's, the fetch unit's, or the one RTE hands
-  // back -- is looked up at its first byte and its last, which may be in the
-  // next page: an operand is at most five bytes, a page at least 256. The bytes
-  // the data cache already holds are not looked up: they will not go to the
-  // bus. Then:
-  //   - its first page needs a table search (a miss, or a write to a page whose
-  //     M bit is clear), or its first is fine and its second needs one: the
-  //     operand waits and the search runs;
-  //   - its first page is refused: it starts as ST_ABT and ends there with a
-  //     bus error, the whole operand its residual;
-  //   - otherwise it starts, and keeps both pages' translations, a refused
-  //     second page included: its first part runs, and the cycle that would
-  //     enter the second page is the refused one -- the frame then carries the
-  //     residual's logical address, as for a BERR there (doc/checkpoint.md).
+  // A cycle is looked up when it is the first of a new operand -- the
+  // sequencer's, the fetch unit's, the one RTE hands back, or one coming back
+  // from being set aside -- and when it is the first of a continuing operand
+  // to enter a page other than the one its cycles have been in so far. An
+  // operand is at most five bytes and a page at least 256, so that is at most
+  // once more. Bytes the data cache holds never reach a cycle, and are never
+  // looked up. Then:
+  //   - the page needs a table search (a miss, or a write to a page whose M
+  //     bit is clear): the cycle does not start, and the search runs. For a
+  //     continuing operand that is between its first page's cycles and its
+  //     second's -- what has gone has gone -- and the operand is set aside
+  //     while the walker has the engine (`park`, below);
+  //   - the page is refused: the cycle starts as ST_ABT and ends there with a
+  //     bus error. For a continuing operand its first page's bytes have gone,
+  //     and the frame carries the residual -- its size and its logical
+  //     address -- exactly as for a BERR on that cycle (doc/checkpoint.md);
+  //   - otherwise it starts, and the page's translation is kept for the
+  //     operand's other cycles in it.
+  //
+  // This is the order of UM 7.1.1 -- "if a miss occurs in the address
+  // translation cache (ATC) of the memory management unit (MMU), or if the MMU
+  // finds a fault with the access, the processor aborts the cycle" -- applied
+  // to each cycle of an operand as it comes. The manual does not say more; two
+  // independent implementations do the same for a read (doc/m11-mismatches.md,
+  // Q-A; for a write they differ, c12).
+  //
   // The walker's own operands are physical.
   // ==========================================================================
-  logic        cand_new;
-  logic  [2:0] xl_tail;
-  logic        xl_cross, xl_w1, xl_w2, in_p2;
+  logic        cand_new, cont_new, xl_new, in_p2, park_now;
   logic [31:0] next_paddr;
-  assign cand_new = take_rst || take_req || take_fetch;
-  assign xl_tail  = (take_req && dc_pb) ? dc_nb : 3'd0;
+  assign cand_new = take_rst || take_req || take_fetch || take_pk;
   assign l1_addr  = next_addr;
-  assign l2_addr  = next_addr + {29'd0, next_rem} - {29'd0, xl_tail} - 32'd1;
   assign l_fc     = next_fc;
   assign l_rw     = next_rw;
   assign l_rmc    = next_rmc;
-  assign xl_cross = ((l2_addr ^ l1_addr) & ~l_mask) != 32'd0;
-  assign xl_w1    = (l1_kind == 2'b10);
-  assign xl_w2    = xl_cross && (l2_kind == 2'b10);
-  assign xl_wait  = cand_new && (xl_w1 || ((l1_kind == 2'b00) && xl_w2));
+  // The next cycle of the operand under way is in a page it has not been
+  // translated for.
   assign in_p2    = ((next_addr & ~op_pmask) != op_lp1);
-  assign cyc_abt_now = (cand_new && (l1_kind == 2'b01))
-                    || (!cand_new && !take_tw && op_active && in_p2 && op_f2);
+  assign cont_new = !cand_new && !take_tw && op_continuing && in_p2;
+  assign xl_new   = cand_new || cont_new;
+  assign xl_wait  = xl_new && (l1_kind == 2'b10);
+  assign cyc_abt_now = xl_new && (l1_kind == 2'b01);
+  // A continuing operand whose next page needs a search, with the bus idle
+  // between its cycles: set it aside, so that the walker can have the engine.
+  assign park_now = cont_new && (l1_kind == 2'b10) && bus_is_idle;
 
   always_comb begin
     if (take_tw) begin
       next_paddr = tw_addr;
       next_ciout = 1'b0;
-    end else if (cand_new) begin
+    end else if (xl_new) begin
       next_paddr = (l1_pb & ~l_mask) | (next_addr & l_mask);
       next_ciout = l1_ci;
     end else begin
-      next_paddr = ((in_p2 ? op_pb2 : op_pb1) & ~op_pmask) | (next_addr & op_pmask);
-      next_ciout = in_p2 ? op_ci2 : op_ci1;
+      next_paddr = (op_pb1 & ~op_pmask) | (next_addr & op_pmask);
+      next_ciout = op_ci1;
     end
   end
 
@@ -1513,12 +1570,22 @@ module rd68031_biu #(
   // 9.5.1.1, "an access is considered to be a write for updating purposes if
   // either the R/W or RMC signal is low".
   assign wq_valid   = xl_wait;
-  assign wq_addr    = xl_w1 ? l1_addr : l2_addr;
+  assign wq_addr    = l1_addr;
   assign wq_fc      = next_fc;
   assign wq_wr      = !next_rw || next_rmc;
   // The MMU's replacement history: the entries this operand used.
-  assign l_take     = cand_new && ((st_p_nxt == rd68031_pkg::ST_S0)
-                                   || (st_p_nxt == rd68031_pkg::ST_ABT));
+  assign l_take     = xl_new && ((st_p_nxt == rd68031_pkg::ST_S0)
+                                 || (st_p_nxt == rd68031_pkg::ST_ABT));
+
+  // MMUDIS as the MMU sees it: held from the edge an operand is taken to the
+  // edge it finishes, including while it is set aside -- UM 9.2.3, "the
+  // disabling of address translation does not become effective until the
+  // entire transfer is complete". Only an operand can cross into a second
+  // page, so a prefetch and the walker's operands do not hold it.
+  logic mmudis_q, op_mid;
+  assign op_mid        = pk_valid
+                      || (op_active && !op_finishing && !op_istw && !op_isfetch);
+  assign mmudis_sync_n = op_mid ? mmudis_q : mmudis_raw_n;
   // UM 6.1: "whenever the appropriate CI bit is set for either a read or a
   // write access and an external bus cycle is required, CIOUT is asserted and
   // the instruction and data caches are ignored for the access".
@@ -1643,10 +1710,23 @@ module rd68031_biu #(
       op_pmask   <= '1;
       op_lp1     <= '0;
       op_pb1     <= '0;
-      op_pb2     <= '0;
       op_ci1     <= 1'b0;
-      op_ci2     <= 1'b0;
-      op_f2      <= 1'b0;
+      pk_valid   <= 1'b0;
+      pk_addr    <= '0;
+      pk_rem     <= 3'd0;
+      pk_fc      <= 3'd0;
+      pk_rw      <= 1'b1;
+      pk_rmc     <= 1'b0;
+      pk_data    <= '0;
+      pk_posted  <= 1'b0;
+      pk_cpflt   <= 1'b0;
+      pk_burst   <= 1'b0;
+      pk_brq_used <= 1'b0;
+      pk_ciin    <= 1'b0;
+      pk_dfill   <= 1'b0;
+      pk_fillc   <= 1'b0;
+      pk_tail    <= 3'd0;
+      mmudis_q   <= 1'b1;
       op_cpflt   <= 1'b0;
       op_burst   <= 1'b0;
       op_brq_used <= 1'b0;
@@ -1712,6 +1792,7 @@ module rd68031_biu #(
       st_p      <= st_p_nxt;
       req_ack   <= 1'b0;
       req_taken <= 1'b0;
+      mmudis_q  <= mmudis_sync_n;
 
       // A burst is under way past its first long word while the falling-edge
       // state says another is coming: BL, a long word latched with the burst
@@ -1887,14 +1968,21 @@ module rd68031_biu #(
         cyc_n     <= this_n;
         cyc_fill  <= next_fill;
 
-        if (take_tw || take_rst || take_req || take_fetch) begin
+        if (take_tw || take_rst || take_req || take_fetch || take_pk) begin
           // What the data cache said about it -- nothing, for a prefetch or an
           // operand RTE hands back (a rerun recomputes cacheability only by
-          // reading the bus again: doc/checkpoint.md rule 12).
-          op_dfill   <= take_req && req_dfill && (st_p_nxt == rd68031_pkg::ST_S0);
-          op_fillc   <= take_req && req_dfill && !req_rmc
+          // reading the bus again: doc/checkpoint.md rule 12); what it said
+          // when it was taken, for one coming back from being set aside.
+          if (take_pk) begin
+            op_dfill <= pk_dfill && (st_p_nxt == rd68031_pkg::ST_S0);
+            op_fillc <= pk_fillc && (st_p_nxt == rd68031_pkg::ST_S0);
+            op_tail  <= pk_tail;
+          end else begin
+            op_dfill <= take_req && req_dfill && (st_p_nxt == rd68031_pkg::ST_S0);
+            op_fillc <= take_req && req_dfill && !req_rmc
                      && (st_p_nxt == rd68031_pkg::ST_S0);
-          op_tail    <= (take_req && dc_pb) ? dc_nb : 3'd0;
+            op_tail  <= (take_req && dc_pb) ? dc_nb : 3'd0;
+          end
           fl_on      <= 1'b0;
           op_active  <= 1'b1;
           op_addr    <= next_addr;
@@ -1902,38 +1990,38 @@ module rd68031_biu #(
           op_fc      <= next_fc;
           op_rw      <= next_rw;
           op_rmc     <= next_rmc;
-          op_first   <= 1'b1;
+          op_first   <= !take_pk;
           op_isfetch <= take_fetch;
           op_istw    <= take_tw;
           if (take_tw) begin
             op_pmask <= '1;
             op_lp1   <= '0;
             op_pb1   <= '0;
-            op_pb2   <= '0;
             op_ci1   <= 1'b0;
-            op_ci2   <= 1'b0;
-            op_f2    <= 1'b0;
           end else begin
             op_pmask <= l_mask;
             op_lp1   <= next_addr & ~l_mask;
             op_pb1   <= l1_pb;
-            op_pb2   <= xl_cross ? l2_pb : l1_pb;
             op_ci1   <= l1_ci;
-            op_ci2   <= xl_cross ? l2_ci : l1_ci;
-            op_f2    <= xl_cross && (l2_kind == 2'b01);
           end
           op_burst   <= next_burst;
-          op_brq_used <= 1'b0;
-          op_ciin    <= 1'b0;
+          op_brq_used <= take_pk && pk_brq_used;
+          op_ciin    <= take_pk && pk_ciin;
           // Posted: the operand RTE reruns by itself, or a posted request --
-          // which may be taking a hand-back of its own.
-          op_posted  <= take_rst ? (rst_post_q || req_post)
-                                 : (take_req && req_post);
+          // which may be taking a hand-back of its own -- or one set aside.
+          if (take_pk)
+            op_posted <= pk_posted;
+          else
+            op_posted <= take_rst ? (rst_post_q || req_post)
+                                  : (take_req && req_post);
           req_taken  <= req_post && (take_req || (take_rst && !rst_post_q));
           // An operand RTE hands back in CPU space can only be a coprocessor
           // access that faulted, so it faults again if it has to.
           // So can a MOVES to CPU space: its bus error is a bus error.
-          op_cpflt   <= take_rst ? 1'b1 : (take_req && (req_cpfault || req_cpuraw));
+          if (take_pk)
+            op_cpflt <= pk_cpflt;
+          else
+            op_cpflt <= take_rst ? 1'b1 : (take_req && (req_cpfault || req_cpuraw));
           // A restarted operand keeps what it had already transferred: the
           // residual says how much is left, and the buffer holds the rest.
           // A read starts from nothing. Its bytes are gathered right justified
@@ -1945,11 +2033,42 @@ module rd68031_biu #(
           // A read half of which hit in the data cache starts with that half
           // already in place, and the bus fills in the rest.
           if (take_tw)         op_data <= {8'd0, tw_wdata};
+          else if (take_pk)    op_data <= pk_data;
           else if (take_rst)   op_data <= {8'd0, rst_dob};
           else if (take_fetch) op_data <= '0;
           else if (next_rw)    op_data <= dc_data;
           else                 op_data <= req_wdata;
+          if (take_pk) pk_valid <= 1'b0;
+        end else if (cont_new) begin
+          // A continuing operand's first cycle in its next page: that page's
+          // translation, for this cycle and the rest of the operand's.
+          op_pmask <= l_mask;
+          op_lp1   <= next_addr & ~l_mask;
+          op_pb1   <= l1_pb;
+          op_ci1   <= l1_ci;
         end
+      end else if (park_now) begin
+        // The bus is idle between the operand's cycles, and the page its next
+        // one enters needs a table search: set the operand aside, as it
+        // stands, and let the walker have the engine. It comes back through
+        // take_pk once the search is over, translated again from the top.
+        pk_valid    <= 1'b1;
+        pk_addr     <= op_addr;
+        pk_rem      <= op_rem;
+        pk_fc       <= op_fc;
+        pk_rw       <= op_rw;
+        pk_rmc      <= op_rmc;
+        pk_data     <= op_data;
+        pk_posted   <= op_posted;
+        pk_cpflt    <= op_cpflt;
+        pk_burst    <= op_burst;
+        pk_brq_used <= op_brq_used;
+        pk_ciin     <= op_ciin;
+        pk_dfill    <= op_dfill;
+        pk_fillc    <= op_fillc;
+        pk_tail     <= op_tail;
+        op_active   <= 1'b0;
+        fl_on       <= 1'b0;
       end else if ((st_p_nxt == rd68031_pkg::ST_IDLE) && !req_rmc && !mmu_busy) begin
         // Nothing locked is pending and the bus is going idle, so let go of RMC
         // rather than blocking arbitration until the next cycle happens along.

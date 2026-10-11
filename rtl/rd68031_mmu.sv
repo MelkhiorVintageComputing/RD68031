@@ -57,21 +57,17 @@ module rd68031_mmu #(
     output logic        busy,              // a table search is under way
     output logic        done,              // PTEST or PLOAD has finished
 
-    // The bus unit's lookups: the first and last byte of the operand it is
-    // about to start, in one space and direction ---------------------------
+    // The bus unit's lookup: the first byte of the operand it is about to
+    // start, or of the first cycle of one that enters its next page ---------
     input  logic [31:0] l1_addr,
-    input  logic [31:0] l2_addr,
     input  logic  [2:0] l_fc,
     input  logic        l_rw,
     input  logic        l_rmc,
     output logic  [1:0] l1_kind,
-    output logic  [1:0] l2_kind,
     output logic [31:0] l1_pb,
-    output logic [31:0] l2_pb,
     output logic        l1_ci,
-    output logic        l2_ci,
     output logic [31:0] l_mask,
-    input  logic        l_take,            // the operand looked up was taken
+    input  logic        l_take,            // the cycle looked up was started
 
     // ... and its request for a table search -------------------------------
     input  logic        wq_valid,
@@ -208,7 +204,7 @@ module rd68031_mmu #(
   logic xlate;
   assign xlate = tc_e && mmudis_sync_n;
 
-  logic [N-1:0] h1v, h2v, h3v;
+  logic [N-1:0] h1v, h3v;
   logic         hit3, e3_b, e3_wp, e3_m, tt3;
   logic [31:0]  mask3, pb3;
   logic  [1:0]  kind3;
@@ -220,10 +216,9 @@ module rd68031_mmu #(
   logic  [2:0] w_fc;
   logic        w_rw;
 
-  logic unused_l1, unused_l2;
-  logic u1, u2, u3;
-  logic h1, h2, e1_b, e1_ci, e1_wp, e1_m, t1m, e2_b, e2_ci, e2_wp, e2_m, t2m;
-  logic [31:0] mask2;
+  logic unused_l1;
+  logic u1, u3;
+  logic h1, e1_b, e1_ci, e1_wp, e1_m, t1m;
 
   rd68031_mmu_xl #(.N (N)) u_xl1 (
       .la (l1_addr), .fc (l_fc), .rw (l_rw), .rmc (l_rmc), .xlate (xlate),
@@ -231,13 +226,6 @@ module rd68031_mmu #(
       .dat (dat_flat), .hitv (h1v), .hit (h1), .e_b (e1_b), .e_ci (e1_ci),
       .e_wp (e1_wp), .e_m (e1_m), .tt (t1m), .mask (l_mask), .kind (l1_kind),
       .pb (l1_pb), .ci (l1_ci), .used (u1));
-
-  rd68031_mmu_xl #(.N (N)) u_xl2 (
-      .la (l2_addr), .fc (l_fc), .rw (l_rw), .rmc (l_rmc), .xlate (xlate),
-      .ps (tc_ps), .tt0 (tt0_q), .tt1 (tt1_q), .v (v_q), .tag (tag_flat),
-      .dat (dat_flat), .hitv (h2v), .hit (h2), .e_b (e2_b), .e_ci (e2_ci),
-      .e_wp (e2_wp), .e_m (e2_m), .tt (t2m), .mask (mask2), .kind (l2_kind),
-      .pb (l2_pb), .ci (l2_ci), .used (u2));
 
   logic rmc_none;
   assign rmc_none = 1'b0;
@@ -249,7 +237,6 @@ module rd68031_mmu #(
       .pb (pb3), .ci (ci3), .used (u3));
 
   assign unused_l1 = &{1'b1, h1, e1_b, e1_ci, e1_wp, e1_m, t1m};
-  assign unused_l2 = &{1'b1, h2, e2_b, e2_ci, e2_wp, e2_m, t2m, mask2};
 
   // The replacement victim.
   logic [4:0] vict;
@@ -451,7 +438,6 @@ module rd68031_mmu #(
       fl_now = fl_hit;
     h_set = '0;
     if (l_take && u1) h_set = h_set | h1v;
-    if (l_take && u2) h_set = h_set | h2v;
     if (a_wr) h_set = h_set | ({{(N-1){1'b0}}, 1'b1} << wslot);
     v_after = v_q & ~fl_now;
     if (a_wr) v_after = (v_after & ~h3v) | ({{(N-1){1'b0}}, 1'b1} << wslot);

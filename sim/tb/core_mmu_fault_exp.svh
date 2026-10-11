@@ -16,6 +16,12 @@
       exp_walk("mmu_fault", 11, 6, 2);   // CAS: U, PTEST, M
       exp_walk("mmu_fault", 13, 8, 2);   // across, read: both pages, PTEST, residual
       exp_walk("mmu_fault", 15, 8, 3);   // across, write: M, U (WP), PTEST, M
+      // ... and of those, only the first page's search comes before the
+      // operand's first cycle: the second page is searched when the operand's
+      // cycles reach it (doc/mmu.md, since M11 part 2 -- doc/m11-mismatches.md
+      // Q-A). Searching both up front, as part 1 did, would be 5 and 6.
+      exp_wpre("mmu_fault", 13, 3);      // the read: A, B[8] and its U
+      exp_wpre("mmu_fault", 15, 3);      // the write: A, B[10] and its M
       exp_walk("mmu_fault", 17, 4, 1);   // the code page, and the unused prefetch's
       exp_walk("mmu_fault", 19, 8, 2);   // the code page, the prefetch, PTEST, rerun
       exp_walk("mmu_fault", 20, 4, 2);   // the two pages into the data cache

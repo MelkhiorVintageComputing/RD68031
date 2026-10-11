@@ -76,6 +76,8 @@ module core_mmu_tb;
   int c_st3  [0:NPH-1];   // STATUS asserted for three clocks
   int c_wclk [0:NPH-1];   // clocks the walker was busy
   int c_wn   [0:NPH-1];   // ... in how many searches
+  int c_wpre [0:NPH-1];   // table search cycles before the phase's first operand cycle
+  bit d_seen;             // ... which has been seen
   logic [31:0] pg_watch, pg2_watch;
   bit  is_regs;
   int  rmc_breaks;
@@ -87,7 +89,9 @@ module core_mmu_tb;
       c_wr[i] = 0; c_ww[i] = 0; c_wbad[i] = 0; c_b4[i] = 0; c_c3[i] = 0;
       c_cio[i] = 0; c_cbr[i] = 0; c_pf[i] = 0; c_pfci[i] = 0; c_pg[i] = 0;
       c_pgci[i] = 0; c_pg2[i] = 0; c_st3[i] = 0; c_wclk[i] = 0; c_wn[i] = 0;
+      c_wpre[i] = 0;
     end
+    d_seen = 1'b0;
     ph = 0;
     rmc_breaks = 0;
     walk_seen = 1'b0;
@@ -107,7 +111,11 @@ module core_mmu_tb;
         else      c_ww[ph] = c_ww[ph] + 1;
         if (!ciout_n_o || !cbreq_n_o) c_wbad[ph] = c_wbad[ph] + 1;
         if (a_o[31:28] == 4'h4) c_b4[ph] = c_b4[ph] + 1;
+        if (!d_seen) c_wpre[ph] = c_wpre[ph] + 1;
       end else begin
+        // An operand cycle in data space, other than the phase marker.
+        if (((fc_o == 3'd1) || (fc_o == 3'd5)) && (a_o != 32'h0000_8000))
+          d_seen = 1'b1;
         if (a_o[31:28] == 4'h3) c_c3[ph] = c_c3[ph] + 1;
         if (!ciout_n_o) c_cio[ph] = c_cio[ph] + 1;
         if (!cbreq_n_o && (a_o[31:28] == 4'h3)) c_cbr[ph] = c_cbr[ph] + 1;
@@ -129,6 +137,7 @@ module core_mmu_tb;
     #1;
     if (rst_n && as_oe && !rw_o && (a_o == 32'h0000_8000)) begin
       if (d_o < NPH) ph = d_o;
+      d_seen = 1'b0;
       if (is_regs && d_o == 42) mmudis_n_i = 1'b0;
       if (is_regs && d_o == 43) mmudis_n_i = 1'b1;
     end
@@ -202,6 +211,15 @@ module core_mmu_tb;
                                    pn, p, c_st3[p], n));
   endtask
 
+  // How many of a phase's table search cycles came before its first operand
+  // cycle: for an operand that crosses into a page the ATC does not have, the
+  // first page's search alone. The second page's is made when the operand's
+  // cycles reach it, after the first page's part (doc/mmu.md, M11 part 2).
+  task automatic exp_wpre(input string pn, input int p, input int n);
+    check(c_wpre[p] == n, $sformatf("%s phase %0d: %0d table search cycles before the first operand cycle, want %0d",
+                                    pn, p, c_wpre[p], n));
+  endtask
+
   task automatic exp_b4(input string pn, input int p, input int b4);
     check(c_b4[p] == b4, $sformatf("%s phase %0d: %0d search cycles to the bus-error region, want %0d",
                                    pn, p, c_b4[p], b4));
@@ -255,8 +273,8 @@ module core_mmu_tb;
     int i;
     for (i = 0; i < NPH; i = i + 1)
       if (c_wr[i] || c_ww[i] || c_c3[i] || c_cio[i] || c_cbr[i] || c_pg[i] || c_pg2[i])
-        $display("  %s phase %0d: walk r%0d w%0d b4 %0d (%0d searches, %0d clocks) | sync %0d ciout %0d cbreq %0d | fetch %0d/%0d | pg %0d/%0d pg2 %0d | status3 %0d",
-                 pn, i, c_wr[i], c_ww[i], c_b4[i], c_wn[i], c_wclk[i], c_c3[i], c_cio[i],
+        $display("  %s phase %0d: walk r%0d w%0d b4 %0d (%0d searches, %0d clocks, %0d before the first operand cycle) | sync %0d ciout %0d cbreq %0d | fetch %0d/%0d | pg %0d/%0d pg2 %0d | status3 %0d",
+                 pn, i, c_wr[i], c_ww[i], c_b4[i], c_wn[i], c_wclk[i], c_wpre[i], c_c3[i], c_cio[i],
                  c_cbr[i], c_pf[i], c_pfci[i], c_pg[i], c_pgci[i], c_pg2[i], c_st3[i]);
   endtask
 

@@ -252,10 +252,10 @@ module rd68031_top #(
   logic        mmu_go, mmu_cfg_bad, mmu_busy, mmu_done, mmu_sts;
   logic [15:0] mmu_xw;
   logic [31:0] mmu_ea, mmu_wd_hi, mmu_wd_lo, mmu_rd_hi, mmu_rd_lo, mmu_da;
-  logic [31:0] l1_addr, l2_addr, l1_pb, l2_pb, l_mask;
+  logic [31:0] l1_addr, l1_pb, l_mask;
   logic  [2:0] l_fc;
-  logic        l_rw, l_rmc, l1_ci, l2_ci, l_take;
-  logic  [1:0] l1_kind, l2_kind;
+  logic        l_rw, l_rmc, l1_ci, l_take;
+  logic  [1:0] l1_kind;
   logic        wq_valid, wq_wr;
   logic [31:0] wq_addr;
   logic  [2:0] wq_fc;
@@ -576,16 +576,12 @@ module rd68031_top #(
       .bus_abort      (bus_abort),
 
       .l1_addr        (l1_addr),
-      .l2_addr        (l2_addr),
       .l_fc           (l_fc),
       .l_rw           (l_rw),
       .l_rmc          (l_rmc),
       .l1_kind        (l1_kind),
-      .l2_kind        (l2_kind),
       .l1_pb          (l1_pb),
-      .l2_pb          (l2_pb),
       .l1_ci          (l1_ci),
-      .l2_ci          (l2_ci),
       .l_mask         (l_mask),
       .l_take         (l_take),
       .wq_valid       (wq_valid),
@@ -683,16 +679,12 @@ module rd68031_top #(
       .busy           (mmu_busy),
       .done           (mmu_done),
       .l1_addr        (l1_addr),
-      .l2_addr        (l2_addr),
       .l_fc           (l_fc),
       .l_rw           (l_rw),
       .l_rmc          (l_rmc),
       .l1_kind        (l1_kind),
-      .l2_kind        (l2_kind),
       .l1_pb          (l1_pb),
-      .l2_pb          (l2_pb),
       .l1_ci          (l1_ci),
-      .l2_ci          (l2_ci),
       .l_mask         (l_mask),
       .l_take         (l_take),
       .wq_valid       (wq_valid),
