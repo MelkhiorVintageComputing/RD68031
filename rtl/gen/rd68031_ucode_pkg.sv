@@ -500,7 +500,7 @@ package rd68031_ucode_pkg;
   localparam logic [UADDR-1:0] ENTRY_FAULT_LONG = 12'd1295;
   localparam logic [UADDR-1:0] ENTRY_LINE_F = 12'd1093;
   localparam logic [UADDR-1:0] ENTRY_LINE_F_NOCP = 12'd1094;
-  localparam logic [UADDR-1:0] ENTRY_CP_IRQ = 12'd1933;
+  localparam logic [UADDR-1:0] ENTRY_CP_IRQ = 12'd1935;
   localparam logic [UADDR-1:0] ENTRY_RTE_BOUNDARY = 12'd3;
   localparam logic [UADDR-1:0] ENTRY_RTE_RMW_DONE = 12'd268;
   localparam logic [UADDR-1:0] ENTRY_CP_NOCP_PRIV = 12'd1403;

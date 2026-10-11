@@ -4044,8 +4044,30 @@ u('vector 13', asrc='VECOFF', alu='A', dst='T0', size='LONG', vec=13,
 # back to the operation word IS that: the decode arm takes a pending interrupt
 # at the boundary with this instruction's own address in the frame, and then
 # decodes it afresh. It was never executed, so it is not traced.
+#
+# How it goes back is the breakpoint's business. "When a breakpoint
+# acknowledge cycle initiates a coprocessor F-line instruction, the coprocessor
+# returns the busy primitive in response to the instruction initiation, and an
+# interrupt is pending ... the processor re-executes the breakpoint acknowledge
+# cycle after the interrupt exception processing has been completed" -- and,
+# the three conditions not all met, does not. So with an interrupt pending the
+# pipe is refilled from the operation word's address, which is where RTE goes
+# back to as well, and a breakpoint there runs its acknowledge again; with
+# none, stage D is decoded again as it stands -- the word the acknowledge
+# supplied, if it was one -- and only the queue behind it is refilled, from the
+# word after it (UM 10.4.17's refill, which leaves stage D alone). An
+# interrupt that arrives between the question and the boundary is taken there
+# with the operation word's address in the frame, which is the first case.
+# cpSAVE's not ready comes here as well (UM 10.5.2.6).
 label('cp_busy')
-u('start again from the operation word',
+u('an interrupt pending?', seq='COND', cond='IRQPEND', next='cp_busy_irq')
+u('no: the queue behind stage D refilled from the word after the operation '
+  'word, and stage D kept',
+  asrc='PC_D', bsrc='TWO', alu='ADD', dst='SCANPC', notrace=1)
+u('... and decoded again, an instruction boundary',
+  seq='DECODE')
+label('cp_busy_irq')
+u('yes: start again from the operation word, refetched',
   asrc='PC_D', alu='A', pf='FLUSH', notrace=1)
 u('... which is an instruction boundary',
   seq='DECODE')

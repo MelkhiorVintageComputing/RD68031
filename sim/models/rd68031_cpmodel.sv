@@ -17,7 +17,16 @@
 // sixteen-bit registers the way the MC68881 does: "with DSACK1 only, on D31-D16,
 // regardless of the value of A1" (MC68881 UM 7.2), which is a sixteen-bit port
 // as far as the processor can tell, and so exercises dynamic bus sizing on the
-// interface registers. The register map is UM figure 10-5:
+// interface registers. With `sync` set it is a synchronous 32-bit port instead:
+// UM 10.1.4.2, "the MC68030 accesses the registers in the CIR set using
+// standard asynchronous or synchronous bus cycles", and "if the coprocessor
+// uses the synchronous bus interface all coprocessor signals and data must be
+// synchronized with the main processor clock". It then terminates every cycle
+// with STERM, decoded from the address as UM 7.2.10 allows, and never with
+// DSACK; it never answers CBREQ with CBACK, and it counts the cycles the
+// processor asked to burst (`cbreq_seen`): "the MC68030 never requests a burst
+// operation during a coprocessor (CPU space) bus cycle". The register map is
+// UM figure 10-5:
 //
 //   $00 response (read)     $02 control (write)
 //   $04 save (read)         $06 restore (read and write)
@@ -50,9 +59,11 @@ module rd68031_cpmodel #(
     input  logic        ds_n_i,
     input  logic        rw_i,
     input  logic [31:0] d_i,
+    input  logic        cbreq_n_i,
     output logic [31:0] d_o,
     output logic        d_oe,
-    output logic  [1:0] dsack_n_o
+    output logic  [1:0] dsack_n_o,
+    output logic        sterm_n_o
 );
 
   // ---- The script ----------------------------------------------------------
@@ -69,6 +80,8 @@ module rd68031_cpmodel #(
   logic [15:0] save_default;
   logic [15:0] rest_last;       // the last value written to the restore CIR
   logic        port16;          // answer the word registers as a 16-bit port
+  logic        sync;            // terminate with STERM: a synchronous 32-bit port
+  int unsigned cbreq_seen;      // cycles to this coprocessor that asserted CBREQ
 
   // ---- The log -------------------------------------------------------------
   logic        log_rw    [0:LOGN-1];   // 1 = the processor read
@@ -85,6 +98,8 @@ module rd68031_cpmodel #(
     save_default = 16'h0000;     // empty
     rest_last    = 16'h0000;
     port16       = 1'b0;
+    sync         = 1'b0;
+    cbreq_seen   = 0;
   endtask
 
   initial clear();
@@ -148,7 +163,11 @@ module rd68031_cpmodel #(
   end
   assign d_oe      = selected && rw_i;
   // UM table 7-1: DSACK1 alone is a sixteen-bit port, both a thirty-two-bit one.
-  assign dsack_n_o = !selected ? 2'b11 : (port16 && word_reg) ? 2'b01 : 2'b00;
+  assign dsack_n_o = (!selected || sync) ? 2'b11
+                   : (port16 && word_reg) ? 2'b01 : 2'b00;
+  // UM 7.3.4: STERM, set up for the rising edge that starts S2 -- a cycle with
+  // no wait states.
+  assign sterm_n_o = !(selected && sync);
 
   // The bytes a write carried, right justified: a 32-bit port puts byte k of an
   // access at lane (A1A0 + k) -- UM Table 7-5.
@@ -173,7 +192,16 @@ module rd68031_cpmodel #(
 
   initial in_cycle = 1'b0;
 
+  // A synchronous write is two clocks and never asserts DS: the data is
+  // driven from the start of S2 and held through S3 (UM 7.3.5), so it is taken
+  // on the falling edge after the rising edge STERM was sampled on.
+  always @(negedge clk) begin
+    if (selected && sync && !rw_i)
+      cur_data <= wr_value(d_i, a_i[1:0], nbytes(siz_i));
+  end
+
   always @(posedge clk) begin
+    if (selected && !cbreq_n_i) cbreq_seen = cbreq_seen + 1;
     if (selected) begin
       in_cycle <= 1'b1;
       cur_rw   <= rw_i;

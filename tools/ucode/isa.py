@@ -153,11 +153,13 @@ COND = enc(
     # moves one to four bytes per request and the count is fixed in the
     # microword, so the tail of an odd-length operand is a branch.
     'T1GE4', 'T1B1', 'T1B0', 'T1ZERO',
-    # A trace will be taken when this instruction ends -- UM 10.5.2.5 keeps the
-    # dialogue going until the coprocessor has finished, so that it is.
+    # A trace on instruction execution will be taken when this instruction
+    # ends -- UM 10.5.2.5 keeps the dialogue going until the coprocessor has
+    # finished, so that it is. Not a trace on change of flow, which does not
+    # hold the dialogue (rd68031_seq, trace_hold).
     'TRACEPEND',
-    # Come again: CA set, or a trace pending (UM 10.5.2.5), which holds a
-    # dialogue open until the coprocessor says it has finished. The one
+    # Come again: CA set, or a trace pending as TRACEPEND says (UM 10.5.2.5),
+    # which holds a dialogue open until the coprocessor says it has finished. The one
     # question at the end of every primitive -- program.py, u().
     'CPAGAIN',
     # An interrupt the mask admits is waiting -- UM 10.5.2.6: a null primitive

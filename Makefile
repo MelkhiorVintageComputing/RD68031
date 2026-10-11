@@ -313,7 +313,7 @@ sim: dirs $(COW).hex $(COWMMU).hex $(M030).hex $(CACHEP).hex $(MMUHEX) sim-progs
 	  cat $$r; grep -q '^FAIL' $$r && ok=0; \
 	done; test $$ok -eq 1
 
-# The coprocessor interface, UM section 7, against the scripted coprocessor of
+# The coprocessor interface, UM section 10, against the scripted coprocessor of
 # sim/models/rd68031_cpmodel.sv -- doc/coprocessor.md. Part of `sim` as well.
 cpif: dirs
 	@$(MAKE) --no-print-directory sim TBS=core_cpif_tb

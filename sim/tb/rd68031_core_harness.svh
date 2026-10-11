@@ -174,7 +174,8 @@ logic       oe32, oe16, oe8, oeb;
 logic       sterm32, sterm16, sterm8, stermb;
 logic       cback32, cback16, cback8, cbackb;
 logic       ciin32, ciin16, ciin8, ciinb;
-assign sterm_n_i = sterm32 & sterm16 & sterm8 & stermb;
+logic       sterm_cp;
+assign sterm_n_i = sterm32 & sterm16 & sterm8 & stermb & sterm_cp;
 assign cback_n_i = cback32 & cback16 & cback8 & cbackb;
 assign ciin_n_i  = ciin32  & ciin16  & ciin8  & ciinb;
 
@@ -204,9 +205,11 @@ assign dbus = oe_cp ? d_cp : 32'bz;
 rd68031_cpmodel #(.CPID (3'd1)) cp (
     .clk (clk), .rst_n (rst_n), .a_i (a_o), .fc_i (fc_o), .siz_i (siz_o),
     .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .d_i (dbus),
-    .d_o (d_cp), .d_oe (oe_cp), .dsack_n_o (dsack_cp));
+    .cbreq_n_i (cbreq_n_o),
+    .d_o (d_cp), .d_oe (oe_cp), .dsack_n_o (dsack_cp), .sterm_n_o (sterm_cp));
 `else
 assign dsack_cp = 2'b11;
+assign sterm_cp = 1'b1;
 `endif
 assign dsack_n_i = dsack32 & dsack16 & dsack8 & dsackb & dsack_ext & dsack_cp;
 

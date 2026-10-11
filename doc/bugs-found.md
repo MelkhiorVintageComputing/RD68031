@@ -975,3 +975,57 @@ program checks what it reads after memory changes behind the cache;
 `core_mmu_tb` checks that every cycle to the cachable frame has CIOUT negated
 and every cycle to the CI frame has it asserted, counts them per phase, and
 checks the values that depend on whether the core has a data cache.
+
+---
+
+## M12 · A trace on change of flow held the coprocessor dialogue open
+
+**What:** under T1 T0 = 01, once a general coprocessor instruction's dialogue had
+changed the flow -- the coprocessor transferring the status register or the scanPC
+in -- the processor went on reading the response CIR past every primitive with CA
+clear, until a null primitive with PF set, as it must for a trace on instruction
+execution. UM 10.5.2.5 says the change-of-flow trace does not: "it is possible
+that the coprocessor is still executing the cpGEN instruction concurrently when
+the main processor begins execution of the trace exception handler"
+(`doc/manual-contradictions.md` 30). The sequencer's `TRACEPEND` and `CPAGAIN`
+asked `trace_take`, which is true for both modes. Inherited from RD68021's M13.
+
+**Found by:** re-deriving section 10 of the MC68030 manual line by line at M12.
+
+**Fixed by:** `trace_hold` in `rd68031_seq` -- a trace on instruction execution,
+T1 set, not cancelled and not inside a bus error's exception processing -- for the
+two conditions; `trace_take` still decides whether the trace is taken at the
+boundary.
+
+**Stops it coming back:** `core_cpif_tb`, "trace on flow": the status register in
+under T1 T0 = 01, then null with CA and PF clear; the dialogue must end there, with
+four CIR accesses, and the trace be taken with the format $2 frame. On the unfixed
+sequencer the processor reads the response CIR a third time and the check fails;
+"trace on flow, no change" checks that the mode alone traces nothing, and the
+M13 test of a trace on instruction execution still holds the dialogue.
+
+---
+
+## M12 · Busy after a breakpoint ran the breakpoint acknowledge again
+
+**What:** the busy primitive (and cpSAVE's not ready) restarted the instruction by
+refilling the pipe from the operation word's address. When a breakpoint
+acknowledge had supplied the instruction, that address holds the BKPT, so every
+busy ran the acknowledge again. UM 10.4.3 makes that the special case of three
+conditions -- the breakpoint, busy, "and an interrupt is pending" -- and otherwise
+the instruction is restarted without it. RD68021 listed the case as not tested.
+
+**Found by:** re-deriving UM 10.4.3 at M12.
+
+**Fixed by:** `cp_busy` in `tools/ucode/program.py` asks `IRQPEND`. With an
+interrupt pending it refills from the operation word's address as before, the
+interrupt is taken there, and RTE comes back to the breakpoint, whose acknowledge
+runs again, as the manual says. With none it refills only the queue behind stage
+D, from the word after the operation word (the scanPC refill of UM 10.4.17, which
+leaves stage D alone), and decodes stage D again where it stands.
+
+**Stops it coming back:** `core_cpif_tb`, "busy after BKPT": a BKPT whose
+acknowledge supplies a cpGEN, answered busy and then released -- one acknowledge
+cycle with no interrupt, two with one raised during the dialogue, and the
+interrupt's frame at the breakpoint's address. The unfixed microcode gives two
+acknowledges in the first case.

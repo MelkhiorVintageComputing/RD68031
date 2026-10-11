@@ -626,3 +626,94 @@ destination 2 first. A fault on either write still reruns the whole locked
 sequence with DF set (UM 8.2.3, `doc/checkpoint.md` rule 5); on the second
 write, now destination 1's, the rerun reads destination 2's update back and
 fails its second compare. `core_fault_tb` faults each of the four accesses.
+
+---
+
+## 27. Which modes transfer multiple coprocessor registers allows
+
+**Followed: UM 10.4.16's text -- to the coprocessor, control and (An)+; from it,
+control alterable and -(An).**
+
+UM 10.4.16: "For transfers from the effective address to the coprocessor (DR=0),
+the control addressing modes and the postincrement addressing mode are valid. For
+transfers from the coprocessor to the effective address (DR = 1), the control
+alterable and predecrement addressing modes are valid." Figure 10-38 then draws
+two operands written to -(An). Table 10-6, the summary of the exceptions each
+primitive can cause, gives the F-line cases as "EA Not Control Alterable or (An)+
+for CP to Memory Transfer" and "EA Not Control Alterable or (An) for Memory to CP
+Transfer" -- the increment modes the other way round, and control alterable where
+the text has control for reads. The MC68020 manual has the same table.
+
+The text, the figure and the instructions an MC68881 builds on the primitive
+(FMOVEM to -(An), from (An)+, MC68881 UM section 4) agree; the table is the odd
+one out. `cp_mcreg` and the twelve-byte handlers take the text's modes, and
+`core_cpif_tb` refuses -(An) for a transfer to the coprocessor.
+
+---
+
+## 28. Which modes cpRESTORE takes
+
+**Followed: UM 10.2.3.4.1 and PRM 6's table -- control, (An)+, and the
+immediate.**
+
+UM 10.2.3.4.1: "All memory addressing modes except the predecrement addressing
+mode are valid", which includes the immediate and the PC-relative modes. PRM 6's
+text for cpRESTORE: "Only postincrement or control addressing modes can be used",
+which does not include the immediate; the table under the same sentence lists
+`#<data>`, 111 100. Two of the three allow it. With it, the state frame is the
+words after the operation word: `cp_restore_imm` takes the format word, its
+reserved word and the state from the stream, and the program goes on after them.
+`core_cpif_tb` restores a frame from an immediate.
+
+---
+
+## 29. What unit the state frame's length is in
+
+**Followed: bytes.**
+
+UM 10.2.3.1: the processor "writes the long words that form the coprocessor state
+frame to descending memory addresses, beginning with the address specified by the
+sum of the effective address and the format word-length field multiplied by
+four." UM 10.2.3.2, a page later: "The lower byte of the coprocessor format word
+specifies the size in bytes (which must be a multiple of four) of the coprocessor
+state frame", and UM 10.2.3.2.4 and 10.5.2.7 refuse a length "not a multiple of
+four" -- which only means anything for a count of bytes. The MC68881's idle frame
+is `$1F18`: "24 bytes of internal state are saved in the idle state frame for the
+MC68881" (MC68881 UM 6.4.2.2).
+
+So the length is a byte count and "multiplied by four" is a slip: the frame is the
+format word's long word and `length` bytes after it, and the first long word the
+coprocessor gives goes at the effective address plus the length, which is the
+highest long word of the frame. `core_cpif_tb` saves frames of four, eight and
+twenty-four bytes, restores frames of four and eight, and checks where every long
+word went.
+
+---
+
+## 30. Whether a trace on change of flow holds the dialogue open
+
+**Followed: UM 10.5.2.5's last paragraph -- it does not; only a trace on
+instruction execution does.**
+
+UM 10.4.4: "If a trace exception is pending, however, the main processor does not
+terminate the instruction dialogue until it reads a null, CA=0, PF=1 primitive",
+and UM 10.5.2.5: "When a trace exception is pending, however, the main processor
+must ensure that all processing associated with a cpGEN instruction has been
+completed before it takes the trace exception". Neither says which trace. Under
+T1 T0 = 01 a trace becomes pending in the middle of the dialogue, once the
+coprocessor has transferred the status register or the scanPC in, and read
+literally both sentences would hold the dialogue from then on. UM 10.5.2.5 goes on:
+"If T1:T0=01 ... a trace exception is taken for the instruction only when the
+coprocessor issues a transfer status register and scanPC primitive with DR = 1
+during the execution of that instruction. In this case, it is possible that the
+coprocessor is still executing the cpGEN instruction concurrently when the main
+processor begins execution of the trace exception handler. A cpSAVE instruction
+executed during the trace on change of flow exception handler could thus suspend
+the execution of a concurrently operating cpGEN instruction." That cannot happen
+if the change of flow held the dialogue until PF = 1.
+
+So "pending" in the first two sentences is a trace on instruction execution,
+pending from the start of the instruction, and the trace on change of flow is
+taken at the boundary after the dialogue ends however it ends (`trace_hold` in
+`rd68031_seq`). RD68021 held the dialogue for both (`doc/bugs-found.md`, M12).
+`core_cpif_tb` traces a dialogue under each mode.

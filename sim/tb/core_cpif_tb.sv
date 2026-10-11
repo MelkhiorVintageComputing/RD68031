@@ -116,8 +116,18 @@ module core_cpif_tb;
                                     what, cp.log_n, li));
   endtask
 
+`include "core_cpif_m030.svh"
+
   initial begin
     $display("core_cpif_tb: the coprocessor interface");
+    if ($test$plusargs("m030_only")) begin
+      m030_tests();
+      if (fails == 0)
+        $display("PASS: core_cpif_tb, MC68030 part only (%0d checks)", checks);
+      else
+        $display("FAIL: core_cpif_tb, MC68030 part only (%0d of %0d checks failed)", fails, checks);
+      $finish;
+    end
 
     // ======================================================================
     // cpGEN, released at once -- UM 10.2.1.2. The command word goes to the
@@ -1383,6 +1393,9 @@ module core_cpif_tb;
     expect_cir(1'b0, R_OPND, 4, 32'h1357_9BDF, "MC68881 port: the state");
     expect_end("MC68881 port");
     cp.port16 = 1'b0;
+
+    // The MC68030's part -- core_cpif_m030.svh.
+    m030_tests();
 
     if (fails == 0)
       $display("PASS: core_cpif_tb (%0d checks)", checks);

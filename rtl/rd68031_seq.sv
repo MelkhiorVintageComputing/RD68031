@@ -1797,6 +1797,22 @@ module rd68031_seq #(
                    && (trace_mode_q[1]
                        || ((trace_mode_q == 2'b01) && flow_eff));
 
+  // The trace that holds a general coprocessor instruction's dialogue open --
+  // UM 10.5.2.5: "when a trace exception is pending ... the main processor
+  // continues to read the response CIR and to service the primitives until it
+  // receives either a null, CA=0, PF=1 primitive" -- is the trace on
+  // instruction execution, pending from the instruction's start. Not the trace
+  // on change of flow, which the dialogue itself makes pending: "a trace
+  // exception is taken for the instruction only when the coprocessor issues a
+  // transfer status register and scanPC primitive with DR = 1 ... In this
+  // case, it is possible that the coprocessor is still executing the cpGEN
+  // instruction concurrently when the main processor begins execution of the
+  // trace exception handler" -- which it could not be if that trace held the
+  // dialogue until PF = 1. That trace is still taken at the boundary, by
+  // trace_take; it only does not keep the processor reading.
+  logic trace_hold;
+  assign trace_hold = !notrace_q && !g0_q && trace_mode_q[1];
+
   // ==========================================================================
   // The addressing-mode classes -- PRM 2.2 and table 2-4, for the coprocessor
   // primitives that evaluate the effective address in the operation word and
@@ -1988,8 +2004,8 @@ module rd68031_seq #(
       rd68031_ucode_pkg::U_COND_T1B1:   cond_true = t_q[1][1];
       rd68031_ucode_pkg::U_COND_T1B0:   cond_true = t_q[1][0];
       rd68031_ucode_pkg::U_COND_T1ZERO: cond_true = (t_q[1] == 32'd0);
-      rd68031_ucode_pkg::U_COND_TRACEPEND: cond_true = trace_take;
-      rd68031_ucode_pkg::U_COND_CPAGAIN:   cond_true = cprim_q[15] || trace_take;
+      rd68031_ucode_pkg::U_COND_TRACEPEND: cond_true = trace_hold;
+      rd68031_ucode_pkg::U_COND_CPAGAIN:   cond_true = cprim_q[15] || trace_hold;
       // Against the mask as it stands: nothing in the dialogue writes it on
       // the microword that asks.
       rd68031_ucode_pkg::U_COND_IRQPEND:   cond_true = irq_ipend;

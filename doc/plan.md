@@ -256,6 +256,25 @@ the extent of a search after an S violation). Layer 2 below is in production as 
 with the two cores in two benches on identical models rather than in one (they need
 different simulators).
 
+**Status (M12):** the coprocessor interface re-derived from MC68030 UM section 10,
+compared line by line with the MC68020's section 7 that RD68021 built it from
+(`doc/coprocessor.md`, no longer marked inherited). The protocol is the same text;
+what the MC68030 adds is around it, and it was already in the bus unit, the MMU
+and the data cache: CIR cycles may end with STERM, never ask for a burst, are never
+cached, never translated, never matched by a TTx register, and never assert CIOUT
+(UM 10.1.4, 9.2.1, 6.1.2). Two defects, both inherited (`doc/bugs-found.md`): a
+trace on change of flow held the dialogue open as a trace on instruction execution
+must (UM 10.5.2.5), and busy after a breakpoint acknowledge ran the acknowledge
+again with no interrupt pending (UM 10.4.3). Four places the manual contradicts
+itself are recorded (`doc/manual-contradictions.md` 27-30). `core_cpif_tb` gains
+`core_cpif_m030.svh` (`+m030_only`): the operands of every memory-side primitive
+through a mapped page with the MMU on, a read and a posted write faulted on a page
+the tables refuse and resumed by RTE, TT0 with CI against CIOUT on CIR cycles, the
+data cache with bursts on, a synchronous coprocessor, the trace and breakpoint
+cases, and the cpSAVE and cpRESTORE format words not reached before; the
+scripted coprocessor gains a synchronous mode. 620 checks. CpID 0 stays the MMU's
+(since M5); CpIDs 1-7 stay external.
+
 **Known suspects when real software misbehaves (M13, M14):** the deliberate
 differences from the part that follow the manual instead -- `LINK A7` pushes the
 decremented stack pointer where the part pushes the value before it, and the
