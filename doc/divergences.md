@@ -244,6 +244,7 @@ the contradictions themselves are `doc/manual-contradictions.md` 19-25.
 | U in the descriptor whose S bit makes the violation | figure 9-29 writes it, 9.5.1.1 does not | not written -- manual-contradictions 21 |
 | PTEST's N after a bus error | "the actual number of tables accessed" | the table whose fetch failed counts. The oracles answer differently from the core and from each other; the user decided at M11 part 2 to keep this (`doc/m11-mismatches.md` c2) |
 | how far a user search goes after a long table descriptor with S set | "the table search is completed" (9.5.5.3) | to its end, the page descriptor read -- as UAE030; AP68030 stops at the descriptor. Kept by the user's decision at M11 part 2 (`doc/m11-mismatches.md` c3) |
+| what An reads as in a bus error handler, after a fault on an instruction's `(An)+` or `-(An)` operand | not said: UM 8.2 gives the frame and says RTE completes the instruction | An as before the instruction; RTE completes it. UAE030 shows An already stepped and undoes that at its restart. Kept by the user's decision after M13 phase A (`doc/m13-mismatches.md` c7) |
 | PLOAD with a TTx register matching | not said | PLOAD searches the tables anyway |
 | reserved bits of TTx and MMUSR | not said | not kept: they read zero, as TC's and the root pointers' do by the manual |
 | PMOVE register-to-memory with FD set | not said; the format has the bit | accepted, FD ignored |
