@@ -299,6 +299,17 @@ work (phase B), so three things stay open for then: patching PTEST in the build 
 of MAME's m68030, replacing the dependency on RD68021's `tme-sun-eeprom` with an NVRAM
 generator of our own, and the driver work itself.
 
+**Status (M15, phase A):** measured, nothing optimised. All six front-ends accept the
+design; the M10 caches and M11 MMU met a vendor tool for the first time and Quartus
+found one latch, the ATC reset loop's module-scope index, fixed. Artix-7 14,835 LUTs,
+5,185 FFs, 6 RAMB36, 4 DSP, 20.87 MHz; Cyclone V 13,808 ALMs, 21.51 MHz; MAX 10 34,286
+LEs, 16.97 MHz -- against RD68021's 8,216 LUTs and 33.68 MHz. The limit on all three is
+one half-period family: a multi-cycle operand's residual address through the ATC into
+the bus unit's decision (`doc/critical-path.md`). `make cycles` is against UM section
+11 now, on a two-clock synchronous bench as well as the three-clock one, with the data
+cache and MMU instructions added (`doc/timing-divergences.md`). Phase B's candidates,
+each with an estimate, are in `doc/implementation.md`, "What to do about it".
+
 **Known suspects when real software misbehaves (M13, M14):** the deliberate
 differences from the part that follow the manual instead -- `LINK A7` pushes the
 decremented stack pointer where the part pushes the value before it, and the

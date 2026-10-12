@@ -5,7 +5,7 @@
 # Vivado place and route, for the numbers that mean something.
 #
 #   vivado -mode batch -source scripts/impl.tcl \
-#          -tclargs <part> <top> <repo-root> <icache_entries> <coprocessor>
+#          -tclargs <part> <top> <repo-root> <icache_entries> <coprocessor> <dcache_entries>
 #
 # `make synth` reports post-synthesis timing, which is an estimate: most of a
 # path's delay on this fabric is routing, and before placement the router's
@@ -21,8 +21,12 @@ set top    [lindex $argv 1]
 set root   [lindex $argv 2]
 set icache [lindex $argv 3]
 set coproc [lindex $argv 4]
+set dcache [lindex $argv 5]
 
-puts "RD68031: implementing $top for $part, ICACHE_ENTRIES=$icache COPROCESSOR=$coproc"
+# The host has 15 GB and no swap (CLAUDE.md): never more than four threads.
+set_param general.maxThreads 4
+
+puts "RD68031: implementing $top for $part, ICACHE_ENTRIES=$icache DCACHE_ENTRIES=$dcache COPROCESSOR=$coproc"
 
 set f [open rtl.f r]
 set rtl [split [string trim [read $f]] "\n"]
@@ -36,7 +40,8 @@ read_verilog -sv $rtl
 read_xdc $root/scripts/rd68031.xdc
 
 synth_design -top $top -part $part -mode out_of_context -flatten_hierarchy none \
-             -generic ICACHE_ENTRIES=$icache -generic COPROCESSOR=$coproc
+             -generic ICACHE_ENTRIES=$icache -generic DCACHE_ENTRIES=$dcache \
+             -generic COPROCESSOR=$coproc
 opt_design
 place_design
 phys_opt_design

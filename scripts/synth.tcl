@@ -5,7 +5,7 @@
 # Vivado out-of-context synthesis.
 #
 #   vivado -mode batch -source scripts/synth.tcl \
-#          -tclargs <build> <top> <part> <icache_entries> <coprocessor>
+#          -tclargs <build> <top> <part> <icache_entries> <coprocessor> <dcache_entries>
 #
 # Out of context because this is a processor core, not a board design: there are no
 # pads, no I/O buffers and no board constraints, and the numbers are about the logic.
@@ -15,6 +15,10 @@ set top     [lindex $argv 1]
 set part    [lindex $argv 2]
 set icache  [lindex $argv 3]
 set coproc  [lindex $argv 4]
+set dcache  [lindex $argv 5]
+
+# The host has 15 GB and no swap (CLAUDE.md): never more than four threads.
+set_param general.maxThreads 4
 
 # A signal used before its declaration is only [Synth 8-6901], an *info* message, and
 # a design can carry one for months without anyone seeing it. Questa rejects the same
@@ -40,6 +44,7 @@ read_xdc scripts/rd68031.xdc
 
 synth_design -top $top -part $part -mode out_of_context \
     -generic ICACHE_ENTRIES=$icache \
+    -generic DCACHE_ENTRIES=$dcache \
     -generic COPROCESSOR=$coproc
 
 write_checkpoint -force $build/${top}_synth.dcp
@@ -56,8 +61,11 @@ if {[llength $paths] > 0} {
 } else {
     puts "SYNTH: part $part  no timing paths (nothing between flops yet)"
 }
+# DSP and block RAM by cell name, as impl.tcl counts them: Vivado 2025.2 has no
+# PRIMITIVE_GROUP called ARITHMETIC or BLOCKRAM, and the filters that asked for
+# them reported 0 DSP and 0 BRAM for a netlist with 4 and 6 (measured, M15).
 puts [format "SYNTH: LUT %s  FF %s  DSP %s  BRAM %s" \
     [llength [get_cells -hier -filter {PRIMITIVE_GROUP == LUT}]] \
     [llength [get_cells -hier -filter {PRIMITIVE_GROUP == FLOP_LATCH}]] \
-    [llength [get_cells -hier -filter {PRIMITIVE_GROUP == ARITHMETIC}]] \
-    [llength [get_cells -hier -filter {PRIMITIVE_GROUP == BLOCKRAM}]]]
+    [llength [get_cells -hier -quiet -filter {REF_NAME =~ DSP*}]] \
+    [llength [get_cells -hier -quiet -filter {REF_NAME =~ RAMB*}]]]

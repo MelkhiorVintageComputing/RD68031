@@ -132,6 +132,13 @@ assign dbus = d_oe ? d_o : 32'bz;
 `define TB_S32_ABITS 16
 `endif
 
+// The 32-bit port ends its cycles with DSACK (three clocks) unless a testbench
+// asks for STERM (two clocks, UM 7.3.6): `make cycles` runs its table both ways,
+// the second being the two-clock bus every UM section 11 figure assumes.
+`ifndef TB_S32_SYNC
+`define TB_S32_SYNC 1'b0
+`endif
+
 // The coprocessor interface is built only when a testbench asks for it, and a
 // testbench that does gets the scripted coprocessor of sim/models/rd68031_cpmodel.sv
 // at CpID 1 as well.
@@ -213,7 +220,7 @@ assign sterm_cp = 1'b1;
 `endif
 assign dsack_n_i = dsack32 & dsack16 & dsack8 & dsackb & dsack_ext & dsack_cp;
 
-rd68031_slave #(.PORT_BYTES (4), .WAITS (0), .BASE (32'h0000_0000),
+rd68031_slave #(.PORT_BYTES (4), .WAITS (0), .SYNC (`TB_S32_SYNC), .BASE (32'h0000_0000),
                 .MASK (32'hF000_0000), .ABITS (`TB_S32_ABITS)) s32 (
     .clk (clk), .rst_n (rst_n), .a_i (a_o), .siz_i (siz_o), .fc_i (fc_o),
     .as_n_i (as_n_o), .ds_n_i (ds_n_o), .rw_i (rw_o), .cbreq_n_i (cbreq_n_o),

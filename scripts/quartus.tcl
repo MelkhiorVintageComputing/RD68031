@@ -5,7 +5,7 @@
 # Quartus analysis and synthesis, and optionally the fit.
 #
 #   quartus_sh -t scripts/quartus.tcl <stage> <build> <top> <family> <part> \
-#              <icache_entries> <coprocessor>
+#              <icache_entries> <coprocessor> <dcache_entries>
 #
 # <stage> is "map" (analysis and synthesis, the front-end check) or "fit" (place and
 # route, for a second post-route frequency).
@@ -30,6 +30,7 @@ proc main {} {
     set part    [lindex $::quartus(args) 4]
     set icache  [lindex $::quartus(args) 5]
     set coproc  [lindex $::quartus(args) 6]
+    set dcache  [lindex $::quartus(args) 7]
 
     set proj $build/$top
 
@@ -59,10 +60,11 @@ proc main {} {
     set_global_assignment -name PROJECT_OUTPUT_DIRECTORY [file join $here $build quartus_out]
     set_global_assignment -name SDC_FILE $sdc
     set_global_assignment -name VERILOG_INPUT_VERSION SYSTEMVERILOG_2005
-    set_global_assignment -name NUM_PARALLEL_PROCESSORS 8
+    set_global_assignment -name NUM_PARALLEL_PROCESSORS 4
 
     set_parameter -name ICACHE_ENTRIES $icache
     set_parameter -name COPROCESSOR $coproc
+    set_parameter -name DCACHE_ENTRIES $dcache
 
     set fp [open $rtlf r]
     foreach f [split [string trim [read $fp]] "\n"] {

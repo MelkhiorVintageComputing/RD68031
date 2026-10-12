@@ -94,7 +94,7 @@ help:
 	@echo "  make cache       the same results with no instruction cache at all"
 	@echo "  make ap030       AP68030 against the core, pin against pin (AP030PROGS=...)"
 	@echo "  make cputest     WinUAE's cputest corpus (CPUTEST_SEL=ADD,MOVE.L CPUTEST_MAX=$(CPUTEST_MAX))"
-	@echo "  make cycles      instruction clock counts against UM section 8"
+	@echo "  make cycles      instruction clock counts against UM section 11"
 	@echo "  make timing-verbose  the AC solver, with the binding constraint named"
 	@echo
 	@echo "rd-virt, the deterministic m68k virt machine (M13; heavy builds, run alone):"
@@ -505,23 +505,33 @@ cosim: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(PROGS)) \
 	test $$ok -eq 1 && echo "PASS: cosim"
 
 # ---------------------------------------------------------------------------
-# Instruction clock counts against UM section 8
+# Instruction clock counts against UM section 11
 #
 # One row per instruction, each a regression check against the count frozen in
 # tools/cycles.py, and the table in doc/timing-divergences.md regenerated from
-# the measurement. Warm is the manual's cache case; cold is the first pass, with
-# the cache empty.
+# the measurement. Warm is the manual's instruction-cache case; cold is the
+# first pass, with the cache empty. The bench is built twice: the 32-bit port
+# answering with DSACK (three-clock cycles), and with STERM (two clocks, the
+# bus UM section 11 assumes). The two runs are light and go side by side.
 # ---------------------------------------------------------------------------
 cycles: dirs
 	@python3 tools/cycles.py gen > $(BUILD)/cycles.vec
 	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_cycles_tb.vvp -s core_cycles_tb \
 	    $(RTL) sim/models/*.sv sim/tb/core_cycles_tb.sv \
-	    > $(BUILD)/core_cycles_tb.build.log 2>&1 \
-	  || { grep -v $(NOTES) $(BUILD)/core_cycles_tb.build.log; exit 1; }
-	@vvp $(BUILD)/core_cycles_tb.vvp +vec=$(BUILD)/cycles.vec > $(BUILD)/cycles.out 2>&1
-	@grep -E '^  FAIL' $(BUILD)/cycles.out | head -20; \
-	 grep -q '^PASS' $(BUILD)/cycles.out || { tail -5 $(BUILD)/cycles.out; exit 1; }
-	@python3 tools/cycles.py check $(BUILD)/cycles.out --doc doc/timing-divergences.md
+	    > $(BUILD)/core_cycles_tb.build.log 2>&1 & a=$$!; \
+	 iverilog $(IVFLAGS) -DTB_S32_SYNC=1\'b1 -I sim/tb -o $(BUILD)/core_cycles_sync_tb.vvp \
+	    -s core_cycles_tb $(RTL) sim/models/*.sv sim/tb/core_cycles_tb.sv \
+	    > $(BUILD)/core_cycles_sync_tb.build.log 2>&1 & b=$$!; \
+	 wait $$a || { grep -v $(NOTES) $(BUILD)/core_cycles_tb.build.log; exit 1; }; \
+	 wait $$b || { grep -v $(NOTES) $(BUILD)/core_cycles_sync_tb.build.log; exit 1; }
+	@vvp $(BUILD)/core_cycles_tb.vvp +vec=$(BUILD)/cycles.vec > $(BUILD)/cycles.out 2>&1 & \
+	 vvp $(BUILD)/core_cycles_sync_tb.vvp +vec=$(BUILD)/cycles.vec > $(BUILD)/cycles_sync.out 2>&1; \
+	 wait
+	@for f in $(BUILD)/cycles.out $(BUILD)/cycles_sync.out; do \
+	   grep -E '^  FAIL' $$f | head -20; \
+	   grep -q '^PASS' $$f || { tail -5 $$f; exit 1; }; done
+	@python3 tools/cycles.py check $(BUILD)/cycles.out $(BUILD)/cycles_sync.out \
+	    --doc doc/timing-divergences.md
 
 # ---------------------------------------------------------------------------
 # The caches are architecturally invisible
@@ -958,7 +968,7 @@ check: ucode-check lint audit sim timing
 synth: dirs
 	@printf '%s\n' $(RTL) > $(BUILD)/rtl.f
 	@scripts/vivado.sh -mode batch -nojournal -nolog -source scripts/synth.tcl \
-	    -tclargs $(BUILD) $(TOP) $(XPART) $(ICACHE_ENTRIES) $(COPROCESSOR)
+	    -tclargs $(BUILD) $(TOP) $(XPART) $(ICACHE_ENTRIES) $(COPROCESSOR) $(DCACHE_ENTRIES)
 
 # Place and route, for the frequency that means something. Out of context, with
 # hierarchy kept. Reports land in $(BUILD)/impl_*.rpt and the checkpoint beside
@@ -967,7 +977,7 @@ impl: dirs
 	@printf '%s\n' $(addprefix $(CURDIR)/,$(RTL)) > $(BUILD)/rtl.f
 	@cd $(BUILD) && $(CURDIR)/scripts/vivado.sh -mode batch -nojournal -nolog \
 	    -source $(CURDIR)/scripts/impl.tcl \
-	    -tclargs $(XPART) $(TOP) $(CURDIR) $(ICACHE_ENTRIES) $(COPROCESSOR) \
+	    -tclargs $(XPART) $(TOP) $(CURDIR) $(ICACHE_ENTRIES) $(COPROCESSOR) $(DCACHE_ENTRIES) \
 	    > impl.log 2>&1; rc=$$?; \
 	  grep -E '^(RD68031|ERROR|CRITICAL WARNING)' impl.log; exit $$rc
 
@@ -980,6 +990,8 @@ paths: dirs
 	    { grep -E '^(RD68031-PATHS|ERROR)' paths.log; exit 1; }
 	@grep -E '^RD68031-PATHS' $(BUILD)/paths.log
 	@python3 tools/paths_report.py $(BUILD)/paths_activatable.rpt
+	@echo "  the pins, at zero input and output delay (the slowest twelve; all in $(BUILD)/paths_pins.rpt):"
+	@sort -k4 -n -r $(BUILD)/paths_pins.rpt | head -12 | cut -c1-160
 
 # quartus_map returns 0 on the one thing that matters most here, so the grep is the
 # gate and not the exit code: a package-scoped constant inside an instantiation's
@@ -991,7 +1003,7 @@ paths: dirs
 lint-quartus: dirs
 	@printf '%s\n' $(RTL) > $(BUILD)/rtl.f
 	@set -o pipefail; scripts/altera.sh quartus_sh -t scripts/quartus.tcl map \
-	    $(BUILD) $(TOP) $(AFAMILY) $(APART) $(ICACHE_ENTRIES) $(COPROCESSOR) \
+	    $(BUILD) $(TOP) $(AFAMILY) $(APART) $(ICACHE_ENTRIES) $(COPROCESSOR) $(DCACHE_ENTRIES) \
 	    | tee $(BUILD)/quartus_map.log
 	@if grep -q 'Implicit Net warning\|Warning (10236)' $(BUILD)/quartus_map.log; then \
 	    echo "FAIL: quartus found an implicit net -- the netlist does not match the source"; \
@@ -1008,14 +1020,14 @@ quartus: dirs
 	@mkdir -p $(QBUILD)
 	@printf '%s\n' $(RTL) > $(QBUILD)/rtl.f
 	@set -o pipefail; scripts/altera.sh quartus_sh -t scripts/quartus.tcl fit \
-	    $(QBUILD) $(TOP) $(AFAMILY) $(APART) $(ICACHE_ENTRIES) $(COPROCESSOR) \
+	    $(QBUILD) $(TOP) $(AFAMILY) $(APART) $(ICACHE_ENTRIES) $(COPROCESSOR) $(DCACHE_ENTRIES) \
 	    > $(QBUILD)/fit.log 2>&1 || { grep -E '^QUARTUS|Error' $(QBUILD)/fit.log | head; exit 1; }
 	@if grep -q 'Warning (10236)' $(QBUILD)/fit.log; then \
 	    echo "FAIL: quartus found an implicit net"; exit 1; fi
 	@grep -E '^QUARTUS' $(QBUILD)/fit.log
-	@grep -A12 'Slow 1100mV 85C Model Fmax Summary' $(QBUILD)/quartus_out/$(TOP).sta.rpt \
+	@grep -A12 -E 'Slow 1[12]00mV 85C Model Fmax Summary' $(QBUILD)/quartus_out/$(TOP).sta.rpt \
 	    | grep -E 'MHz' | head -3
-	@grep -E 'Logic utilization|Total registers|Total block memory bits|Total DSP|Total RAM Blocks' \
+	@grep -E 'Logic utilization|Total logic elements|Total registers|Total (block )?memory bits|Total DSP|Total RAM Blocks|Embedded Multiplier' \
 	    $(QBUILD)/quartus_out/$(TOP).fit.summary
 
 lint-questa: dirs

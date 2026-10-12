@@ -458,7 +458,11 @@ module rd68031_mmu #(
   // clears the three E bits and nothing else (UM 9.2.2), and leaves the ATC as
   // it was.
   // ==========================================================================
-  int unsigned i_r;
+  // The reset loop's index is the loop's own (as rd68031_seq's register file
+  // does): a module-scope variable assigned only in the reset branch holds its
+  // value on every other path, and Quartus infers a latch for it (Warning
+  // 10240, measured at M15). yosys makes no flip-flops of a loop index in the
+  // asynchronous reset branch (doc/coding-standard.md).
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       tc_q    <= '0;
@@ -469,9 +473,9 @@ module rd68031_mmu #(
       mmusr_q <= '0;
       v_q     <= '0;
       h_q     <= '0;
-      for (i_r = 0; i_r < N; i_r = i_r + 1) begin
-        tag_q[i_r] <= '0;
-        dat_q[i_r] <= '0;
+      for (int i = 0; i < N; i++) begin
+        tag_q[i] <= '0;
+        dat_q[i] <= '0;
       end
     end else if (crst) begin
       tc_q[31]  <= 1'b0;
