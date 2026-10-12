@@ -694,6 +694,7 @@ word went.
 
 **Followed: UM 10.5.2.5's last paragraph -- it does not; only a trace on
 instruction execution does.**
+Confirmed by the user after M12.
 
 UM 10.4.4: "If a trace exception is pending, however, the main processor does not
 terminate the instruction dialogue until it reads a null, CA=0, PF=1 primitive",
