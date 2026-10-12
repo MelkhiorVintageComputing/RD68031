@@ -53,6 +53,9 @@ int uae030_bus_ifetch = 0;
  * translating, and whether PTEST or PLOAD started it. */
 int uae030_walk_fc = 5;
 int uae030_walk_insn = 0;
+/* Whether a fault on an instruction's last write stacks the short frame ($A),
+ * as the oracle does, or the long one ($B), as the core does (build.sh 1e). */
+int uae030_short_frames = 1;
 
 /* Extra physical regions in front of the RAM (uae030_add_region): each its
  * own store, repeated through its window, or a window that answers every
@@ -102,7 +105,8 @@ void CycInt_CallActiveHandler(uint64_t Clock) { (void)Clock; }
 void MFP_UpdateIRQ_All(uint64_t t) { (void)t; }
 void MFP_DelayIRQ(void) {}
 int MFP_ProcessIACK(int v) { return v; }
-int SCC_Process_IACK(void) { return -1; }
+/* Level 5 is autovectored on every machine this harness models (rd-virt). */
+int SCC_Process_IACK(void) { return 29; }
 int DSP_ProcessIACK(void) { return -1; }
 uint8_t DSP_GetHREQ(void) { return 0; }
 void DSP_Run(int n) { (void)n; }
@@ -312,14 +316,22 @@ static inline uint8_t *map_ptr(uint32_t a, int size)
 	return NULL;
 }
 
-static inline bool in_ram(uint32_t a, int size)
-{
-	return map_ptr(a, size) != NULL;
-}
+/* M13: devices behind the RAM (uae030_set_ext_bus). */
+static uae030_ext_read ext_rd;
+static uae030_ext_write ext_wr;
+static void *ext_user;
+
 
 static uint32_t phys_read(uint32_t a, int size)
 {
 	uint8_t *p = map_ptr(a, size);
+	if (!p && ext_rd) {
+		uint32_t v = 0;
+		if (!ext_rd(a, size, &v, ext_user)) {
+			bus_report(a, size, 0, v, 0);
+			return v;
+		}
+	}
 	if (!p) {
 		bool ins = uae030_bus_ifetch || (!uae030_bus_walk && (uae030_bus_fc & 3) == 2);
 		bus_report(a, size, 0, 0, 1);
@@ -341,6 +353,10 @@ static uint32_t phys_read(uint32_t a, int size)
 static void phys_write(uint32_t a, int size, uint32_t v)
 {
 	uint8_t *p = map_ptr(a, size);
+	if (!p && ext_wr && !ext_wr(a, size, v, ext_user)) {
+		bus_report(a, size, 1, v, 0);
+		return;
+	}
 	if (!p) {
 		bus_report(a, size, 1, v, 1);
 		uae030_bus_walk = 0;
@@ -389,7 +405,7 @@ uae_u32 wait_cpu_cycle_read_ce020(uaecptr a, int mode) { return wait_cpu_cycle_r
 void wait_cpu_cycle_write_ce020(uaecptr a, int mode, uae_u32 v) { wait_cpu_cycle_write(a, mode, v); }
 
 uae_u8 *memory_get_real_address(uaecptr a) { return map_ptr(a, 1); }
-int memory_valid_address(uaecptr a, uae_u32 s) { return in_ram(a, s); }
+int memory_valid_address(uaecptr a, uae_u32 s) { return map_ptr(a, s) != NULL; }
 void memory_clear(void) { /* keep the loaded image across the reset */ }
 
 /* debugger / logging peeks: no bus activity */
@@ -404,8 +420,10 @@ static uae_u32 REGPARAM2 flat_bget(uaecptr a) { return phys_read(a, 1); }
 static void REGPARAM2 flat_lput(uaecptr a, uae_u32 v) { phys_write(a, 4, v); }
 static void REGPARAM2 flat_wput(uaecptr a, uae_u32 v) { phys_write(a, 2, v & 0xffff); }
 static void REGPARAM2 flat_bput(uaecptr a, uae_u32 v) { phys_write(a, 1, v & 0xff); }
-static int REGPARAM2 flat_check(uaecptr a, uae_u32 s) { return in_ram(a, s); }
+static int REGPARAM2 flat_check(uaecptr a, uae_u32 s) { return map_ptr(a, s) != NULL; }
 static uae_u8 *REGPARAM2 flat_xlate(uaecptr a) { uint8_t *p = map_ptr(a, 1); return p ? p : ram; }
+/* memory_valid_address() and the bank's check say whether a host pointer may
+ * be taken; a device has none. */
 
 static addrbank flat_bank = {
 	flat_lget, flat_wget, flat_bget, flat_lput, flat_wput, flat_bput,
@@ -494,6 +512,39 @@ void uae030_walk_info(int *fc, int *insn)
 }
 
 uint32_t uae030_cacr(void) { return regs.cacr; }
+
+void uae030_set_ext_bus(uae030_ext_read rd, uae030_ext_write wr, void *user)
+{
+	ext_rd = rd;
+	ext_wr = wr;
+	ext_user = user;
+}
+
+void uae030_set_cachable(uint32_t base, uint32_t size, int cachable)
+{
+	for (uint64_t a = base & ~0xffffu; a < (uint64_t)base + size; a += 0x10000)
+		ce_cachable[a >> 16] = cachable ? CACHE_ENABLE_ALL : 0;
+}
+
+void uae030_interrupt(int level)
+{
+	op_flush();
+	mmu030_opcode_stageb = -1;
+	mmu030_fake_prefetch = -1;
+	Exception(24 + level);
+}
+
+int uae030_stopped(void) { return regs.stopped != 0; }
+void uae030_set_short_frames(int on) { uae030_short_frames = on != 0; }
+void uae030_poke(uint32_t addr, int size, uint32_t v)
+{
+	if (size == 4)
+		x_put_long(addr, v);
+	else
+		x_put_word(addr, v & 0xffff);
+}
+uint16_t uae030_last_opcode(void) { return regs.opcode; }
+uint16_t uae030_next_opcode(void) { return regs.irc; }
 
 extern void uae030_install_mmu(uae_u32 tc, uae_u64 crp, uae_u64 srp, uae_u32 tt0, uae_u32 tt1, uae_u16 mmusr);
 void uae030_set_mmu(const uae030_state *s)

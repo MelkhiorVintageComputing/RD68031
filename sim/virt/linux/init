@@ -16,5 +16,13 @@ ls /sys/bus/platform/devices | head -20
 cat /sys/class/rtc/rtc0/time 2>/dev/null
 echo "sum test: $((6*7))"
 echo "awk float: $(awk 'BEGIN{printf "%.6f", atan2(1,1)*4}')"
+# With rdvirt.shell on the command line (make virt-linux), a shell on the
+# console, for the scripted command set; otherwise power off here.
+case "$(cat /proc/cmdline)" in
+*rdvirt.shell*)
+	echo "rd-virt: shell"
+	exec /bin/sh
+	;;
+esac
 echo "powering off"
 poweroff -f

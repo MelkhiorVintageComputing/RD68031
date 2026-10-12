@@ -63,7 +63,8 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$(ICACHE_ENTRIES) \
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl paths audit ucode ucode-check sim sim-bus \
         timing timing-verbose timing-build ea cache cycles cpif check clean \
-        vectors vectors-all cosim cosim-long cputest cosim-mmu ap030
+        vectors vectors-all cosim cosim-long cputest cosim-mmu ap030 \
+        virt-bare virt-uae virt-linux virt-linux-solo
 
 all: lint
 
@@ -95,6 +96,12 @@ help:
 	@echo "  make cputest     WinUAE's cputest corpus (CPUTEST_SEL=ADD,MOVE.L CPUTEST_MAX=$(CPUTEST_MAX))"
 	@echo "  make cycles      instruction clock counts against UM section 8"
 	@echo "  make timing-verbose  the AC solver, with the binding constraint named"
+	@echo
+	@echo "rd-virt, the deterministic m68k virt machine (M13; heavy builds, run alone):"
+	@echo "  make virt-uae       Linux to the shell and a command set on UAE030 alone"
+	@echo "  make virt-bare      bare-metal programs (console, timer, MMU and caches), in lockstep"
+	@echo "  make virt-linux-solo  Linux on the RTL alone"
+	@echo "  make virt-linux     Linux in lockstep with UAE030 (VIRT_CACHES=off, VIRT_OPTS=...)"
 	@echo
 	@echo "Vendor tools, tens of minutes each:"
 	@echo "  make impl         Vivado place and route ($(XPART)), out of context"
@@ -731,6 +738,92 @@ cputest: dirs $(CTBUILD)/run/stamp
 	 grep -E '^  FAIL' $(BUILD)/core_cputest_tb.log | head -25; \
 	 grep -E '^core_cputest_tb: ' $(BUILD)/core_cputest_tb.log; \
 	 grep -q '^PASS' $(BUILD)/core_cputest_tb.log || { tail -2 $(BUILD)/core_cputest_tb.log; exit 1; }
+
+# ---------------------------------------------------------------------------
+# rd-virt (M13): the deterministic m68k `virt` machine, with the RTL, UAE030,
+# or both in lockstep. doc/virt.md has the machine, the lockstep and its
+# options; doc/m13-mismatches.md what it found.
+#
+#   make virt-uae          Linux to the shell and the command set on UAE030
+#                          alone -- validates the machine, fast
+#   make virt-bare         the bare-metal programs, in lockstep
+#   make virt-linux-solo   Linux on the RTL alone
+#   make virt-linux        Linux in lockstep: no divergence and the expected
+#                          console is the pass (VIRT_CACHES=off: CDIS on the
+#                          RTL and no data cache in the oracle)
+#
+#   VIRT_OPTS=...          more rdvirt options (--burst, --ram-waits 2, ...)
+#
+# The RTL build (Verilator) and the guest build (Linux, BusyBox) are heavy
+# jobs: each runs once, alone, at JOBS=4 at most, and is reused (CLAUDE.md).
+# None of these is in `make check`.
+# ---------------------------------------------------------------------------
+VIRT        := $(BUILD)/virt
+VGUEST      := $(VIRT)/guest
+VIRTBIN     := $(VIRT)/obj/rdvirt
+VIRTUAE     := $(VIRT)/rdvirt-uae
+VIRT_CMDLINE ?= console=ttyGF0 lpj=250000 rdvirt.shell
+VIRT_SCRIPT ?= sim/virt/linux/commands.script
+VIRT_OPTS   ?=
+VIRT_CACHES ?= on
+VIRT_MAXSTEPS ?= 400000000
+VIRTPROGS   := virt_hello virt_timer virt_mmu
+VIRTSRC     := $(wildcard sim/virt/*.cpp sim/virt/*.h) sim/virt/build.sh
+VIRTLINUX   := --kernel $(VGUEST)/vmlinux --initrd $(VGUEST)/initramfs.cpio.gz \
+               --cmdline "$(VIRT_CMDLINE)" --script $(VIRT_SCRIPT) --expect done \
+               --progress 10000000 --max-steps $(VIRT_MAXSTEPS)
+ifeq ($(VIRT_CACHES),off)
+VIRTCACHE   := --cdis --no-dcache
+endif
+
+$(VIRTUAE): $(VIRTSRC) $(OBUILD)/libuae030.a
+	@sh sim/virt/build.sh uae $(VIRT) > /dev/null
+
+$(VIRTBIN): $(VIRTSRC) sim/virt/public.vlt $(OBUILD)/libuae030.a $(RTL)
+	@echo "  virt: building the RTL machine into $(VIRT)/obj (Verilator, alone)"
+	@sh sim/virt/build.sh rtl $(VIRT) > /dev/null
+
+$(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz: sim/virt/linux/build.sh sim/virt/linux/rd-virt.config \
+            sim/virt/linux/init sim/virt/linux/cpio.list
+	@echo "  virt: building the guest into $(VGUEST) (Linux and BusyBox, alone)"
+	@sh sim/virt/linux/build.sh $(VGUEST) | sed 's/^/  /'
+
+build/programs/virt_%.elf: sim/programs/virt_%.S sim/programs/virt.inc sim/programs/virt.ld
+	@mkdir -p build/programs
+	@$(CROSS)gcc -mcpu=68030 -Isim/programs -c -o build/programs/virt_$*.o $<
+	@$(CROSS)gcc -nostdlib -nostartfiles -Wl,--build-id=none -T sim/programs/virt.ld \
+	    -o $@ build/programs/virt_$*.o
+
+virt-bare: $(VIRTBIN) $(patsubst %,build/programs/%.elf,$(VIRTPROGS))
+	@ok=1; for p in $(VIRTPROGS); do for m in "" "--burst" "--cdis --no-dcache"; do \
+	  $(VIRTBIN) --cpu lockstep --bare build/programs/$$p.elf --quiet --progress 0 \
+	      --expect "PASS: $$p" --dump $(VIRT)/$$p.div $$m $(VIRT_OPTS) \
+	      > $(VIRT)/$$p.log 2>&1; \
+	  if grep -q '^PASS' $(VIRT)/$$p.log; then echo "  PASS: $$p $$m -- $$(grep -o '[0-9]* steps' $(VIRT)/$$p.log | tail -1)"; \
+	  else echo "  FAIL: $$p $$m"; tail -5 $(VIRT)/$$p.log; ok=0; fi; done; done; \
+	test $$ok -eq 1 && echo "PASS: virt-bare"
+
+virt-uae: $(VIRTUAE) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
+	@$(VIRTUAE) --cpu uae $(VIRTLINUX) --quiet --console-log $(VIRT)/uae.console \
+	    $(VIRT_OPTS) > $(VIRT)/uae.log 2>&1; \
+	 grep -E '^\[uae030\] end' $(VIRT)/uae.log | sed 's/^/  /'; \
+	 grep -q '^PASS' $(VIRT)/uae.log || { tail -12 $(VIRT)/uae.log; exit 1; }
+	@echo "PASS: virt-uae (console in $(VIRT)/uae.console)"
+
+virt-linux-solo: $(VIRTBIN) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
+	@$(VIRTBIN) --cpu rtl $(VIRTLINUX) $(VIRTCACHE) --quiet --console-log $(VIRT)/solo.console \
+	    $(VIRT_OPTS) > $(VIRT)/solo.log 2>&1; \
+	 grep -E '^\[rtl\] end' $(VIRT)/solo.log | sed 's/^/  /'; \
+	 grep -q '^PASS' $(VIRT)/solo.log || { tail -12 $(VIRT)/solo.log; exit 1; }
+	@echo "PASS: virt-linux-solo (console in $(VIRT)/solo.console)"
+
+virt-linux: $(VIRTBIN) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
+	@$(VIRTBIN) --cpu lockstep $(VIRTLINUX) $(VIRTCACHE) --quiet \
+	    --console-log $(VIRT)/lockstep-$(VIRT_CACHES).console --dump $(VIRT)/lockstep-$(VIRT_CACHES).div \
+	    $(VIRT_OPTS) > $(VIRT)/lockstep-$(VIRT_CACHES).log 2>&1; \
+	 grep -E '^\[lockstep\] end' $(VIRT)/lockstep-$(VIRT_CACHES).log | sed 's/^/  /'; \
+	 grep -q '^PASS' $(VIRT)/lockstep-$(VIRT_CACHES).log || { grep -A12 '^DIVERGENCE' $(VIRT)/lockstep-$(VIRT_CACHES).log | head -30; tail -3 $(VIRT)/lockstep-$(VIRT_CACHES).log; exit 1; }
+	@echo "PASS: virt-linux (console in $(VIRT)/lockstep-$(VIRT_CACHES).console)"
 
 # ---------------------------------------------------------------------------
 # AC timing, against the MC68030EC data sheet

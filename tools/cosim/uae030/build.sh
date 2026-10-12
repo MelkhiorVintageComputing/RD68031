@@ -80,11 +80,27 @@ UAE030EOF
 # 1c. per-instruction hook at the top of the 68030 MMU run loop
 sed -i 's/^insretry:$/insretry:\n\t\t\t\tuae030_insn_boundary();/' newcpu.c
 sed -i '0,/^#include "cpummu030.h"/s//#include "cpummu030.h"\nextern void uae030_insn_boundary(void);/' newcpu.c
+# 1d. (M13) the 68030 MMU run loop keeps the flags of the instruction it is
+#     about to run in a local, and puts them back when a bus fault longjmps
+#     out of the instruction. The local is assigned after the setjmp and is not
+#     volatile, so after the longjmp its value is indeterminate (C11 7.13.2.1)
+#     -- at -O2 it is the one it had at the setjmp, and a bus fault frame
+#     stacked a CCR of zero. Making it volatile keeps the core's own intent.
+sed -i '/^static void m68k_run_mmu030 (void)$/,/^}$/s/^\tstruct flag_struct f;$/\tvolatile struct flag_struct f;/' newcpu.c
+# 1e. (M13) the short bus fault frame on a switch. The core builds the long
+#     frame ($B) for every bus fault, by design (doc/checkpoint.md "Which
+#     frame, and when"); the oracle builds the short one ($A) for a fault on an
+#     instruction's last write. rd-virt's lockstep turns the short frame off
+#     (uae030_short_frames = 0) so that both stacks stay in step through the
+#     handler; every other flow keeps the oracle's own choice.
+sed -i 's/^\t\tif (1 \&\& (mmu030_state\[1\] \& MMU030_STATEFLAG1_LASTWRITE)) {$/\t\tif (uae030_short_frames \&\& (mmu030_state[1] \& MMU030_STATEFLAG1_LASTWRITE)) {/' newcpu.c
+sed -i '0,/^extern void uae030_insn_boundary(void);/s//extern void uae030_insn_boundary(void);\nextern int uae030_short_frames;/' newcpu.c
 grep -q 'uae030_bus_fc = fc' cpummu030.c && grep -q 'uae030_bus_walk = 1; uae_u32 v' cpummu030.c \
   && [ "$(grep -c 'uae030_bus_ifetch = 1; v = x_phys_get_i' cpummu030.c)" = 2 ] \
   && [ "$(grep -c 'uae030_walk_insn = 1; ' cpummu030.c)" = 2 ] && grep -q '^	uae030_walk_fc = fc;' cpummu030.c \
   && grep -q '^void uae030_install_mmu' cpummu030.c \
-  && grep -q 'uae030_insn_boundary();' newcpu.c && grep -q 'MMU_IPAGECACHE030 0' cpummu030.h \
+  && grep -q 'uae030_insn_boundary();' newcpu.c && grep -q '^	volatile struct flag_struct f;' newcpu.c \
+  && grep -q 'if (uae030_short_frames && (mmu030_state' newcpu.c && grep -q 'MMU_IPAGECACHE030 0' cpummu030.h \
   || { echo "patch failed" >&2; exit 1; }
 cd "$OUT"
 ( cd "$STAGE" && find . -type f ) | while read -r f; do

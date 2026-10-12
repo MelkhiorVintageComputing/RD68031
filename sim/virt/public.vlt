@@ -1,0 +1,33 @@
+`verilator_config
+
+// SPDX-License-Identifier: CERN-OHL-S-2.0
+// Copyright 2026 Romain Dolbeau
+// Source location: https://github.com/MelkhiorVintageComputing/RD68031
+
+// For rd-virt only (sim/virt/cpu_rtl.cpp): the programmer's model the
+// lockstep compares at every boundary, and the three signals that say where a
+// boundary is -- the same definition as sim/tb/rd68031_core_harness.svh's
+// `boundary`. Read-only: nothing in the RTL depends on this file.
+public_flat_rd -module "rd68031_seq" -var "dreg"
+public_flat_rd -module "rd68031_seq" -var "areg"
+public_flat_rd -module "rd68031_seq" -var "usp_q"
+public_flat_rd -module "rd68031_seq" -var "isp_q"
+public_flat_rd -module "rd68031_seq" -var "msp_q"
+public_flat_rd -module "rd68031_seq" -var "sr_q"
+public_flat_rd -module "rd68031_seq" -var "vbr_q"
+public_flat_rd -module "rd68031_seq" -var "sfc_q"
+public_flat_rd -module "rd68031_seq" -var "dfc_q"
+public_flat_rd -module "rd68031_seq" -var "cacr_q"
+public_flat_rd -module "rd68031_seq" -var "caar_q"
+public_flat_rd -module "rd68031_seq" -var "retire"
+public_flat_rd -module "rd68031_seq" -var "at_decode"
+public_flat_rd -module "rd68031_seq" -var "fault_now"
+public_flat_rd -module "rd68031_seq" -var "stopped_q"
+public_flat_rd -module "rd68031_seq" -var "dbf_q"
+public_flat_rd -module "rd68031_ifu" -var "pc_d"
+public_flat_rd -module "rd68031_mmu" -var "tc_q"
+public_flat_rd -module "rd68031_mmu" -var "crp_q"
+public_flat_rd -module "rd68031_mmu" -var "srp_q"
+public_flat_rd -module "rd68031_mmu" -var "tt0_q"
+public_flat_rd -module "rd68031_mmu" -var "tt1_q"
+public_flat_rd -module "rd68031_mmu" -var "mmusr_q"

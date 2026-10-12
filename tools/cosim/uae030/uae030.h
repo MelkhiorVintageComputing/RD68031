@@ -109,6 +109,40 @@ typedef void (*uae030_result_fn)(int i, const uae030_state *st, void *user);
 int uae030_run_each(int ntests, uae030_setup_fn setup, uae030_result_fn result,
 		    void *user, int *done);
 
+/* M13 (sim/virt): a machine with devices.
+ *
+ * uae030_set_ext_bus: every physical access that no region and no RAM
+ * claims goes to these instead of answering with a bus error; read returns
+ * nonzero for a bus error (and fills *v otherwise), write likewise.
+ * size is 1, 2 or 4, the address is the access's own (no alignment).
+ * uae030_set_cachable: the cachability of [base, base+size) in 64 KB steps,
+ * as a board's CIIN would give it (default: everything cachable).
+ * uae030_interrupt: from inside the instruction hook only -- take the
+ * interrupt exception for `level` (autovectored) now, at this boundary, as
+ * the processor would between two instructions; the next boundary is the
+ * handler's first instruction.
+ * uae030_stopped: nonzero while STOP holds the processor.
+ * uae030_last_opcode: the core's current operation word, from inside the
+ * instruction hook (after a bus fault, the faulted instruction's).
+ * uae030_retired: instructions completed, STOP's re-executions excluded. */
+typedef int (*uae030_ext_read)(uint32_t pa, int size, uint32_t *v, void *user);
+typedef int (*uae030_ext_write)(uint32_t pa, int size, uint32_t v, void *user);
+void uae030_set_ext_bus(uae030_ext_read rd, uae030_ext_write wr, void *user);
+void uae030_set_cachable(uint32_t base, uint32_t size, int cachable);
+void uae030_interrupt(int level);
+int uae030_stopped(void);
+/* 1 (the default): a fault on an instruction's last write stacks the short
+ * bus fault frame ($A), the oracle's own choice; 0: the long one ($B), as the
+ * core does for every bus fault (doc/checkpoint.md). */
+void uae030_set_short_frames(int on);
+/* From inside the instruction hook: write a word or a long word (size 2, 4)
+ * at a supervisor data address, through the core's own path -- translation,
+ * data cache and bus hook included. */
+void uae030_poke(uint32_t addr, int size, uint32_t v);
+uint16_t uae030_last_opcode(void);
+/* The operation word of the instruction about to run (the prefetch). */
+uint16_t uae030_next_opcode(void);
+
 /* Reset (SSP/PC from physical 0/4) and run until the instruction hook asks
  * to stop or the CPU halts (double bus fault).  Returns 0 on hook stop,
  * 1 on halt. */

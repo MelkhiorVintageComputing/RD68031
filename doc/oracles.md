@@ -555,6 +555,15 @@ and wrote down the board the kernel expects.
   - The tty and virtio **DMA into RAM**. Those writes have to reach both lockstep
     memories.
 
+**Status (M13, phase A):** built and running -- `doc/virt.md` has the machine, the
+two sockets and the lockstep, `doc/m13-mismatches.md` what it found. Two corrections to
+the M0 notes above: an 030 kernel needs a `BI_FPUTYPE` record of 0 (with none, head.S
+reads garbage for `m68k_fputype` and the first context switch executes FSAVE), and the
+virtio-mmio registers are little-endian. UAE030's build copy gained two patches for it
+(`tools/cosim/uae030/build.sh` 1d and 1e): the flags put back on a bus fault are no
+longer lost across the `longjmp` (a CCR of zero was stacked -- every UAE030 flow had it),
+and a switch that makes the oracle stack the long bus fault frame as the core does.
+
 **Cautions:**
 - **The FPU.** Linux's FPU emulation leaves the transcendental functions as placeholders,
   and Debian's static libm uses 68881 instructions. Userspace floating point is therefore

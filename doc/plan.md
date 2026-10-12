@@ -275,6 +275,14 @@ cases, and the cpSAVE and cpRESTORE format words not reached before; the
 scripted coprocessor gains a synchronous mode. 620 checks. CpID 0 stays the MMU's
 (since M5); CpIDs 1-7 stay external.
 
+**Status (M13, phase A):** rd-virt is built (`doc/virt.md`): the machine, the RTL and
+UAE030 sockets, the lockstep, the guest build, and `make virt-bare`, `virt-uae`,
+`virt-linux-solo` and `virt-linux`. Linux 7.2.9 boots to the shell, runs a scripted
+command set and powers off on the RTL alone and in lockstep with UAE030 -- 87.7 M
+instruction boundaries, no divergence, with the caches and MMU on and once with the
+caches off. What the lockstep met and how each is accepted is in
+`doc/m13-mismatches.md`: no RTL defect; one item (c7) open for a decision.
+
 **Known suspects when real software misbehaves (M13, M14):** the deliberate
 differences from the part that follow the manual instead -- `LINK A7` pushes the
 decremented stack pointer where the part pushes the value before it, and the

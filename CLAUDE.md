@@ -153,8 +153,9 @@ make check    # the gate: ucode-check, lint, audit, sim, AC timing
 ```
 
 The oracles, none of which is in `check` because each takes minutes; `doc/oracles.md`
-has the state of each, and `doc/m6-mismatches.md` and `doc/m11-mismatches.md` what they
-found.
+has the state of each, and `doc/m6-mismatches.md`, `doc/m11-mismatches.md` and
+`doc/m13-mismatches.md` what they found. rd-virt, the lockstep machine, is in
+`doc/virt.md`.
 
 ```sh
 make uae030           # build the UAE030 oracle and its front-ends (heavy: run it alone)
@@ -169,6 +170,10 @@ make cosim-mmu        # MMU programs: every register, and the physical data-acce
 make ap030            # AP68030 against the core, pin against pin, on identical slave
                       # models (AP030PROGS=...; its Verilator build is heavy: alone)
 make cache            # the same results with no instruction cache (ICACHE_ENTRIES=0 and 64)
+make virt-uae         # rd-virt: Linux to the shell and a command set on UAE030 alone
+make virt-bare        # rd-virt: bare-metal programs (console, timer, MMU+caches), in lockstep
+make virt-linux-solo  # rd-virt: Linux on the RTL alone (Verilator build heavy: alone)
+make virt-linux       # rd-virt: Linux in lockstep, RTL against UAE030 (VIRT_CACHES=off)
 make timing-verbose   # the AC solver, with the binding constraint named
 make cycles           # instruction clock counts, each a regression check
 ```
