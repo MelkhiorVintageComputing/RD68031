@@ -294,7 +294,10 @@ m68030's PTEST returning the translated address instead of the last descriptor's
 (`doc/m14-mismatches.md` b1, b2), is kept out of the scripted set. No RTL defect. The
 driver work before an OS boots -- LANCE and IOMMU, ESP DMA, the device interrupts and the
 level-5 clock, bus errors on unmapped addresses, a fixed RTC -- is estimated at five to
-eight working days in `doc/oracles.md`.
+eight working days in `doc/oracles.md`. The user chose to move to M15 before that
+work (phase B), so three things stay open for then: patching PTEST in the build copy
+of MAME's m68030, replacing the dependency on RD68021's `tme-sun-eeprom` with an NVRAM
+generator of our own, and the driver work itself.
 
 **Known suspects when real software misbehaves (M13, M14):** the deliberate
 differences from the part that follow the manual instead -- `LINK A7` pushes the
