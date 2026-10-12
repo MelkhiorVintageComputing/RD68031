@@ -153,9 +153,9 @@ make check    # the gate: ucode-check, lint, audit, sim, AC timing
 ```
 
 The oracles, none of which is in `check` because each takes minutes; `doc/oracles.md`
-has the state of each, and `doc/m6-mismatches.md`, `doc/m11-mismatches.md` and
-`doc/m13-mismatches.md` what they found. rd-virt, the lockstep machine, is in
-`doc/virt.md`.
+has the state of each, and `doc/m6-mismatches.md`, `doc/m11-mismatches.md`,
+`doc/m13-mismatches.md` and `doc/m14-mismatches.md` what they found. rd-virt, the
+lockstep machine, is in `doc/virt.md`.
 
 ```sh
 make uae030           # build the UAE030 oracle and its front-ends (heavy: run it alone)
@@ -174,6 +174,10 @@ make virt-uae         # rd-virt: Linux to the shell and a command set on UAE030 
 make virt-bare        # rd-virt: bare-metal programs (console, timer, MMU+caches), in lockstep
 make virt-linux-solo  # rd-virt: Linux on the RTL alone (Verilator build heavy: alone)
 make virt-linux       # rd-virt: Linux in lockstep, RTL against UAE030 (VIRT_CACHES=off)
+make sun3x            # MAME's Sun-3/80: the boot PROM to the monitor and a command set on
+                      # the core, console byte for byte against MAME's m68030 (SUN3X_BIOS=;
+                      # MAME's build -j2 and the core's Verilator build are heavy: alone)
+make sun3x-m68030     # ... MAME's m68030 alone
 make timing-verbose   # the AC solver, with the binding constraint named
 make cycles           # instruction clock counts, each a regression check
 ```

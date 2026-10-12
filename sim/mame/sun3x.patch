@@ -1,0 +1,156 @@
+--- a/src/mame/mame.lst
++++ b/src/mame/mame.lst
+@@ -45633,6 +45633,8 @@
+ 
+ @source:sun/sun3x.cpp
+ sun3_80
++sun3_80ref
++sun3_80rd
+ sun3_460
+ 
+ @source:sun/sun4.cpp
+--- a/src/mame/sun/sun3x.cpp
++++ b/src/mame/sun/sun3x.cpp
+@@ -132,6 +132,7 @@
+ #include "bus/nscsi/hd.h"
+ #include "bus/nscsi/tape.h"
+ #include "cpu/m68000/m68030.h"
++#include "rd68031.h"
+ #include "imagedev/floppy.h"
+ #include "machine/icm7170.h"
+ #include "machine/ncr53c90.h"
+@@ -178,6 +179,10 @@
+ 
+ 	void sun3_80(machine_config &config);
+ 	void sun3_460(machine_config &config);
++	// RD68031 (M14): the Sun-3/80 with MAME's m68030 and no FPU, the
++	// reference, and with the RD68031 core in its place.
++	void sun3_80ref(machine_config &config);
++	void sun3_80rd(machine_config &config);
+ 
+ private:
+ 	required_device<cpu_device> m_maincpu;
+@@ -186,7 +191,10 @@
+ 	optional_device<ncr53c90_device> m_esp;
+ 	optional_device<n82077aa_device> m_fdc;
+ 	optional_device<floppy_connector> m_floppy_connector;
++	virtual void machine_start() override ATTR_COLD;
+ 	virtual void machine_reset() override ATTR_COLD;
++	void bus_error();
++	rd68031_device *m_rdcpu = nullptr;
+ 
+ 	required_shared_ptr<uint32_t> m_p_ram;
+ 	optional_shared_ptr<uint32_t> m_bw2_vram;
+@@ -354,13 +362,25 @@
+ 		}
+ 
+ 		m_bInBusErr = true; // prevent recursion
+-		m_maincpu->set_input_line(M68K_LINE_BUSERROR, ASSERT_LINE);
+-		m_maincpu->set_input_line(M68K_LINE_BUSERROR, CLEAR_LINE);
++		bus_error();
+ 	}
+ 
+ 	COMBINE_DATA(&pRAM[offset]);
+ }
+ 
++// RD68031: MAME's m68000 family takes a bus error from a pulse on an input
++// line; the RD68031 core ends the bus cycle in flight with BERR.
++void sun3x_state::bus_error()
++{
++	if (m_rdcpu)
++	{
++		m_rdcpu->bus_error();
++		return;
++	}
++	m_maincpu->set_input_line(M68K_LINE_BUSERROR, ASSERT_LINE);
++	m_maincpu->set_input_line(M68K_LINE_BUSERROR, CLEAR_LINE);
++}
++
+ uint32_t sun3x_state::enable_r()
+ {
+ 	return m_enable;
+@@ -494,24 +514,21 @@
+ uint32_t sun3x_state::fpa_r()
+ {
+ 	m_buserr |= 0x04000000;
+-	m_maincpu->set_input_line(M68K_LINE_BUSERROR, ASSERT_LINE);
+-	m_maincpu->set_input_line(M68K_LINE_BUSERROR, CLEAR_LINE);
++	bus_error();
+ 	return 0xffffffff;
+ }
+ 
+ uint32_t sun3x_state::cause_buserr_r()
+ {
+ 	m_buserr |= 0x20000000;
+-	m_maincpu->set_input_line(M68K_LINE_BUSERROR, ASSERT_LINE);
+-	m_maincpu->set_input_line(M68K_LINE_BUSERROR, CLEAR_LINE);
++	bus_error();
+ 	return 0xffffffff;
+ }
+ 
+ void sun3x_state::cause_buserr_w(uint32_t data)
+ {
+ 	m_buserr |= 0x20000000;
+-	m_maincpu->set_input_line(M68K_LINE_BUSERROR, ASSERT_LINE);
+-	m_maincpu->set_input_line(M68K_LINE_BUSERROR, CLEAR_LINE);
++	bus_error();
+ }
+ 
+ TIMER_DEVICE_CALLBACK_MEMBER(sun3x_state::sun380_timer)
+@@ -554,6 +571,11 @@
+ INPUT_PORTS_END
+ 
+ 
++void sun3x_state::machine_start()
++{
++	m_rdcpu = dynamic_cast<rd68031_device *>(m_maincpu.target());
++}
++
+ void sun3x_state::machine_reset()
+ {
+ 	uint8_t* user1 = memregion("user1")->base();
+@@ -644,6 +666,27 @@
+ 	bwtwo.set_refresh_hz(72);
+ }
+ 
++void sun3x_state::sun3_80ref(machine_config &config)
++{
++	sun3_80(config);
++	// The core has no FPU: a coprocessor instruction takes the F-line
++	// exception on both.
++	downcast<m68030_device &>(*m_maincpu.lookup()).set_fpu_enable(false);
++}
++
++void sun3x_state::sun3_80rd(machine_config &config)
++{
++	sun3_80(config);
++	RD68031(config.replace(), m_maincpu, 20000000);
++	m_maincpu->set_addrmap(AS_PROGRAM, &sun3x_state::sun3_80_mem);
++	rd68031_device &rd = downcast<rd68031_device &>(*m_maincpu.lookup());
++	// Main memory, the PROM's two windows and the frame buffer are memory;
++	// the rest are device registers, which a board answers with CIIN.
++	rd.add_cacheable(0x00000000, 0x03ffffff);
++	rd.add_cacheable(0x63000000, 0x6301ffff);
++	rd.add_cacheable(0xfefe0000, 0xfefeffff);
++}
++
+ void sun3x_state::sun3_460(machine_config &config)
+ {
+ 	/* basic machine hardware */
+@@ -695,6 +738,9 @@
+ 	ROM_LOAD( "timekpr_380.bin", 0x000000, 0x000800, CRC(e76f1aae) SHA1(8e7c36e3928887a94a8133e8416ee4126c31edd7) )
+ ROM_END
+ 
++#define rom_sun3_80ref rom_sun3_80
++#define rom_sun3_80rd rom_sun3_80
++
+ ROM_START( sun3_460 )
+ 	ROM_REGION32_BE( 0x20000, "user1", ROMREGION_ERASEFF )
+ /*
+@@ -719,4 +765,6 @@
+ 
+ //    YEAR  NAME      PARENT  COMPAT  MACHINE   INPUT  CLASS        INIT        COMPANY             FULLNAME             FLAGS
+ COMP( 1989, sun3_80,  0,      0,      sun3_80,  sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/80",          MACHINE_NOT_WORKING | MACHINE_NO_SOUND ) // Hydra
++COMP( 1989, sun3_80ref, sun3_80, 0,    sun3_80ref, sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/80 (m68030, no FPU; RD68031 reference)", MACHINE_NOT_WORKING | MACHINE_NO_SOUND )
++COMP( 1989, sun3_80rd, sun3_80,  0,      sun3_80rd, sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/80 (RD68031 core)", MACHINE_NOT_WORKING | MACHINE_NO_SOUND )
+ COMP( 1989, sun3_460, 0,      0,      sun3_460, sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/460/470/480", MACHINE_NOT_WORKING | MACHINE_NO_SOUND ) // Pegasus

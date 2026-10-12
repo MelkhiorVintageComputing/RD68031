@@ -283,6 +283,19 @@ instruction boundaries, no divergence, with the caches and MMU on and once with 
 caches off. What the lockstep met and how each is accepted is in
 `doc/m13-mismatches.md`: no RTL defect; one item (c7) open for a decision.
 
+**Status (M14, phase A):** the core runs in MAME's Sun-3/80 (`doc/oracles.md`,
+"MAME"): `rd68031_device` loads the core, Verilator-built as a shared object with its
+pin-level bus agent, and our copy of the sun3x driver (`sim/mame/sun3x.patch`) gains
+`sun3_80rd` (the core) and `sun3_80ref` (MAME's m68030 without its FPU). `make sun3x`
+runs boot PROM rev 3.0.3 through its self-test to the monitor and a scripted command set
+on both: the consoles are identical byte for byte; revs 3.0.2, 3.0 and 2.9.2 are too. The
+core takes about ten minutes (0.03 emulated s per wall s). One difference, MAME's
+m68030's PTEST returning the translated address instead of the last descriptor's
+(`doc/m14-mismatches.md` b1, b2), is kept out of the scripted set. No RTL defect. The
+driver work before an OS boots -- LANCE and IOMMU, ESP DMA, the device interrupts and the
+level-5 clock, bus errors on unmapped addresses, a fixed RTC -- is estimated at five to
+eight working days in `doc/oracles.md`.
+
 **Known suspects when real software misbehaves (M13, M14):** the deliberate
 differences from the part that follow the manual instead -- `LINK A7` pushes the
 decremented stack pointer where the part pushes the value before it, and the

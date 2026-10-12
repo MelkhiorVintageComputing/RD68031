@@ -1,0 +1,23 @@
+# The Sun-3/80 PROM monitor commands `make sun3x` types (sim/mame/drive.py
+# --cmds): one a line, typed at the monitor's prompt (`>`) or at an open
+# location's (`?`), each followed by a carriage return. An empty line is a
+# carriage return alone. Lines starting with # are comments.
+#
+# The boot devices the PROM knows.
+b ?
+# Fill memory with a pattern, through the MMU (the PROM's map), long words.
+f 100000 100100 a5a5a5a5 l
+# ... and a byte-wide fill over part of it, which the long-word display must
+# show merged.
+f 100009 10000e 3c b
+v 100000 100020 l
+# Open a long word, step to the next, change it, step back over it, quit.
+l 100004
+
+5aa5c33c
+q
+v 100000 100010 b
+# The PROM's first long words, its vectors, through its own mapping.
+v fefe0000 fefe0040 l
+# The function code the monitor's memory commands use.
+s

@@ -481,22 +481,88 @@ Booting NetBSD/sun3x or SunOS 4.1.1 means adding those to our copy of the driver
 `sim/mame/`. MAME has an am79c90 to start the LANCE from. It is several days of work, and
 `doc/plan.md` M14 is sized accordingly.
 
-**How the core plugs in.**
-- A `cpu_device` subclass wraps the Verilator model, and a variant machine (`sun3_80rd`) in
-  our copy of `sun3x.cpp` uses it. The driver has no CPU slot, but `m_maincpu` is a plain
-  `required_device<cpu_device>`.
-- MAME's m68030 translates inside the CPU, so **`AS_PROGRAM` is the physical bus**, as it
-  is on a real 030's pins. Function codes are not visible on it; only CPU space is separate.
-- The driver raises bus error by pulsing `M68K_LINE_BUSERROR` from inside a read or write
-  handler. The wrapper has to latch that and give it to the core as BERR on the cycle in
-  flight.
-- For a fair comparison, the reference m68030 needs `set_fpu_enable(false)` when the core
-  has no FPU, since MAME folds a 68882 in.
+**How the core plugs in (M14 phase A, built).**
+- `sim/mame/rd68031.{h,cpp}`: `rd68031_device`, a `cpu_device` copied by
+  `sim/mame/build.sh mame` beside the driver in `build/mame/src/src/mame/sun/` (MAME's
+  makedep finds it from the driver's `#include`). It loads the core at start from the
+  shared object `$RD68031_VLT`, which `sim/mame/build.sh vlt` builds with Verilator
+  (`sim/mame/rd68031_vlt.cpp`, the core and its pin-level bus agent behind the plain
+  interface of `rd68031_vlt.h`, with rd-virt's `public.vlt` for the registers): MAME's
+  and Verilator's headers never meet, and a change to the RTL rebuilds the shared
+  object only, in seconds, without relinking MAME.
+- `sim/mame/sun3x.patch`: our copy of the driver gains two machines, clones of
+  `sun3_80` with its ROMs: **`sun3_80ref`**, MAME's m68030 with `set_fpu_enable(false)`
+  (the core has no FPU; a coprocessor instruction takes the F-line exception on both),
+  and **`sun3_80rd`**, the core in its place (`config.replace()`). The driver's four
+  bus-error pulses go through one `bus_error()` that calls the core's when it is there.
+- **The bus.** `AS_PROGRAM` is the physical bus, 32 bits. The agent answers every cycle
+  as a 32-bit asynchronous port with no wait state (DSACK1/0): a read is made once, at
+  AS, of the bytes SIZ and A1-A0 select -- or of the whole long word where the address
+  is cachable (main memory and the PROM's two windows), which is what a cachable read
+  must be given (UM 6.1); elsewhere CIIN is asserted. A write is made once, when the
+  core drives the data bus. A bus error the driver signals from inside the access ends
+  that same cycle with BERR (not after the instruction, as an input-line pulse does on
+  MAME's own CPUs). FC is passed to the access but MAME's map does not use it.
+- **CPU space.** The interrupt acknowledge reads the vector from `AS_CPU_SPACE` (4) at
+  $FFFFFFF1 | level << 1, as MAME's 68000 family does, after `standard_irq_callback`;
+  an autovector there becomes AVEC on the pins, another value is put on the bus with
+  DSACK. The sun3x driver gives no CPU-space map, so every level is autovectored. Every
+  other CPU-space cycle (breakpoint, coprocessor) ends with BERR.
+- **Interrupts.** Input lines 1-7 are the levels, the highest asserted on IPL2-0. The
+  driver's 100 Hz NMI clears and reasserts level 7 at the same instant; the device holds
+  the lower level on the pins for four clocks, so the core sees the new edge (UM 8.1.9).
+- **Time.** One MAME cycle is one clock at 20 MHz; MAME's scheduler drives `icount` and
+  the core runs clock by clock. A STOP with nothing to take ends the time slice.
+- **Not supported:** save states (the Verilator model's state is not saved), and the
+  RESET instruction's pin (the driver has nothing on it, as for the m68030).
+
+**Running it.** `make sun3x` (doc/m14-mismatches.md): the PROMs are copied from
+`Inputs/ref/PROMs/` into `build/mame/roms/` after a sha256 check, the NVRAM is made from
+`eeprom.txt` with RD68021's `tme-sun-eeprom` (`TME_EEPROM=`), and `sim/mame/run.sh`
+starts MAME with `-nothrottle -video none`, ttya on a `null_modem` socket, a fresh
+directory (so no NVRAM survives a run) and `sim/mame/control.lua`, which leaves MAME
+cleanly when the driver asks. `sim/mame/drive.py` (which replaces M0's `serlisten.py`)
+listens on the socket, logs the console and types `sim/mame/monitor.cmds` at each prompt,
+the rule of RD68021's `drive.sh`: a prompt counts only after the line of the command's
+echo. Pass: the two consoles are identical, byte for byte, through the last command.
+`RD68031_WATCH=<physical address>` makes the device log every write to that long word,
+with the time and the PC; on the m68030 a Lua write tap does the same.
+
+**Status (M14 phase A):** the PROM, revs 3.0.3, 3.0.2, 3.0 and 2.9.2, runs through its
+self-test to the monitor on the core, and the monitor's commands give a console identical
+to the m68030's. The core runs at about 0.03 emulated seconds per wall second, ten minutes
+to the monitor. The one difference found is MAME's: **its m68030's PTEST loads the
+address register with the translated address, not the last descriptor's**, and the PROM
+relies on the latter, both in the monitor's `p` command and in mapping the Ethernet
+controller during its self-test (doc/m14-mismatches.md b1, b2).
 
 **Not authoritative for:**
-- The driver's own comment calls one PROM mapping a "bad '030 MMU mapping". `b le()`
-  bus-errors with a physical address of 0, and that disagreement belongs to the manual.
+- PTEST with an address register (above). Anything the PROM does through it -- the
+  driver's comment's "bad '030 MMU mapping: L fef82000 -> P 00000000", and `b le()`'s bus
+  error with a physical address of 0, both noted at M0 -- comes from that, not from the
+  PROM's tables.
+- Bus errors: MAME's 68000 family takes the driver's bus-error pulse after the
+  instruction in progress rather than on the cycle.
 - Clock counts.
+
+**The driver work for an OS boot, now estimated.** What the driver lacks, seen from the
+PROM run:
+- the LANCE: MAME has an `am79c90`, to be mapped at $65002000 with its DMA through the
+  IOMMU at $60000000, which the driver only stores today (no DVMA translation);
+- the ESP's DMA engine at $66001000 (the NCR53C90 is there, its DRQ and IRQ unwired);
+- interrupts: the SCCs', the ESP's and the LANCE's are not wired to any level; the
+  interrupt register only drives the soft levels and the level-7 clock -- the level-5
+  clock that both kernels use is missing;
+- bus errors on unmapped physical addresses (the probes of absent devices), with the
+  bus-error register's cause bits;
+- the M48T02 takes the host's time: a fixed time is wanted for repeatable consoles.
+
+About **five to eight working days**: LANCE and IOMMU two, ESP DMA and the SCSI
+interrupts two, the interrupt register and the bus-error timeouts one, then booting
+NetBSD/sun3x and SunOS 4.1.1 on the m68030 first, and debugging, two or three. On the
+core, at 0.03 emulated s per wall s, a NetBSD boot to multi-user (a minute or two of
+emulated time) is one to two hours of wall time, SunOS more: the OS runs want either a
+faster agent (fewer evaluations a clock) or patience.
 
 ## rd-virt: the Linux m68k `virt` machine
 

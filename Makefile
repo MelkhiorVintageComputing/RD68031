@@ -64,7 +64,7 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$(ICACHE_ENTRIES) \
         lint-quartus lint-questa quartus synth impl paths audit ucode ucode-check sim sim-bus \
         timing timing-verbose timing-build ea cache cycles cpif check clean \
         vectors vectors-all cosim cosim-long cputest cosim-mmu ap030 \
-        virt-bare virt-uae virt-linux virt-linux-solo
+        virt-bare virt-uae virt-linux virt-linux-solo sun3x sun3x-m68030
 
 all: lint
 
@@ -102,6 +102,11 @@ help:
 	@echo "  make virt-bare      bare-metal programs (console, timer, MMU and caches), in lockstep"
 	@echo "  make virt-linux-solo  Linux on the RTL alone"
 	@echo "  make virt-linux     Linux in lockstep with UAE030 (VIRT_CACHES=off, VIRT_OPTS=...)"
+	@echo
+	@echo "MAME's Sun-3/80 (M14; heavy builds, run alone):"
+	@echo "  make sun3x          the boot PROM to the monitor and a command set, on the core,"
+	@echo "                      console byte for byte against MAME's m68030 (SUN3X_BIOS=...)"
+	@echo "  make sun3x-m68030   ... MAME's m68030 alone"
 	@echo
 	@echo "Vendor tools, tens of minutes each:"
 	@echo "  make impl         Vivado place and route ($(XPART)), out of context"
@@ -824,6 +829,80 @@ virt-linux: $(VIRTBIN) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
 	 grep -E '^\[lockstep\] end' $(VIRT)/lockstep-$(VIRT_CACHES).log | sed 's/^/  /'; \
 	 grep -q '^PASS' $(VIRT)/lockstep-$(VIRT_CACHES).log || { grep -A12 '^DIVERGENCE' $(VIRT)/lockstep-$(VIRT_CACHES).log | head -30; tail -3 $(VIRT)/lockstep-$(VIRT_CACHES).log; exit 1; }
 	@echo "PASS: virt-linux (console in $(VIRT)/lockstep-$(VIRT_CACHES).console)"
+
+# ---------------------------------------------------------------------------
+# MAME's Sun-3/80 (M14): the boot PROM to its monitor on the core, against
+# MAME's own m68030. doc/oracles.md ("MAME") has the machine and how the core
+# plugs in; doc/m14-mismatches.md what the comparison found.
+#
+#   make sun3x            the PROM (rev 3.0.3) through its self-test to the
+#                         monitor, and sim/mame/monitor.cmds typed at it, on
+#                         the core and on MAME's m68030 (no FPU on either);
+#                         the two consoles must be the same, byte for byte
+#   make sun3x-m68030     ... MAME's m68030 alone (seconds)
+#
+#   SUN3X_BIOS=rev302|rev30|rev292   another PROM revision
+#   SUN3X_TIMEOUT=N       wall seconds the core may take (about 15 minutes)
+#
+# The PROMs are Sun firmware, supplied by the user and never committed:
+# Inputs/ref/PROMs/, checked against Inputs/sw/PROMS.sha256. The NVRAM image
+# (console on ttya) is made from sim/mame/eeprom.txt with RD68021's TME
+# tme-sun-eeprom (TME_EEPROM). Building MAME (-j2) and the core's shared
+# object (Verilator, -j4) are heavy jobs: each runs alone (CLAUDE.md).
+# Neither target is in `make check`.
+# ---------------------------------------------------------------------------
+MAMEB       := $(BUILD)/mame
+MAMEBIN     := $(MAMEB)/src/sun3x
+MAMEVLT     := $(MAMEB)/vlt/rd68031_vlt.so
+MAMEROMS    := $(MAMEB)/roms/sun3_80
+TME_EEPROM  ?= ../RD68021/build/tme/inst/bin/tme-sun-eeprom
+SUN3X_BIOS  ?= rev303
+SUN3X_TIMEOUT ?= 2400
+SUN3XROMS   := $(MAMEROMS)/sun3_80_v3.0.3 $(MAMEROMS)/sun3_80_v3.0.2 \
+               $(MAMEROMS)/sun3_80_v3.0 $(MAMEROMS)/sun3_80_v2.9.2 $(MAMEROMS)/timekpr_380.bin
+
+$(MAMEBIN): sim/mame/build.sh sim/mame/sun3x.patch sim/mame/rd68031.h sim/mame/rd68031.cpp \
+            sim/mame/rd68031_vlt.h
+	@echo "  sun3x: building MAME's sun3x driver into $(MAMEB)/src (-j2, alone; 30 min from clean)"
+	@bash sim/mame/build.sh mame $(MAMEB) | sed 's/^/  /'
+
+$(MAMEVLT): sim/mame/build.sh sim/mame/rd68031_vlt.h sim/mame/rd68031_vlt.cpp \
+            sim/virt/public.vlt $(RTL)
+	@echo "  sun3x: building the core into $(MAMEB)/vlt (Verilator, alone)"
+	@bash sim/mame/build.sh vlt $(MAMEB) | sed 's/^/  /'
+
+$(MAMEROMS)/sun3_80_%: Inputs/ref/PROMs/sun3_80_%.bin
+	@mkdir -p $(MAMEROMS)
+	@grep -F "$<" Inputs/sw/PROMS.sha256 | sha256sum -c --quiet - \
+	  || { echo "$<: not the PROM Inputs/sw/PROMS.sha256 names"; exit 1; }
+	@cp $< $@
+
+$(MAMEROMS)/timekpr_380.bin: sim/mame/eeprom.txt sim/mame/mk_timekpr.py
+	@mkdir -p $(MAMEROMS)
+	@test -x $(TME_EEPROM) || { echo "TME_EEPROM=$(TME_EEPROM): RD68021's tme-sun-eeprom is needed"; exit 1; }
+	@$(TME_EEPROM) < sim/mame/eeprom.txt > $(MAMEB)/eeprom.bin 2> /dev/null
+	@python3 sim/mame/mk_timekpr.py $(MAMEB)/eeprom.bin $@
+
+sun3x-m68030: $(MAMEBIN) $(SUN3XROMS)
+	@MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/run.sh sun3_80ref $(CURDIR)/$(MAMEB)/m68030 4431 300 $(SUN3X_BIOS) \
+	    | sed 's/^/  m68030: /'; \
+	 grep -h '^emulated time' $(MAMEB)/m68030/console.out.mame | sed 's/^/  m68030: /'; \
+	 tr -d '\r\000' < $(MAMEB)/m68030/console.out | tail -c 2 | grep -q '^>$$' \
+	  || { echo "FAIL: sun3x-m68030 (no monitor prompt; $(MAMEB)/m68030/console.out)"; exit 1; }
+	@echo "PASS: sun3x-m68030 (console in $(MAMEB)/m68030/console.out)"
+
+sun3x: $(MAMEBIN) $(MAMEVLT) $(SUN3XROMS) sun3x-m68030
+	@echo "  rd68031: the PROM on the core (about 15 minutes)"
+	@MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/run.sh sun3_80rd $(CURDIR)/$(MAMEB)/rd68031 4432 $(SUN3X_TIMEOUT) $(SUN3X_BIOS) \
+	    | sed 's/^/  rd68031: /'; \
+	 grep -h '^emulated time\|^rd68031:\|double bus' $(MAMEB)/rd68031/console.out.mame | sed 's/^/  /'
+	@if cmp -s $(MAMEB)/m68030/console.out $(MAMEB)/rd68031/console.out; then \
+	  echo "PASS: sun3x (the two consoles are identical: $(MAMEB)/rd68031/console.out)"; \
+	else \
+	  echo "FAIL: sun3x (the consoles differ)"; \
+	  diff <(tr -d '\r\000' < $(MAMEB)/m68030/console.out) \
+	       <(tr -d '\r\000' < $(MAMEB)/rd68031/console.out) | head -30; exit 1; \
+	fi
 
 # ---------------------------------------------------------------------------
 # AC timing, against the MC68030EC data sheet
