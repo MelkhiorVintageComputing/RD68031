@@ -310,6 +310,15 @@ the bus unit's decision (`doc/critical-path.md`). `make cycles` is against UM se
 cache and MMU instructions added (`doc/timing-divergences.md`). Phase B's candidates,
 each with an estimate, are in `doc/implementation.md`, "What to do about it".
 
+**Status (M15, phase B):** the user's choice from that list built -- F1, F2, F4 for the
+frequency, S1, S2, S6 for the size; S3 declined for now, S4, S5, F5 not approved; the
+Quartus clock arrangement kept for comparability. Artix-7 14,327 LUTs, 29.61 MHz;
+Cyclone V 12,884 ALMs, 3 DSP, 31.82 MHz; MAX 10 30,361 LEs, 25.71 MHz. The price is one clock on a
+misaligned operand across a page boundary with translation enabled
+(`doc/timing-divergences.md`). The limit is now the back-to-back operand handshake into
+the data cache's writes (`doc/critical-path.md`); each step is a row of
+`doc/size-and-speed.md`. `make cycles` lost the four rows the bench made slow.
+
 **Known suspects when real software misbehaves (M13, M14):** the deliberate
 differences from the part that follow the manual instead -- `LINK A7` pushes the
 decremented stack pointer where the part pushes the value before it, and the

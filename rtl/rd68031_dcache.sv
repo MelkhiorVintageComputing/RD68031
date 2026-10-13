@@ -133,7 +133,10 @@ module rd68031_dcache (
   // ==========================================================================
   // State
   // ==========================================================================
-  wire  [TW*16-1:0] tags;      // one register per line, below
+  // One register per line, below, read through an unpacked array: an indexed
+  // part-select of a packed vector (`tags[line*TW +: TW]`) has Quartus
+  // multiply the index by TW in a DSP block ahead of a shifter (M15).
+  wire  [TW-1:0]    tags [0:15];
   logic [63:0]      valid_q;
 
   // A long word being gathered from a port narrower than 32 bits -- UM 6.1.3.1:
@@ -196,8 +199,8 @@ module rd68031_dcache (
   assign bank_b = eb[1:0];
   assign tg_a   = {lk_fc, ea[29:6]};
   assign tg_b   = {lk_fc, eb[29:6]};
-  assign tok_a  = (tags[line_a*TW +: TW] == tg_a);
-  assign tok_b  = (tags[line_b*TW +: TW] == tg_b);
+  assign tok_a  = (tags[line_a] == tg_a);
+  assign tok_b  = (tags[line_b] == tg_b);
 
   logic [3:0] end_off, end_b;
   assign end_off = {2'b00, lk_addr[1:0]} + {1'b0, lk_bytes};
@@ -232,7 +235,7 @@ module rd68031_dcache (
   assign bl_line  = lk_span ? line_b : line_a;
   assign bl_tok   = lk_span ? tok_b : tok_a;
   assign lk_burst = lk_fill && !lk_rmc && dbe
-                 && (!bl_tok || (valid_q[bl_line*4 +: 4] == 4'b0000));
+                 && (!bl_tok || (valid_q[{bl_line, 2'b00} +: 4] == 4'b0000));
 
   // ==========================================================================
   // The data RAMs: bank k holds long word k of every line, byte lane j its
@@ -334,8 +337,8 @@ module rd68031_dcache (
   assign wbank_b = web[1:0];
   assign wtg_a   = {dw_fc_q, wea[29:6]};
   assign wtg_b   = {dw_fc_q, web[29:6]};
-  assign wtok_a  = (tags[wline_a*TW +: TW] == wtg_a);
-  assign wtok_b  = (tags[wline_b*TW +: TW] == wtg_b);
+  assign wtok_a  = (tags[wline_a] == wtg_a);
+  assign wtok_b  = (tags[wline_b] == wtg_b);
   assign whit_a  = wtok_a && valid_q[wea[5:0]];
   assign whit_b  = wtok_b && valid_q[web[5:0]];
   assign wfull   = (dw_bytes_q == 3'd4) && (dw_addr_q[1:0] == 2'b00);
@@ -421,7 +424,7 @@ module rd68031_dcache (
   assign fline = fe[5:2];
   assign fbank = fe[1:0];
   assign ftg   = {bn_fc, fe[29:6]};
-  assign ftok  = (tags[fline*TW +: TW] == ftg);
+  assign ftok  = (tags[fline] == ftg);
 
   // A beat that is this cache's: it belongs to an operand that may fill, and
   // no clear has landed since that operand's first cycle.
@@ -523,7 +526,7 @@ module rd68031_dcache (
         if (!rst_n)                             tag_q <= '0;
         else if (tag_we && (tag_wline == gl))   tag_q <= tag_wval;
       end
-      assign tags[gl*TW +: TW] = tag_q;
+      assign tags[gl] = tag_q;
     end
   endgenerate
 
@@ -534,8 +537,8 @@ module rd68031_dcache (
   assign iea     = inv_addr[31:2];
   assign ieb     = iea + 30'd1;
   assign iend    = {2'b00, inv_addr[1:0]} + {1'b0, inv_bytes};
-  assign itok_a  = (tags[iea[5:2]*TW +: TW] == {inv_fc, iea[29:6]});
-  assign itok_b  = (tags[ieb[5:2]*TW +: TW] == {inv_fc, ieb[29:6]});
+  assign itok_a  = (tags[iea[5:2]] == {inv_fc, iea[29:6]});
+  assign itok_b  = (tags[ieb[5:2]] == {inv_fc, ieb[29:6]});
   assign i_clr_a = inv_v && itok_a;
   assign i_clr_b = inv_v && itok_b && (iend > 4'd4);
 

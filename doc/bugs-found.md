@@ -1029,3 +1029,23 @@ acknowledge supplies a cpGEN, answered busy and then released -- one acknowledge
 cycle with no interrupt, two with one raised during the dialogue, and the
 interrupt's frame at the breakpoint's address. The unfixed microcode gives two
 acknowledges in the first case.
+
+---
+
+## M15 phase B · `core_cpif_tb` failed with the data cache built out
+
+**What:** a testbench defect, not the core's. M12's data-cache test of the
+coprocessor interface checks that the core's memory reads asked for bursts with
+DBE set; with `DCACHE_ENTRIES=0` nothing can ask, and the check failed -- so
+`make cache`, which runs every directed testbench with both caches built out,
+had failed on `core_cpif_tb` since M12 (the same failure on M15 phase A's RTL,
+measured). `make cache` had last been run before M12.
+
+**Found by:** `make cache` at M15 phase B.
+
+**Fixed by:** the check follows the build (`TB_DCACHE_ENTRIES`), as
+`core_mmu_tb`'s cache-dependent counts do; the CIR checks beside it -- no CIR
+cycle asks for a burst -- hold either way and are unchanged.
+
+**Stops it coming back:** `make cache` passes again; the check still fails with
+the data cache built in if the data cache stops asking for bursts.

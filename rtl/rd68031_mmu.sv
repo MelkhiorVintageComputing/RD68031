@@ -67,6 +67,11 @@ module rd68031_mmu #(
     output logic [31:0] l1_pb,
     output logic        l1_ci,
     output logic [31:0] l_mask,
+    // Whether any translation is enabled: TC.E, and TT0.E or TT1.E -- for the
+    // bus unit, which needs no lookup for an operand's later page when none
+    // is (figure 9-8).
+    output logic        l_tc_on,
+    output logic        l_tt_on,
     input  logic        l_take,            // the cycle looked up was started
 
     // ... and its request for a table search -------------------------------
@@ -78,6 +83,7 @@ module rd68031_mmu #(
 
     // The walker's own bus operands ----------------------------------------
     output logic        tw_valid,
+    output logic        tw_want,          // tw_valid but for tw_last
     output logic [31:0] tw_addr,
     output logic        tw_wr,
     output logic [31:0] tw_wdata,
@@ -206,9 +212,6 @@ module rd68031_mmu #(
 
   logic [N-1:0] h1v, h3v;
   logic         hit3, e3_b, e3_wp, e3_m, tt3;
-  logic [31:0]  mask3, pb3;
-  logic  [1:0]  kind3;
-  logic         ci3, e3_ci;
 
   // The walker's own address, for PTEST level 0 and for the entry a search
   // replaces.
@@ -216,27 +219,6 @@ module rd68031_mmu #(
   logic  [2:0] w_fc;
   logic        w_rw;
 
-  logic unused_l1;
-  logic u1, u3;
-  logic h1, e1_b, e1_ci, e1_wp, e1_m, t1m;
-
-  rd68031_mmu_xl #(.N (N)) u_xl1 (
-      .la (l1_addr), .fc (l_fc), .rw (l_rw), .rmc (l_rmc), .xlate (xlate),
-      .ps (tc_ps), .tt0 (tt0_q), .tt1 (tt1_q), .v (v_q), .tag (tag_flat),
-      .dat (dat_flat), .hitv (h1v), .hit (h1), .e_b (e1_b), .e_ci (e1_ci),
-      .e_wp (e1_wp), .e_m (e1_m), .tt (t1m), .mask (l_mask), .kind (l1_kind),
-      .pb (l1_pb), .ci (l1_ci), .used (u1));
-
-  logic rmc_none;
-  assign rmc_none = 1'b0;
-  rd68031_mmu_xl #(.N (N)) u_xl3 (
-      .la (w_la), .fc (w_fc), .rw (w_rw), .rmc (rmc_none), .xlate (xlate),
-      .ps (tc_ps), .tt0 (tt0_q), .tt1 (tt1_q), .v (v_q), .tag (tag_flat),
-      .dat (dat_flat), .hitv (h3v), .hit (hit3), .e_b (e3_b), .e_ci (e3_ci),
-      .e_wp (e3_wp), .e_m (e3_m), .tt (tt3), .mask (mask3), .kind (kind3),
-      .pb (pb3), .ci (ci3), .used (u3));
-
-  assign unused_l1 = &{1'b1, h1, e1_b, e1_ci, e1_wp, e1_m, t1m};
 
   // The replacement victim.
   logic [4:0] vict;
@@ -320,6 +302,47 @@ module rd68031_mmu #(
   logic        w_rwr;
   logic        done_q, sts_q;
 
+  // ONE LOOKUP, SHARED (M15 phase B, doc/size-and-speed.md). The walker
+  // asks the ATC two things, each on one clock of its own: at W_FIN, which
+  // entry already holds the address it is about to write (`wslot`), and at
+  // W_PT0, what PTEST level 0 reports. On both clocks a search, or PTEST, is
+  // under way, and the bus unit takes nothing that it would look up: every
+  // requester but the walker waits for `busy`, an operand that waited for the
+  // search is not looked up until it is over, and the walker's own operands
+  // are physical. So the bus unit's lookup serves the walker on those two
+  // clocks, chosen by the walker's state -- a register -- and what the bus
+  // unit is told on them is never acted on: it has no new candidate (`busy`)
+  // and no operand of its own entering a page. Before M15 phase B this was a
+  // second comparator of 22 ways, `u_xl3`.
+  logic w_look;
+  assign w_look = (w_st == W_FIN) || (w_st == W_PT0);
+
+  logic [31:0] x_la;
+  logic  [2:0] x_fc;
+  logic        x_rw, x_rmc;
+  assign x_la  = w_look ? w_la : l1_addr;
+  assign x_fc  = w_look ? w_fc : l_fc;
+  assign x_rw  = w_look ? w_rw : l_rw;
+  assign x_rmc = w_look ? 1'b0 : l_rmc;
+
+  logic u1;
+  logic h1, e1_b, e1_ci, e1_wp, e1_m, t1m;
+
+  rd68031_mmu_xl #(.N (N)) u_xl1 (
+      .la (x_la), .fc (x_fc), .rw (x_rw), .rmc (x_rmc), .xlate (xlate),
+      .ps (tc_ps), .tt0 (tt0_q), .tt1 (tt1_q), .v (v_q), .tag (tag_flat),
+      .dat (dat_flat), .hitv (h1v), .hit (h1), .e_b (e1_b), .e_ci (e1_ci),
+      .e_wp (e1_wp), .e_m (e1_m), .tt (t1m), .mask (l_mask), .kind (l1_kind),
+      .pb (l1_pb), .ci (l1_ci), .used (u1));
+
+  // What the walker reads of it.
+  assign h3v   = h1v;
+  assign hit3  = h1;
+  assign e3_b  = e1_b;
+  assign e3_wp = e1_wp;
+  assign e3_m  = e1_m;
+  assign tt3   = t1m;
+
   // The table index fields -- UM 9.1.1, Table 9-1. The index at a level is the
   // TIx bits after the IS bits and the indexes above it.
   logic [3:0] ti_x, ti_n;
@@ -351,7 +374,7 @@ module rd68031_mmu #(
     // page address field in the descriptor plus an offset. The offset is the
     // logical address with the bits used in the search set to zero" -- and
     // without the page offset, which the logical address supplies itself.
-    pg_mask = mask3;
+    pg_mask = l_mask;
     off     = ((w_pos >= 6'd32) ? 32'd0 : (32'hFFFF_FFFF >> w_pos[4:0]))
             & w_la & ~pg_mask;
   end
@@ -848,16 +871,19 @@ module rd68031_mmu #(
     end
   end
 
+  assign l_tc_on  = tc_e;
+  assign l_tt_on  = tt0_q[15] || tt1_q[15];
   assign busy     = (w_st != W_IDLE);
   assign done     = done_q;
   assign w_sts    = sts_q;
   assign tw_valid = w_pend && !tw_last && !tw_ack;
+  assign tw_want  = w_pend && !tw_ack;
   assign tw_addr  = w_raddr;
   assign tw_wr    = w_rwr;
   assign tw_wdata = w_rdat;
 
   logic unused_mmu;
-  assign unused_mmu = &{1'b1, kind3, pb3, ci3, e3_ci, u3, w_d1[7:0], w_d0[7],
+  assign unused_mmu = &{1'b1, e1_ci, w_d1[7:0], w_d0[7],
                         w_d0[5], cmd_xw[4:0], cmd_ea[7:0], rp[47:34], rp[3:0]};
 
 endmodule

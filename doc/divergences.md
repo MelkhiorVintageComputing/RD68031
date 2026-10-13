@@ -95,7 +95,12 @@ the vector table. "During the reset period, the entire bus three-states."
   and nothing else of the MMU's: the rest of those registers, CRP, SRP, MMUSR
   and the ATC keep their values -- UM 9.2.2, "a reset of the processor does not
   invalidate any entries in the ATC" -- and a table search in progress is
-  abandoned with the bus cycle it was running.
+  abandoned with the bus cycle it was running. Since M15 phase B the bus
+  unit's falling-edge registers take `crst` half a clock later, from a
+  falling-edge copy (`doc/size-and-speed.md`, F4): on the pins only STATUS and
+  REFILL, which are never three-stated, show it -- they go inactive half a
+  clock after the rest of the bus is released, and reset exception
+  processing's three clocks of STATUS are where they were.
 - **`rst_n`**, which is not an MC68030 pin (`doc/pinout.md`), is the power-on
   initialisation ASIC needs: every register, the architectural ones included,
   takes its value from it, and the processor then runs the same reset exception.
@@ -248,6 +253,7 @@ the contradictions themselves are `doc/manual-contradictions.md` 19-25.
 | PLOAD with a TTx register matching | not said | PLOAD searches the tables anyway |
 | reserved bits of TTx and MMUSR | not said | not kept: they read zero, as TC's and the root pointers' do by the manual |
 | PMOVE register-to-memory with FD set | not said; the format has the bit | accepted, FD ignored |
+| the gap between an operand's last cycle in one page and its first in the next | not said: each cycle is translated (9.2.1, 7.1.1) | one idle clock, with translation enabled; none with it impossible (TC.E clear or MMUDIS, no TTx enabled). Since M15 phase B, for the clock frequency (`doc/timing-divergences.md`) |
 
 Until M11 part 2 the table also had "when a misaligned operand's second page
 is searched": the core searched both pages before the operand's first cycle.
@@ -293,6 +299,9 @@ one that can never leave the caches holding something memory does not:
   locked sequence includes them. Here it does not: from a 32-bit port the read
   fills its entry, and from a narrower one the entry is left invalid, so a stale
   copy cannot survive the read.
+- **CDIS takes effect half a clock after the two falling-edge synchroniser
+  ranks** (since M15 phase B, one rising-edge rank more, `doc/caches.md`). UM
+  5.11.1 gives it no latency.
 - **A CACR clear stops a fill in flight.** The rest of a burst, or a long word
   the pipe asked for before the MOVEC, is not written into a cache CI, CEI, CD or
   CED has just cleared. The manual does not say which side of the clear such a

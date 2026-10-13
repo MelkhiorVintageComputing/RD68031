@@ -7,8 +7,9 @@
 // One address translation: the transparent translation registers and the
 // address translation cache looked up for one logical address, and the verdict
 // -- UM 9.2.1 and figure 9-8. Purely combinational; rd68031_mmu instantiates
-// it twice (the cycle the bus unit is about to start, and the walker's own
-// address for PTEST, PLOAD and the flushes) and owns every register it reads.
+// it once, for the cycle the bus unit is about to start and, on the two
+// clocks the walker reads it, for the walker's own address (until M15 phase B
+// a second instance served the walker), and owns every register it reads.
 //
 // The order is figure 9-8's: CPU space is never translated; a TTx match is
 // used as it is; with translation disabled (TC.E clear, or MMUDIS asserted --

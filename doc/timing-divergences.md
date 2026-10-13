@@ -40,17 +40,17 @@ aside):
 
 | | clocks | against UM 11.6's CC |
 |---|--:|--:|
-| UM 11.6 instruction-cache case | 1,370 | |
-| this core, synchronous bus, warm | 1,138 | −16.9 % |
-| this core, asynchronous bus, warm | 1,228 | −10.4 % |
+| UM 11.6 instruction-cache case | 1,330 | |
+| this core, synchronous bus, warm | 1,075 | −19.2 % |
+| this core, asynchronous bus, warm | 1,156 | −13.1 % |
 
-Of 135 rows on the synchronous bus, 23 take the manual's count, 74
-fewer and 38 more. The totals include the four rows the bench makes slow
-(below) and the seven data cache rows; without the four, 1,075 clocks against
-1,330 (−19.2 %) synchronous and 1,156 (−13.1 %) asynchronous. RD68021's mix,
-against the MC68020's figures on the asynchronous bench, was 1,182 against
-1,332. Cold on the synchronous bus against the average
-no-cache case: 1,569 clocks against 1,381.
+Of 131 rows on the synchronous bus, 23 take the manual's count, 74
+fewer and 34 more. The totals include the seven data cache rows. Until M15
+phase B they also included four rows the bench made slow, which are retired
+(below): with them it was 1,138 and 1,228 clocks against 1,370. RD68021's
+mix, against the MC68020's figures on the asynchronous bench, was 1,182
+against 1,332. Cold on the synchronous bus against the average no-cache case:
+1,492 clocks against 1,336 (124 rows).
 
 ### Where it is faster, and why
 
@@ -98,8 +98,10 @@ synchronous bench.
 3. **Exception entry.** `TRAP`, `ILLEGAL` and line A spend six microwords
    before the first frame write, four writes at the spacing of 2, and the vector
    read at the latency of 1: 24 clocks against 18 with the handler in
-   a line of its own. The frozen `TRAP #0` row, 28, also pays the bench's
-   line conflict below.
+   a line of its own (`TRAP #0 [own line]`). `ILLEGAL` and line A, 28, also
+   pay a line conflict: their handler, the prologue's, shares line 0 of the
+   instruction cache with the loop, as the retired `TRAP #0` row's did
+   (below).
 4. **`CAS2`** (+10): twelve microwords between the second read and the first
    write -- both compares, the condition codes, and the decision which pair
    to write -- where the part overlaps them with its reads.
@@ -111,22 +113,22 @@ synchronous bench.
    (`_move_to_an` in `tools/ucode/program.py`) at long size too, where it
    changes nothing.
 
-### Bench layout, not the design
+### Bench layout, not the design: four rows retired at M15 phase B
 
-These rows are slower for reasons of the bench and are kept, frozen, because
-they were frozen before M15; each now has a twin that does not have the
-problem, and the twin is the one to compare:
+Four rows were slower for reasons of the bench, and were kept, frozen, through
+M15 phase A because they had been frozen before it, each beside a twin without
+the problem. At phase B the user retired them, keeping the twins:
 
-- **`ADD.L` and `MOVE.L (4,A0,D3.L),D4`** read at $2009: A0 + D3 + 4 is
-  misaligned, three bytes and one, two bus cycles. UM 11.6 assumes aligned
-  operands. `(3,A0,D3.L)` reads $2008: 9 clocks.
-- **`JSR (A3)` and `TRAP #0`** call code at $3000 and $3100, which index line
-  0 of the instruction cache -- a line the loop's own code at $0400-$045F
-  needs, so the call and the loop take it from each other on every pass (the
-  M10 note below says the same, giving the bus address $040C of the last
-  prefetch where it means the line). `JSR (A4) [own line]` and `TRAP #0 [own
-  line]` call code the setup writes at $30A0, line 10: 9 and
-  24 clocks.
+| Retired row | sync / async | why it was slow | the twin kept | sync / async |
+|---|--:|---|---|--:|
+| `ADD.L (4,A0,D3.L),D4` | 11 / 13 | reads $2009: misaligned, three bytes and one, two bus cycles; UM 11.6 assumes aligned operands | `ADD.L (3,A0,D3.L),D4`, $2008 | 9 / 10 |
+| `MOVE.L (4,A0,D3.L),D4` | 11 / 13 | the same | `MOVE.L (3,A0,D3.L),D4` | 9 / 10 |
+| `JSR (A3)` | 13 / 14 | calls $3000, line 0 of the instruction cache, which the loop's own code at $0400-$045F needs: the call and the loop take the line from each other every pass (the M10 note below) | `JSR (A4) [own line]`, to $30A0, line 10 | 9 / 9 |
+| `TRAP #0` | 28 / 32 | its handler at $3100, line 0 likewise | `TRAP #0 [own line]`, handler at $30A0 | 24 / 27 |
+
+No count changed: the twins were measured beside them since M15 phase A, and
+the totals above are the rest of the table, which is what they were "without
+the four".
 
 ### The data cache (UM 11.4)
 
@@ -161,6 +163,43 @@ excess is mostly the rows above that are slow warm, plus a clock or two of
 refill after each branch and fill.
 
 ---
+
+## M15 phase B: an operand's cycle into a new page
+
+**One clock more on a misaligned operand that crosses a page boundary, with
+translation enabled** -- an idle clock between the operand's last cycle in one
+page and its first in the next. And when the next page is not in the ATC,
+its table search starts that clock later.
+
+Until M15 phase B the bus unit computed the next cycle's address at the end of
+S5, looked it up in the 22-entry ATC and decided whether to start it, all in
+the half clock between the falling edge that ends the transfer and the rising
+edge that starts the next cycle. That chain was the design's limiting path at
+20.9 MHz (`doc/critical-path.md`). The ATC is now never asked about an
+address computed on that edge: an operand's later cycle in the page it is
+already in runs on the translation the bus unit kept for that page -- as it
+always did -- and only one entering another page needs a lookup, which it gets
+from the operand's registers on the clock after (`rd68031_biu`, `s5_cross`).
+The user accepted the clock for the frequency (`doc/size-and-speed.md`:
+20.6 MHz to 29.6 on the Artix-7, with F2 and the rest).
+
+| Case | before | M15 phase B |
+|---|--:|--:|
+| an operand entering a page the ATC has (or a TTx matches) | the next cycle at the end of S5 | one idle clock, then the cycle |
+| ... a page the ATC does not have | the search started at the end of S5 | one idle clock, then the search |
+| translation impossible: TC.E clear or MMUDIS, and neither TTx enabled; or CPU space | the next cycle at the end of S5 | unchanged: every page is its logical address, and nothing is looked up |
+| every other cycle -- an operand's first, a later one in the same page, a cache completion | | unchanged |
+
+How rare it is: a page is at least 256 bytes, and only an operand that is
+misaligned across its boundary -- at most five bytes -- has a later cycle in
+another page. `make cycles` runs with translation disabled and no row moved;
+`core_mmu_tb`'s three programs, which cross pages on purpose, measure it:
+`mmu_walk.S` (its reads and writes across a cachable and a CI page) 21,748
+clocks against 21,740 before, `mmu_fault.S` (its faults across a boundary)
+16,007 against 16,003, `mmu_regs.S` 17,228 unchanged -- 12 clocks over the
+three programs, each spent where one of their operands enters a new page. No bus cycle, function code, order or count changes: the gap
+between two cycles of the operand is a clock longer, which the bus protocol
+allows between any two cycles (UM 7.3).
 
 ## M11: the table search
 
@@ -244,7 +283,6 @@ one's difference from NCC. Differences in bold are slower than the manual.
 | `ADD.L ($2000).W,D4` | 6 | 2 + fea (xxx).W 4 | 7 | **+1** | 8 | **+2** | 6 | 11 | **+5** | 13 |
 | `ADD.L ($2000).L,D4` | 6 | 2 + fea (xxx).L 4 | 8 | **+2** | 9 | **+3** | 7 | 15 | **+8** | 18 |
 | `ADD.L #imm,D4` | 6 | 2 + fea #.L 4 | 4 | -2 | 4 | -2 | 6 | 13 | **+7** | 15 |
-| `ADD.L (4,A0,D3.L),D4` | 8 | 2 + fea (d8,An,Xn) 6, misaligned | 11 | **+3** | 13 | **+5** | 8 | 15 | **+7** | 18 |
 | `ADD.L (3,A0,D3.L),D4` | 8 | 2 + fea (d8,An,Xn) 6 | 9 | **+1** | 10 | **+2** | 8 | 13 | **+5** | 15 |
 | `ADD.L ([A0]),D4` | 12 | 2 + fea ([B]) 10 | 18 | **+6** | 20 | **+8** | 12 | 23 | **+11** | 27 |
 | `ADD.L D4,(A0)` | 6 | 3 + fea (An) 3 | 8 | **+2** | 9 | **+3** | 7 | 8 | **+1** | 10 |
@@ -327,7 +365,6 @@ one's difference from NCC. Differences in bold are slower than the manual.
 | `MOVE.L D0,-(A2)` | 4 | Rn,-(An) 4 | 4 |  | 4 |  | 4 | 6 | **+2** | 7 |
 | `MOVE.L (A0),D4` | 5 | EA,Dn 2 + fea (An) 3 | 5 |  | 6 | **+1** | 5 | 8 | **+3** | 10 |
 | `MOVE.L (8,A0),D4` | 6 | EA,Dn 2 + fea (d16,An) 4 | 6 |  | 7 | **+1** | 6 | 11 | **+5** | 13 |
-| `MOVE.L (4,A0,D3.L),D4` | 8 | EA,Dn 2 + fea (d8,An,Xn) 6, misaligned | 11 | **+3** | 13 | **+5** | 8 | 15 | **+7** | 18 |
 | `MOVE.L (3,A0,D3.L),D4` | 8 | EA,Dn 2 + fea (d8,An,Xn) 6 | 9 | **+1** | 10 | **+2** | 8 | 13 | **+5** | 15 |
 | `MOVE.L (A0),(A2)` | 7 | Source,(An) 4 + fea (An) 3 | 6 | -1 | 7 |  | 8 | 9 | **+1** | 11 |
 | `MOVE.L (A0)+,(A2)+` | 7 | Source,(An)+ 4 + fea (An)+ 3 | 7 |  | 8 | **+1** | 8 | 8 |  | 10 |
@@ -340,7 +377,6 @@ one's difference from NCC. Differences in bold are slower than the manual.
 | `LINK.L A4,#-8` | 6 | 6 | 8 | **+2** | 8 | **+2** | 7 | 13 | **+6** | 15 |
 | `UNLK A4` | 5 | 5 | 7 | **+2** | 8 | **+3** | 5 | 7 | **+2** | 9 |
 | `JMP (A5)` | 6 | 4 + jea (An) 2 | 6 |  | 6 |  | 8 | 7 | -1 | 8 |
-| `JSR (A3)` | 6 | 4 + jea (An) 2 | 13 | **+7** | 14 | **+8** | 9 | 15 | **+6** | 17 |
 | `JSR (A4) [own line]` | 6 | 4 + jea (An) 2 | 9 | **+3** | 9 | **+3** | 9 | 13 | **+4** | 15 |
 | `BSR.S` | 6 | 6 | 9 | **+3** | 9 | **+3** | 9 | 11 | **+2** | 12 |
 | `RTS` | 9 | 9 | 7 | -2 | 9 |  | 11 | 7 | -4 | 9 |
@@ -358,7 +394,6 @@ one's difference from NCC. Differences in bold are slower than the manual.
 | `TRAPF` | 4 | 4 | 2 | -2 | 2 | -2 | 4 | 6 | **+2** | 7 |
 | `TRAPF.W` | 6 | 6 | 3 | -3 | 3 | -3 | 6 | 8 | **+2** | 9 |
 | `TRAPF.L` | 8 | 8 | 4 | -4 | 4 | -4 | 8 | 13 | **+5** | 15 |
-| `TRAP #0` | 18 | 18 | 28 | **+10** | 32 | **+14** | 20 | 32 | **+12** | 37 |
 | `TRAP #0 [own line]` | 18 | 18 | 24 | **+6** | 27 | **+9** | 20 | 28 | **+8** | 32 |
 | `ILLEGAL` | 18 | 18 | 28 | **+10** | 32 | **+14** | 20 | 28 | **+8** | 32 |
 | `line A` | 18 | 18 | 28 | **+10** | 32 | **+14** | 20 | 28 | **+8** | 32 |

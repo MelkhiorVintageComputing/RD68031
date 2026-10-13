@@ -79,12 +79,9 @@ ROWS = [
      6, '2 + fea (xxx).L 4', 7, 9, 8),
     ('ADD.L #imm,D4', [], [0xD8BC, 0x1234, 0x5678],
      6, '2 + fea #.L 4', 6, 4, 4),
-    # A0 + D3 + 4 is $2009: this operand is MISALIGNED, three bytes and one,
-    # two cycles where UM 11.6 assumes one ("all operands in memory ... are
-    # long-word aligned"). Kept, as it was frozen; the row after it is the
-    # same mode on an aligned operand, the one to hold against the manual.
-    ('ADD.L (4,A0,D3.L),D4', [], [0xD8B0, 0x3804],
-     8, '2 + fea (d8,An,Xn) 6, misaligned', 8, 13, 11),
+    # A0 + D3 + 3 is $2008, aligned. Until M15 phase B a (4,A0,D3.L) row
+    # read the misaligned $2009 beside it; it was the bench's, not the
+    # design's, and is retired (doc/timing-divergences.md).
     ('ADD.L (3,A0,D3.L),D4', [], [0xD8B0, 0x3803],
      8, '2 + fea (d8,An,Xn) 6', 8, 10, 9),
     ('ADD.L ([A0]),D4', [], [0xD8B0, 0x0151],
@@ -260,8 +257,6 @@ ROWS = [
      5, 'EA,Dn 2 + fea (An) 3', 5, 6, 5),
     ('MOVE.L (8,A0),D4', [], [0x2828, 0x0008],
      6, 'EA,Dn 2 + fea (d16,An) 4', 6, 7, 6),
-    ('MOVE.L (4,A0,D3.L),D4', [], [0x2830, 0x3804],
-     8, 'EA,Dn 2 + fea (d8,An,Xn) 6, misaligned', 8, 13, 11),
     ('MOVE.L (3,A0,D3.L),D4', [], [0x2830, 0x3803],
      8, 'EA,Dn 2 + fea (d8,An,Xn) 6', 8, 10, 9),
     ('MOVE.L (A0),(A2)', [], [0x2490],
@@ -289,15 +284,12 @@ ROWS = [
      5, '5', 5, 8, 7),
     ('JMP (A5)', [], [0x4ED5],
      6, '4 + jea (An) 2', 8, 6, 6),
-    # M10: the instruction cache's tag is per LINE (UM 6.1.1). This JSR is at
-    # $040C, in line 0 with its target $3000: the call and the return take the
-    # line from each other on every pass. doc/timing-divergences.md.
-    ('JSR (A3)', [], [0x4E93],
-     6, '4 + jea (An) 2', 9, 14, 13),
-    # M15: the same call to an RTS the setup writes at $30A0, line 10. The
-    # loop itself, $0400 to about $045F, fills lines 0 to 5, so $3000 (line 0)
-    # takes a line the loop needs and the loop takes it back, every pass; line
-    # 10 is clear of it. MOVE.W #$4E75,($30A0).W; LEA ($30A0).W,A4.
+    # A call to an RTS the setup writes at $30A0, line 10 of the instruction
+    # cache. The loop itself, $0400 to about $045F, fills lines 0 to 5; a call
+    # to $3000 (line 0, A3's) took a line the loop needs and the loop took it
+    # back, every pass -- the bench's layout meeting the line organisation
+    # (UM 6.1.1). That row, `JSR (A3)`, is retired at M15 phase B.
+    # MOVE.W #$4E75,($30A0).W; LEA ($30A0).W,A4.
     ('JSR (A4) [own line]', [0x31FC, 0x4E75, 0x30A0, 0x49F8, 0x30A0], [0x4E94],
      6, '4 + jea (An) 2', 9, 9, 9),
     ('BSR.S', [], [0x6102, 0x6002, 0x4E75],
@@ -338,11 +330,10 @@ ROWS = [
      6, '6', 6, 3, 3),
     ('TRAPF.L', [], [0x51FB, 0x0000, 0x0000],
      8, '8', 8, 4, 4),
-    # ... and so does this TRAP and its handler.
-    ('TRAP #0', [], [0x4E40],
-     18, '18', 20, 32, 28),
-    # M15: the same with its handler, an RTE the setup writes at $30A0 (line
-    # 10, clear of the loop's lines 0 to 5), and vector 32 pointed at it:
+    # TRAP with its handler, an RTE the setup writes at $30A0 (line 10, clear
+    # of the loop's lines 0 to 5), and vector 32 pointed at it -- the prologue's
+    # handler at $3100 shares line 0 with the loop, and the row that used it,
+    # `TRAP #0`, is retired at M15 phase B as `JSR (A3)` is:
     # MOVE.W #$4E73,($30A0).W; MOVE.L #$30A0,($80).W.
     ('TRAP #0 [own line]', [0x31FC, 0x4E73, 0x30A0, 0x21FC, 0x0000, 0x30A0, 0x0080],
      [0x4E40], 18, '18', 20, 27, 24),

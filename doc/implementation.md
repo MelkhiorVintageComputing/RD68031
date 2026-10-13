@@ -24,6 +24,96 @@ are from its final tree, with `COPROCESSOR = 1`, at the same 33.333 ns.*
 
 ---
 
+## The numbers (M15, phase B)
+
+Phase B carried out the user's choice from the opportunity list at the end of
+phase A (below): F1, F2 and F4 for the frequency, S1, S2 and S6 for the size;
+S3 declined for now, S4, S5 and F5 not approved. Each change was measured on
+its own, on the tree before it, in `doc/size-and-speed.md`. Same constraint,
+same parts, same scripts -- the Quartus clock arrangement left as it was
+(`VIRTUAL_PIN`, below), so that the numbers stay comparable with RD68021's:
+
+| | Artix-7 xc7a100t-1 (Vivado) | Cyclone V 5CSEMA5 (Quartus) | MAX 10 10M50DAF484C6GES (Quartus) |
+|---|--:|--:|--:|
+| logic | **14,327 Slice LUTs (22.6 %)** | **12,884 ALMs (40 %)** | **30,361 LEs (61 %)** |
+| registers | 5,188 | 9,681 | 9,300 |
+| block memory | 6 RAMB36 | 22 M10K | 28 M9K |
+| distributed RAM | 140 LUTs | -- | -- |
+| DSP | 4 (the multiplier) | **3** (the multiplier) | 8 9-bit multipliers |
+| **frequency, static** | **29.61 MHz** (33.78 ns) | **31.82 MHz** | **25.71 MHz** (slow 1200 mV 85 °C) |
+| against phase A | −3 % LUTs, **+42 %** | −7 % ALMs, **+48 %** | −11 % LEs, **+52 %** |
+
+**All three now clear the MC68030's 25 MHz grade on static timing**, the
+Artix-7 and Cyclone V by a margin, and sit at 88 % (Artix-7), 82 % (Cyclone
+V) and 79 % (MAX 10) of RD68021's frequency from the same scripts, where
+phase A was 62 %, 56 % and 52 %. Phase B's target, about 28 MHz, is met on
+the two it was set for. The MAX 10 is limited by a full-period path, the
+microcode store through the effective address and the data cache's lookup
+into the ATC and its history bits -- third on the Artix-7's list
+(`doc/critical-path.md`) -- where the other two are limited by the half
+period at the end of S5.
+
+| change | Artix-7 LUTs | Artix-7 MHz | Cyclone V ALMs | Cyclone V MHz |
+|---|--:|--:|--:|--:|
+| phase A, measured again | 14,856 | 20.59 | 13,808 ¹ | 21.51 ¹ |
+| S6 + S2: the divider's dead registers; the caches' tag selects | 14,856 | 20.59 | 12,773 | 21.34 |
+| + F2: the residual address as a carry-select | 14,899 | 22.23 | 12,814 | 24.47 |
+| + F1: no ATC lookup on the edge an address is computed | 14,884 | 29.66 | 13,158 | 32.80 |
+| + F4: the falling-edge registers' reset | 14,867 | 29.50 | 13,145 | 30.92 |
+| + S1: one ATC comparator | **14,327** | **29.61** | **12,884** | **31.82** |
+
+¹ phase A's own figures; S6 and S2 were measured together.
+
+**F1 is more than the opportunity list said.** Not looking the continuing
+operand's next cycle up at the end of S5 -- one idle clock when it enters
+another page, then a lookup from its registers -- moved nothing at first
+(22.25 MHz): the ATC's address still waited for the operand engine, because
+which requester the lookup was for depended on whether the operand was
+finishing. The sequencer drops its request on `req_last`, the walker on
+`tw_last`, the MMUDIS the MMU is held to was chosen by `op_finishing`, CDIS's
+synchroniser is a falling-edge flop feeding the data cache's lookup in front
+of the ATC, and the choice between the operand's registers and the next
+requester was by the falling-edge state. Each was replaced by an equivalent
+from registers (`rd68031_biu`, `req_want`, `tw_want`, `lk_cont`; CDIS one
+rising-edge rank more): 22.45, 26.66, 27.15, then 29.66 MHz. Only the idle
+clock and CDIS's half clock change behaviour (`doc/timing-divergences.md`,
+`doc/divergences.md`).
+
+**Where the area goes now** (Artix-7 Slice LUTs, and the Cyclone V's ALMs
+needed, against phase A's tables below):
+
+| | Artix-7 | phase A | Cyclone V | phase A |
+|---|--:|--:|--:|--:|
+| MMU | 2,188 (836 the one lookup) | 2,755 | 1,848 (698 the lookup) | 1,927 |
+| data cache | 2,300 | 2,276 | 2,685 | 3,442 |
+| instruction cache | 493 | 493 | 1,206 | 1,408 |
+| bus unit | 1,369 | 1,355 | 1,030 | 940 |
+| sequencer and its units | 7,550 | 7,482 ² | 5,761 | 5,738 |
+
+² phase A's sequencer rows summed. S2 is worth 757 ALMs in the data cache
+and 202 in the instruction cache on the Cyclone V, and the nine DSP blocks;
+the Artix-7 built the same selects as multiplexers before and after. The bus
+unit grew by the carry-select's second upper half and the lookup's own
+requester choice.
+
+**What limits it** is `doc/critical-path.md`'s: half a period from the
+falling-edge bus state, through the operand finishing and the sequencer's
+next request being taken on that edge, into the data cache's RAM writes and
+the ATC's history -- the back-to-back operand handshake itself. Behind it,
+the early retire's half clock (F5, 30.50 ns, not approved) and the
+microcode store through the effective address and the data cache's lookup
+into the ATC (30.45 ns, a full period).
+
+On the pins, `dsack_n_i`'s false path into the ATC's history (phase A, "The
+pins" below) is gone with F1: its worst path is now 5 levels into `early_q`.
+The rest of `build/paths_pins.rpt` is as phase A describes it.
+
+The vendor tools' warnings are phase A's, less two: `[Synth 8-6014]` for
+`mag_num_reg` and `mag_den_reg` is gone with them (S6), and the Quartus
+`Critical Warning (15725)` for the clock fed by a virtual pin stays, by the
+user's decision at phase B -- changing the arrangement would change the
+method RD68021's numbers were measured with.
+
 ## The numbers (M15, phase A)
 
 Constrained at **33.333 ns, 30 MHz** (`scripts/rd68031.xdc`,
@@ -209,7 +299,12 @@ So the MC68030's new pins need no constraint the scripts lack: the out-of-contex
 convention holds, and the pin report is where to look if a board design meets
 one.
 
-## What to do about it (M15 phase B: estimates, nothing done yet)
+## What to do about it (M15 phase A's estimates)
+
+*Phase B (above) built F1, F2, F4, S1, S2 and S6: F1 + F2 + F4 came to 29.6
+MHz on the Artix-7 against the ≈ 28 estimated here, S1 to 540 LUTs against
+≈ 450, S2 to 1,035 ALMs and nine DSP blocks on the Cyclone V. The table is
+left as it was written.*
 
 Each estimate is from the measured path and area above; none is built. "Risk"
 is the risk to behaviour, and the gate is what would have to stay green.
@@ -250,7 +345,9 @@ S3 change clock counts, and would each be a row in `doc/timing-divergences.md`.
 ## The reset audit
 
 `make audit` at M15: 6,592 flip-flops, every one reset, 110 exempted -- the
-microcode store's read register, one per microword bit, as on RD68021. The
+microcode store's read register, one per microword bit, as on RD68021. At M15 phase B: 6,498 -- the divider's 96 dead bits gone
+(S6), the two new falling- and rising-edge copies (`crst_nq`, `cdis_sync_n`)
+in. The
 caches' arrays are memories, not registers, gated by reset valid bits
 (`doc/caches.md`).
 

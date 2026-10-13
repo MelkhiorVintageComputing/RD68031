@@ -117,7 +117,8 @@ branch, UM 6.1): it is served whatever the ATC says.
 cycle when it is the first of a new operand -- the sequencer's request, a
 prefetch, RTE's rerun of a faulted operand, a posted write -- and again when it
 is the first cycle of an operand that enters a page other than the one its
-cycles have been in (`rd68031_mmu_xl`, one instance for the bus unit). An
+cycles have been in (`rd68031_mmu_xl`, one instance for the bus unit -- and,
+since M15 phase B, for the walker too: below). An
 operand is at most five bytes and a page at least 256, so that is at most once
 more; the bytes the data cache will answer are never in a cycle and are never
 looked up. Then:
@@ -163,6 +164,29 @@ What follows from it:
 | CIOUT and the data cache | each cycle has its own page's CI: CIOUT, whether a read beat fills the data cache, whether a narrow port's long word is completed, and what a write does to its long word in that page. A read from a cachable page into a CI one caches the first long word and not the second, and the reverse; a write's long word in its second page waits in the cache for that page's translation (`doc/caches.md`; `doc/bugs-found.md`, M11 phase B, which is the defect of deciding it all by the first page) |
 | OCS | the cycle the set-aside operand resumes with is not the operand's first, and has no OCS (UM 7.1.1) |
 | STATUS | three clocks for the second page's search, as for any search an access starts |
+
+**When the lookup is made** (M15 phase B). Never for an address computed on
+the edge that ends S5: a new operand is looked up from its requester -- the
+sequencer, the fetch unit, the walker, RTE's hand-back, the operand set aside
+-- chosen by registers and the requesters' own signals, not by whether the
+operand under way is finishing; and the operand under way is looked up from its
+own registers between its cycles. So a later cycle that enters a new page does
+not start at the end of S5: the bus is idle for a clock, and the cycle is looked
+up and started (or searched for, or refused) on the next. With no translation
+possible for the operand -- TC.E clear or its MMUDIS asserted, and neither TTx
+enabled, or CPU space -- every page is its own logical address and the cycle
+starts at once. The clock is `doc/timing-divergences.md`'s; it was the price of
+taking the 22-way comparison out of the half clock that limited the design
+(`doc/critical-path.md`).
+
+**One comparator.** The walker reads the ATC on two clocks of its own: W_FIN,
+for the entry already holding the address it is about to write, and W_PT0, for
+PTEST level 0. On both a search or a PTEST is under way, and the bus unit
+takes nothing it would look up (`busy` holds every requester but the walker,
+whose operands are physical). So the bus unit's lookup is switched to the
+walker's address on those two clocks, by the walker's state; until M15 phase B
+a second 22-way comparator, `u_xl3`, did it (`doc/size-and-speed.md`: 540
+LUTs).
 
 Keeping each page's translation until the operand is out of it is what lets a
 PFLUSH run while a prefetch or a posted write is still on the bus without that

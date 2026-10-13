@@ -112,6 +112,7 @@ module rd68031_top #(
   // That is also what lets OCS be driven from this handshake (UM 7.1.1).
   // ==========================================================================
   logic        req_valid;
+  logic        req_want;
   logic  [2:0] req_kind;
   logic  [2:0] req_fc;
   logic [31:0] req_addr;
@@ -258,11 +259,13 @@ module rd68031_top #(
   logic [31:0] l1_addr, l1_pb, l_mask;
   logic  [2:0] l_fc;
   logic        l_rw, l_rmc, l1_ci, l_take;
+  logic        l_tc_on, l_tt_on;
   logic  [1:0] l1_kind;
   logic        wq_valid, wq_wr;
   logic [31:0] wq_addr;
   logic  [2:0] wq_fc;
   logic        tw_valid, tw_wr, tw_ack, tw_last, tw_berr;
+  logic        tw_want;
   logic [31:0] tw_addr, tw_wdata, tw_rdata;
   logic        req_ciin, fetch_ciin;
   logic        beat_valid, beat_err, beat_ciin, beat_fetch;
@@ -287,6 +290,7 @@ module rd68031_top #(
       .crst           (crst),
 
       .req_valid      (req_valid),
+      .req_want       (req_want),
       .req_kind       (req_kind),
       .req_fc         (req_fc),
       .req_addr       (req_addr),
@@ -516,6 +520,7 @@ module rd68031_top #(
       .rst_n          (rst_n),
 
       .req_valid      (req_valid),
+      .req_want       (req_want),
       .req_kind       (req_kind),
       .req_fc         (req_fc),
       .req_addr       (req_addr),
@@ -595,6 +600,8 @@ module rd68031_top #(
       .l1_pb          (l1_pb),
       .l1_ci          (l1_ci),
       .l_mask         (l_mask),
+      .l_tc_on        (l_tc_on),
+      .l_tt_on        (l_tt_on),
       .l_take         (l_take),
       .wq_valid       (wq_valid),
       .wq_addr        (wq_addr),
@@ -603,6 +610,7 @@ module rd68031_top #(
       .mmu_busy       (mmu_busy),
       .mmu_sts        (mmu_sts),
       .tw_valid       (tw_valid),
+      .tw_want        (tw_want),
       .tw_addr        (tw_addr),
       .tw_wr          (tw_wr),
       .tw_wdata       (tw_wdata),
@@ -699,6 +707,8 @@ module rd68031_top #(
       .l1_pb          (l1_pb),
       .l1_ci          (l1_ci),
       .l_mask         (l_mask),
+      .l_tc_on        (l_tc_on),
+      .l_tt_on        (l_tt_on),
       .l_take         (l_take),
       .wq_valid       (wq_valid),
       .wq_addr        (wq_addr),
@@ -706,6 +716,7 @@ module rd68031_top #(
       .wq_wr          (wq_wr),
       .w_sts          (mmu_sts),
       .tw_valid       (tw_valid),
+      .tw_want        (tw_want),
       .tw_addr        (tw_addr),
       .tw_wr          (tw_wr),
       .tw_wdata       (tw_wdata),

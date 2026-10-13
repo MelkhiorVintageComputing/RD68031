@@ -91,7 +91,12 @@ lands on; this is the side that can never leave stale data behind.
 "The assertion of CDIS disables the caches, regardless of the state of the
 enable bits in CACR." Synchronised like the other asynchronous inputs and ANDed
 into both enables, so it does exactly what clearing EI and ED does: no lookup,
-no fill, nothing flushed -- the entries are back when it is negated.
+no fill, nothing flushed -- the entries are back when it is negated. Since M15
+phase B it is taken once more on a rising edge after the two falling-edge
+ranks, so the caches see it half a clock later than before: the data cache's
+lookup feeds the ATC's address and the decision to start a cycle, and from a
+falling-edge flop that chain had half a clock (`doc/size-and-speed.md`). The
+manual gives CDIS no latency (UM 5.11.1, 6.1).
 
 ---
 

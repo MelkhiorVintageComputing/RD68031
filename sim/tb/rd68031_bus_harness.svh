@@ -174,7 +174,8 @@ wire        mmu_ci = dut.take_fetch ? fetch_ciout : req_ciout;
 
 rd68031_biu dut (
     .clk (clk), .rst_n (rst_n),
-    .req_valid (req_valid), .req_kind (req_kind), .req_fc (req_fc),
+    .req_valid (req_valid), .req_want (pending),
+    .req_kind (req_kind), .req_fc (req_fc),
     .req_addr (req_addr), .req_bytes (req_bytes), .req_wdata (req_wdata),
     .req_rmc (req_rmc), .req_cpuspace (req_cpuspace), .req_cpuaddr (req_cpuaddr),
     .req_cpfault (req_cpfault), .req_cpuraw (1'b0),
@@ -201,9 +202,12 @@ rd68031_biu dut (
     .l1_kind (2'b00),
     .l1_pb (mmu_l1_addr & 32'hFFFF_FF00),
     .l1_ci (mmu_ci), .l_mask (32'h0000_00FF), .l_take (),
+    // No translation enabled: an operand's later page is its own address,
+    // and needs no lookup (rd68031_biu, M15 phase B).
+    .l_tc_on (1'b0), .l_tt_on (1'b0),
     .wq_valid (), .wq_addr (), .wq_fc (), .wq_wr (),
     .mmu_busy (1'b0), .mmu_sts (1'b0),
-    .tw_valid (1'b0), .tw_addr (32'd0), .tw_wr (1'b0), .tw_wdata (32'd0),
+    .tw_valid (1'b0), .tw_want (1'b0), .tw_addr (32'd0), .tw_wr (1'b0), .tw_wdata (32'd0),
     .tw_ack (), .tw_last (), .tw_rdata (), .tw_berr (),
     .beat_valid (beat_valid), .beat_err (beat_err), .beat_data (beat_data),
     .beat_addr (beat_addr), .beat_num (beat_num), .beat_port (beat_port),

@@ -427,7 +427,9 @@
     expect_cir(1'b0, R_OPND, 4, 32'hBCBD_BEBF, "data cache: (A2)+12");
     expect_cir(1'b1, R_RESP, 2, 32'h0802, "data cache");
     expect_end("data cache");
-    check(mem_cbreq > 0, "data cache: memory reads asked for bursts -- DBE is on");
+    // ... unless the data cache is built out (`make cache`), when nothing asks.
+    check((`TB_DCACHE_ENTRIES == 0) || (mem_cbreq > 0),
+          "data cache: memory reads asked for bursts -- DBE is on");
     check(cir_ticks > 0 && cir_cbreq == 0 && cp.cbreq_seen == 0,
           "data cache: no CIR cycle asked for a burst -- UM 10.1.4.3");
 

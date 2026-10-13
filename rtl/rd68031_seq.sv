@@ -36,6 +36,7 @@ module rd68031_seq #(
 
     // Operand request to the bus unit ----------------------------------------
     output logic        req_valid,
+    output logic        req_want,     // req_valid but for req_last
     output logic  [2:0] req_kind,
     output logic  [2:0] req_fc,
     output logic [31:0] req_addr,
@@ -2335,7 +2336,12 @@ module rd68031_seq #(
   // more clock after the operand completes, with req_last back low: without the
   // second term the same read runs twice, which is how the reset vectors came
   // back as the stack pointer twice over.
-  assign req_valid    = bus_req && !other_stall && !req_last
+  assign req_valid    = req_want && !req_last;
+  // ... and the request without the req_last term, for the bus unit's ATC
+  // lookup, which must not wait for the operand under way to finish (M15
+  // phase B): while this sequencer's own operand is under way, the request it
+  // presents is that operand, and the bus unit looks up something else.
+  assign req_want     = bus_req && !other_stall
                      && !(req_ack && !early_q) && !post_own
                      // A posted write's fault is reported while some other
                      // microword is presented, and that one is about to be

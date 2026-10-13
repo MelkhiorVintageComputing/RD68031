@@ -483,6 +483,8 @@ EXEMPT = [
                             'still read as the instruction\'s own -- UM 7.8'),
     ('biu', 'crst_q',       'the RESET pin is resetting the processor -- UM 7.8, '
                             '8.1.1. Nothing survives it to be restored'),
+    ('biu', 'crst_nq',      '... the same, on the falling edge, for the falling-'
+                            'edge registers (M15 phase B)'),
 
     # The live operand. What a fault frame carries is the SNAPSHOT above, taken
     # on the clock the fault is reported, because the frame is built by bus
@@ -799,10 +801,10 @@ EXEMPT = [
     ('divider', 'sr',       '... and the remainder'),
     ('divider', 'ovf_q',    'the quotient will not fit'),
     ('divider', 'dz_q',     'the divisor was zero'),
-    ('divider', 'mag_num',  'the dividend, unsigned'),
-    ('divider', 'mag_den',  '... and the divisor'),
 
     ('sync',     'q',       'a synchroniser is not state, it is a pipe'),
+    ('biu',      'cdis_sync_n', 'CDIS, synchronised and taken once more on a '
+                            'rising edge (M15 phase B): a pipe, as above'),
     ('sync',     'rank0',   'likewise'),
     ('dedge_ff', 'half_p',  'half of a both-edge cell'),
     ('dedge_ff', 'half_n',  '... and the other half'),

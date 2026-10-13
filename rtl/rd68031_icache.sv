@@ -92,7 +92,10 @@ module rd68031_icache (
   // asynchronously reset block makes yosys stage the index and a lookahead copy
   // in registers of their own, dead flops that `make audit` counts.
   // --------------------------------------------------------------------------
-  wire  [TW*16-1:0] tags;      // one register per line, below
+  // ... read through an unpacked array: an indexed part-select of a packed
+  // vector (`tags[line*TW +: TW]`) has Quartus multiply the index by TW in a
+  // DSP block ahead of a shifter (M15).
+  wire  [TW-1:0]    tags [0:15];
   logic [TW-1:0]    ltag, ftag;
   logic [3:0]       lline, fline;
   logic [63:0]      valid_q;
@@ -105,7 +108,7 @@ module rd68031_icache (
   // The fill's line belongs to another address: the tag is replaced, and the
   // three other entries go with the old one.
   logic ftag_match;
-  assign ftag_match = (tags[fline*TW +: TW] == ftag);
+  assign ftag_match = (tags[fline] == ftag);
 
   genvar g;
   generate
@@ -115,7 +118,7 @@ module rd68031_icache (
         if (!rst_n)                                     tag_q <= '0;
         else if (fill && (fline == g) && !ftag_match)   tag_q <= ftag;
       end
-      assign tags[g*TW +: TW] = tag_q;
+      assign tags[g] = tag_q;
     end
   endgenerate
 
@@ -124,8 +127,8 @@ module rd68031_icache (
   // --------------------------------------------------------------------------
   logic       ltag_match;
   logic [3:0] lvalid;
-  assign ltag_match = (tags[lline*TW +: TW] == ltag);
-  assign lvalid     = valid_q[lline*4 +: 4];
+  assign ltag_match = (tags[lline] == ltag);
+  assign lvalid     = valid_q[{lline, 2'b00} +: 4];
   assign hit        = ltag_match && valid_q[la[5:0]];
   assign cold       = !ltag_match || (lvalid == 4'b0000);
 

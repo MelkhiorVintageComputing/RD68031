@@ -45,9 +45,7 @@ module rd68031_divider (
     output logic        q_neg
 );
 
-  // The magnitudes, and the signs to put back.
-  logic [63:0] mag_num;
-  logic [31:0] mag_den;
+  // The signs to put back.
   logic        sgn_num, sgn_den;
 
   assign sgn_num = is_signed & dividend[63];
@@ -84,11 +82,7 @@ module rd68031_divider (
       den_q   <= '0;
       ovf_q   <= 1'b0;
       dz_q    <= 1'b0;
-      mag_num <= '0;
-      mag_den <= '0;
     end else if (start) begin
-      mag_num <= num_abs;
-      mag_den <= den_abs;
       den_q   <= den_abs;
       sq      <= sgn_num ^ sgn_den;
       sr      <= sgn_num;
@@ -127,6 +121,6 @@ module rd68031_divider (
   assign remainder = sr ? (~acc[31:0] + 32'd1) : acc[31:0];
 
   logic unused_div;
-  assign unused_div = &{1'b1, mag_num, mag_den, acc[32]};
+  assign unused_div = &{1'b1, acc[32]};
 
 endmodule
