@@ -1,0 +1,9 @@
+# NetBSD/sun3 10.2 (sun3 and sun3x), for MAME's Sun-3/80 (M14 phase B): the
+# miniroot it is installed from and the sets installed. Fetched into
+# build/netbsd/dl/ and checked against the hash here, as Inputs/sw/MANIFEST.
+# One line each:
+#   <sha256>  <file name>  <URL>
+4b8311db979211eb0243bd0aa8ebc5403713a95e43db47d63ab0bd58c29782ea  netbsd-10.2-sun3-miniroot.fs.gz  https://ftp.netbsd.org/pub/NetBSD/NetBSD-10.2/sun3/installation/miniroot/miniroot.fs.gz
+17abd9303d015b91d8521623eb8a156d09dde01f9b780dd123981af9115bd588  netbsd-10.2-sun3-base.tgz  https://ftp.netbsd.org/pub/NetBSD/NetBSD-10.2/sun3/binary/sets/base.tgz
+86ddc83ec9459fe1a02853b77c022ca3e2925093710f41397af56da34f032273  netbsd-10.2-sun3-etc.tgz  https://ftp.netbsd.org/pub/NetBSD/NetBSD-10.2/sun3/binary/sets/etc.tgz
+7913518f06a340cf060905a578748ccf44336d05fc75788c22e77be4f01c8aa5  netbsd-10.2-sun3-kern-GENERIC3X.tgz  https://ftp.netbsd.org/pub/NetBSD/NetBSD-10.2/sun3/binary/sets/kern-GENERIC3X.tgz

@@ -1,0 +1,16 @@
+# NetBSD/sun3x 10.2 installed by hand from its miniroot (M14 phase B):
+# sim/mame/netbsd.sh install runs this on MAME's m68030 with its FPU. The
+# miniroot is in sd0b (sim/mame/mkdisk.py), the sets, one uncompressed tar,
+# at the start of sd1. The root file system goes to sd0a; boot blocks
+# as installboot(8) gives them for sun3.
+b sd(0,0,1) -s
+best effort\s*@@
+[#] @@newfs -O 1 /dev/rsd0a
+[#] @@mount /dev/sd0a /mnt
+[#] @@cd /mnt && tar xpf /dev/rsd1c && echo SETS-DONE
+[#] @@cd /mnt/dev && sh ./MAKEDEV all && echo MAKEDEV-DONE
+[#] @@printf '/dev/sd0a / ffs rw 1 1\n/dev/sd0b none swap sw 0 0\n' > /mnt/etc/fstab
+[#] @@printf 'rc_configured=YES\nhostname=rd68031\nsshd=NO\npostfix=NO\ncron=NO\ninetd=NO\nntpd=NO\nmakemandb=NO\nmakewhatis=NO\nvirecover=NO\nsavecore=NO\nrandom_seed=NO\nwscons=NO\n' >> /mnt/etc/rc.conf
+[#] @@cp /mnt/usr/mdec/ufsboot /mnt/ufsboot && cd / && installboot -v -m sun3 /dev/rsd0a /mnt/usr/mdec/bootxx /ufsboot && echo BOOT-DONE
+[#] @@cd / && umount /mnt && fsck -fy /dev/rsd0a && sync && echo ALL-DONE
+[#] @@halt

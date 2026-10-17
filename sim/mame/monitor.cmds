@@ -21,3 +21,14 @@ v 100000 100010 b
 v fefe0000 fefe0040 l
 # The function code the monitor's memory commands use.
 s
+# Open the page map entry of a PROM page: PTEST with an address register
+# (doc/m14-mismatches.md b1, compared since M14 phase B fixed MAME's PTEST).
+p fefe0000
+q
+# ... of the Ethernet controller's page, which the self-test maps through the
+# address PTEST gives (b2).
+p fef82000
+q
+# The interrupt stack pointer at the monitor's entry.
+r
+q

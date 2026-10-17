@@ -295,9 +295,22 @@ m68030's PTEST returning the translated address instead of the last descriptor's
 driver work before an OS boots -- LANCE and IOMMU, ESP DMA, the device interrupts and the
 level-5 clock, bus errors on unmapped addresses, a fixed RTC -- is estimated at five to
 eight working days in `doc/oracles.md`. The user chose to move to M15 before that
-work (phase B), so three things stay open for then: patching PTEST in the build copy
+work (phase B), so three things stayed open for then: patching PTEST in the build copy
 of MAME's m68030, replacing the dependency on RD68021's `tme-sun-eeprom` with an NVRAM
 generator of our own, and the driver work itself.
+
+**Status (M14, phase B):** all three are done (`doc/oracles.md`, "MAME"). The driver has
+the interrupt register with the level-5 clock, the device interrupts, the I/O Mapper,
+the ESP's DMA gate array, the LANCE, bus timeouts and a fixed clock; MAME's m68030's
+PTEST is fixed in our copy; `sim/mame/mk_nvram.py` makes the NVRAM. NetBSD's userland
+needs an FPU, so by the user's decision the core has **RD68884** beside it as its MC68881
+(`Inputs/ip/RD68884`), and the reference keeps its own. NetBSD/sun3x 10.2 installs and
+boots to multi-user on MAME's m68030 (`make netbsd-disk`, `netbsd-sun3x-m68030`), and
+on the core (`make netbsd-sun3x`), where every command's answer matches the m68030's
+after one core defect was fixed (an interrupt acknowledge for level 0 after RTE,
+`doc/bugs-found.md`). SunOS 4.1.1 on the 3/80 needs an install tape
+put together from sun3x pieces (the user's `~/Sun3_vs_Sun3x/sources/sunos/dl/sun3x`)
+and the sun3 sets: not done.
 
 **Status (M15, phase A):** measured, nothing optimised. All six front-ends accept the
 design; the M10 caches and M11 MMU met a vendor tool for the first time and Quartus

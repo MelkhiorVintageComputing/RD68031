@@ -3185,6 +3185,21 @@ module rd68031_seq #(
                   || ((upc != rd68031_ucode_pkg::ENTRY_CP_IRQ)
                       && (upc_nxt == rd68031_ucode_pkg::ENTRY_CP_IRQ));
 
+  // ... but RTE's RESUME into the entry point is not a recognition. A posted
+  // write's fault taken on the entry's first microword -- doc/checkpoint.md
+  // rule 9 -- leaves that microword as the frame's resume point, so RTE steps
+  // INTO the entry again, and the level being taken is the frame's, which the
+  // INT08 restore has already put back. UM 8.1.9 recognises the level once and
+  // the acknowledge carries that one: latching the pins here acknowledged
+  // whatever they said by the end of the bus error handler -- level 0 under
+  // NetBSD/sun3x, and vector 0 taken (doc/bugs-found.md). The level-7 edge is
+  // the same: it was consumed at the recognition, and a transition to 7 since
+  // then is for the next boundary to see. IPEND's hold, which the fault
+  // cleared, is re-armed: the acknowledge is upcoming again.
+  logic irq_recognise;
+  assign irq_recognise = irq_enter
+                      && (`UF(SEQ) != rd68031_ucode_pkg::U_SEQ_RESUME);
+
   // The level as it was at the last boundary, for the level-7 edge -- and at
   // every step into an interrupt, which is where a transition is CONSUMED. Two
   // of those steps retire no decode: leaving STOP, and the coprocessor's
@@ -3196,13 +3211,13 @@ module rd68031_seq #(
   always_ff @(posedge clk or negedge core_rst_n) begin
     if (!core_rst_n)                                        irq_prev_q <= 3'd0;
     else if ((retire && (`UF(SEQ) == rd68031_ucode_pkg::U_SEQ_DECODE))
-             || irq_enter)
+             || irq_recognise)
                                                        irq_prev_q <= irq_level;
   end
 
   always_ff @(posedge clk or negedge core_rst_n) begin
     if (!core_rst_n)          irq_taking_q <= 3'd0;
-    else if (irq_enter)  irq_taking_q <= irq_level;
+    else if (irq_recognise) irq_taking_q <= irq_level;
     // ... and put back by RTE: a posted write's fault may have been taken
     // between the dispatch and the acknowledge -- doc/checkpoint.md rule 9.
     else if (commit && (`UF(DST) == rd68031_ucode_pkg::U_DST_INT08))

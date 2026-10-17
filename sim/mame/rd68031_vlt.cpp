@@ -23,8 +23,10 @@
 //     reaches the core on the cycle in flight.
 //   - CPU space: an interrupt acknowledge asks the machine for the vector and
 //     ends with AVEC (an autovector), the vector on the data bus with DSACK,
-//     or BERR (spurious, UM 8.1.9); every other CPU-space cycle -- a breakpoint
-//     acknowledge, a coprocessor with none attached -- ends with BERR.
+//     or BERR (spurious, UM 8.1.9). A coprocessor cycle for CpID 1 is the
+//     FPU's (M14 phase B: RD68884 beside the core, sim/mame/rd68031_fpu.sv),
+//     and the agent leaves it alone; every other CPU-space cycle -- a
+//     breakpoint acknowledge, another coprocessor -- ends with BERR.
 //
 // A BOUNDARY is the core harness's: a microword that decodes retires without a
 // fault (`retire && at_decode && !fault_now`), sampled after the falling edge.
@@ -35,20 +37,25 @@
 
 #include "rd68031_vlt.h"
 
-#include "Vrd68031_top.h"
-#include "Vrd68031_top___024root.h"
+// The model is the core with RD68884 (sim/mame/rd68031_fpu.sv).
+#include "Vrd68031_fpu.h"
+#include "Vrd68031_fpu___024root.h"
 #include "verilated.h"
 
-#define SEQ(x) top->rootp->rd68031_top__DOT__u_seq__DOT__##x
-#define MMU(x) top->rootp->rd68031_top__DOT__u_mmu__DOT__##x
-#define IFU(x) top->rootp->rd68031_top__DOT__u_ifu__DOT__##x
+#include <cstdio>
+#include <cstdlib>
+
+typedef Vrd68031_fpu Vtop;
+#define SEQ(x) top->rootp->rd68031_fpu__DOT__u_cpu__DOT__u_seq__DOT__##x
+#define MMU(x) top->rootp->rd68031_fpu__DOT__u_cpu__DOT__u_mmu__DOT__##x
+#define IFU(x) top->rootp->rd68031_fpu__DOT__u_cpu__DOT__u_ifu__DOT__##x
 
 namespace {
 
 class Agent : public rd68031_vlt {
  public:
   explicit Agent(rd68031_vlt_bus *b) : bus(b) {
-    top = new Vrd68031_top{&ctx};
+    top = new Vtop{&ctx};
     top->clk = 0;
     top->rst_n = 0;
     top->d_i = 0;
@@ -66,6 +73,11 @@ class Agent : public rd68031_vlt {
     top->cdis_n_i = 1;
     top->mmudis_n_i = 1;
     top->eval();
+    // RD68031_TRACE=<hex logical PC>: keep the last RING boundaries and bus
+    // cycles, and print them to stderr, with TAIL more, once the core's PC
+    // first reaches that address (a debugging aid; costs nothing otherwise).
+    if (const char *t = getenv("RD68031_TRACE"))
+      trig = strtoul(t, nullptr, 16), tracing = true;
   }
   ~Agent() override {
     top->final();
@@ -86,12 +98,22 @@ class Agent : public rd68031_vlt {
   void set_ipl(int level) override {
     top->ipl_n_i = ~level & 7;
     ipl_chg = true;
+    if (tracing) note('I', unsigned(level), 0, 0);
   }
 
   bool clock() override {
     half(false);
     bool b = SEQ(retire) && SEQ(at_decode) && !SEQ(fault_now);
     half(true);
+    if (tracing) {
+      if (b) note('B', IFU(pc_d), SEQ(sr_q), (SEQ(sr_q) & 0x2000) ? SEQ(isp_q) : SEQ(usp_q));
+      if (!fired && IFU(pc_d) == trig) {
+        fired = true;
+        tail = 400;
+        fprintf(stderr, "rd68031: trace: PC %08x reached at clock %llu\n", trig,
+                (unsigned long long)nclk);
+      }
+    }
     return b;
   }
 
@@ -125,14 +147,41 @@ class Agent : public rd68031_vlt {
 
  private:
   VerilatedContext ctx;
-  Vrd68031_top *top;
+  Vtop *top;
   rd68031_vlt_bus *bus;
   uint64_t nclk = 0;
   unsigned waits = 0;
+
+  // The trace ring (RD68031_TRACE).
+  struct Ev { uint64_t clk; char k; uint32_t a, b, c; };
+  static const unsigned RING = 8192;
+  Ev ring[RING];
+  unsigned rpos = 0, rcount = 0, tail = 0;
+  bool tracing = false, fired = false;
+  uint32_t trig = 0;
+  void note(char k, uint32_t a, uint32_t b, uint32_t c) {
+    ring[rpos] = Ev{nclk, k, a, b, c};
+    rpos = (rpos + 1) % RING;
+    if (rcount < RING) rcount++;
+    if (fired && --tail == 0) {
+      for (unsigned i = 0; i < rcount; i++) {
+        const Ev &e = ring[(rpos + RING - rcount + i) % RING];
+        if (e.k == 'I')
+          fprintf(stderr, "T %llu I level=%u\n", (unsigned long long)e.clk, e.a);
+        else if (e.k == 'B')
+          fprintf(stderr, "T %llu B pc=%08x sr=%04x sp=%08x\n", (unsigned long long)e.clk, e.a, e.b, e.c);
+        else
+          fprintf(stderr, "T %llu %c a=%08x fc=%u siz=%u d=%08x\n", (unsigned long long)e.clk, e.k,
+                  e.a, e.b >> 4, e.b & 15, e.c);
+      }
+      fflush(stderr);
+      tracing = false;
+    }
+  }
   bool ipl_chg = false;
 
   // The cycle in flight.
-  enum Kind { MEM, IACK, CPUX };
+  enum Kind { MEM, IACK, CPUX, FPU };
   bool active = false, rd = true, done = false, answering = false;
   bool berr = false, avec = false, ciin = false;
   Kind kind = MEM;
@@ -159,13 +208,23 @@ class Agent : public rd68031_vlt {
       if (((addr >> 16) & 0xF) == 0xF) {
         kind = IACK;
         int v = bus->iack((addr >> 1) & 7);
+        if (tracing && !fired && (((addr >> 1) & 7) == 0 || v >= 0)) {
+          fired = true;
+          tail = 400;
+          fprintf(stderr, "rd68031: trace: interrupt acknowledge, level %u, answer %d, clock %llu\n",
+                  (addr >> 1) & 7, v, (unsigned long long)nclk);
+        }
         if (v == -1) avec = true;
         else if (v < 0) berr = true;
         else rdata = uint32_t(v & 0xFF) * 0x01010101u;  // whichever lane SIZ/A1:A0 pick
+      } else if (top->fpu_cs) {
+        kind = FPU;     // the FPU answers it
+        done = false;
       } else {
         kind = CPUX;
         berr = true;
       }
+      if (tracing) note('C', addr, unsigned(fc) << 4 | top->siz_o, rdata);
       return;
     }
     kind = MEM;
@@ -173,6 +232,7 @@ class Agent : public rd68031_vlt {
       ciin = !bus->cacheable(addr);
       rdata = bus->read(addr, fc, ciin ? mask : 0xFFFFFFFFu, &berr);
       done = true;
+      if (tracing) note(berr ? 'E' : 'R', addr, unsigned(fc) << 4 | top->siz_o, rdata);
     }
   }
 
@@ -195,6 +255,7 @@ class Agent : public rd68031_vlt {
     if (s && kind == MEM && !rd && !done && top->d_oe) {
       bus->write(addr, fc, top->d_o, mask, &berr);
       done = true;
+      if (tracing) note(berr ? 'X' : 'W', addr, unsigned(fc) << 4 | top->siz_o, top->d_o);
     }
     unsigned dsack = 3;
     bool b = true, av = true, ci = true;

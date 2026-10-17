@@ -24,9 +24,9 @@
 # Verilator build is -j4 at most.
 #
 # Knobs: JOBS (2 for mame, 4 for vlt), ICACHE_ENTRIES, DCACHE_ENTRIES (64).
-# The core is built without the coprocessor interface's FPU (COPROCESSOR=0):
-# MAME has no MC68882 to put on it, and the reference m68030 is run with its
-# own FPU off (sun3_80ref).
+# The core is built with its coprocessor interface (COPROCESSOR=1) and RD68884
+# (Inputs/ip/RD68884) as its MC68881, in one model (sim/mame/rd68031_fpu.sv);
+# the reference m68030 keeps MAME's own FPU, also a 68881 (sun3_80ref).
 set -u
 R=$(cd "$(dirname "$0")/../.." && pwd)
 HERE=$R/sim/mame
@@ -52,14 +52,17 @@ mame)
     for d in "$OUT"/debs/*.deb; do dpkg -x "$d" "$SDLPREFIX"; done
   fi
   [ -d "$OUT/src" ] || rsync -a --exclude .git "$R/Inputs/ref/mame/" "$OUT/src/"
-  # The driver and its list, patched from the pristine sources.
+  # The files sun3x.patch changes (patched.lst: the driver, its list, the
+  # m68030's MMU), patched from the pristine sources. sim/mame/mkpatch.sh makes
+  # the patch from an edited build copy.
   T=$(mktemp -d)
-  mkdir -p "$T/src/mame/sun"
-  cp "$R/Inputs/ref/mame/src/mame/mame.lst" "$T/src/mame/mame.lst"
-  cp "$R/Inputs/ref/mame/src/mame/sun/sun3x.cpp" "$T/src/mame/sun/sun3x.cpp"
+  for f in $(cat "$HERE/patched.lst"); do
+    mkdir -p "$T/$(dirname "$f")"; cp "$R/Inputs/ref/mame/$f" "$T/$f"
+  done
   (cd "$T" && patch -s -p1 < "$HERE/sun3x.patch") || { rm -rf "$T"; exit 1; }
-  install_if_changed "$T/src/mame/mame.lst" "$OUT/src/src/mame/mame.lst"
-  install_if_changed "$T/src/mame/sun/sun3x.cpp" "$OUT/src/src/mame/sun/sun3x.cpp"
+  for f in $(cat "$HERE/patched.lst"); do
+    install_if_changed "$T/$f" "$OUT/src/$f"
+  done
   rm -rf "$T"
   # The device, beside the driver: MAME's makedep picks up rd68031.cpp from
   # the driver's #include. rd68031_vlt.cpp is not copied: it is the shared
@@ -93,15 +96,22 @@ vlt)
   for m in sync dedge_ff shifter divider bitfield biu icache dcache ifu mmu_xl mmu seq top; do
     RTL="$RTL $R/rtl/rd68031_$m.sv"
   done
+  # RD68884 beside it, as its MC68881 (M14 phase B; sim/mame/rd68031_fpu.sv).
+  F=$R/Inputs/ip/RD68884/rtl
+  [ -f "$F/rd68884_top.sv" ] || { echo "build.sh: Inputs/ip/RD68884 is missing (git submodule update --init Inputs/ip/RD68884)" >&2; exit 1; }
+  FPU="$F/rd68884_pkg.sv $(ls "$F"/gen/*_pkg.sv) $(ls "$F"/gen/*.sv | grep -v _pkg.sv)"
+  for m in sync cu_decode biu regfile seq top; do
+    FPU="$FPU $F/rd68884_$m.sv"
+  done
   rm -f "$OUT/vlt/rd68031_vlt.so"
   # public.vlt is rd-virt's: the registers and the boundary signals.
   verilator --cc --exe --build --build-jobs "$JOBS" --threads 1 -O3 \
-    -Wno-fatal -Wno-lint -Wno-style --top-module rd68031_top \
-    -GCOPROCESSOR=0 -GICACHE_ENTRIES="${ICACHE_ENTRIES:-64}" \
-    -GDCACHE_ENTRIES="${DCACHE_ENTRIES:-64}" \
+    -Wno-fatal -Wno-lint -Wno-style --top-module rd68031_fpu \
+    -GICACHE_ENTRIES="${ICACHE_ENTRIES:-64}" -GDCACHE_ENTRIES="${DCACHE_ENTRIES:-64}" \
     --output-split 20000 --output-split-cfuncs 500 --Mdir "$OUT/vlt" -o rd68031_vlt.so \
     -CFLAGS "-O3 -fPIC -std=c++17 -I$HERE" -LDFLAGS "-shared -fPIC" \
-    "$R/rtl/rd68031.vlt" "$R/sim/virt/public.vlt" $RTL "$HERE/rd68031_vlt.cpp" \
+    "$R/rtl/rd68031.vlt" "$F/rd68884.vlt" "$R/sim/virt/public.vlt" $RTL $FPU \
+    "$HERE/rd68031_fpu.sv" "$HERE/rd68031_vlt.cpp" \
     > "$OUT/vlt.log" 2>&1 \
     || { grep -E "%Error|error:" "$OUT/vlt.log" | head -20; exit 1; }
   echo "built $OUT/vlt/rd68031_vlt.so"

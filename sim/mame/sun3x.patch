@@ -11,27 +11,41 @@
  @source:sun/sun4.cpp
 --- a/src/mame/sun/sun3x.cpp
 +++ b/src/mame/sun/sun3x.cpp
-@@ -132,6 +132,7 @@
+@@ -132,7 +132,9 @@
  #include "bus/nscsi/hd.h"
  #include "bus/nscsi/tape.h"
  #include "cpu/m68000/m68030.h"
 +#include "rd68031.h"
  #include "imagedev/floppy.h"
++#include "machine/am79c90.h"
  #include "machine/icm7170.h"
  #include "machine/ncr53c90.h"
-@@ -178,6 +179,10 @@
+ #include "machine/timekpr.h"
+@@ -170,6 +172,8 @@
+ 		m_scc1(*this, SCC1_TAG),
+ 		m_scc2(*this, SCC2_TAG),
+ 		m_esp(*this, "esp"),
++		m_lance(*this, "lance"),
++		m_timekpr(*this, TIMEKEEPER_TAG),
+ 		m_fdc(*this, FDC_TAG),
+ 		m_floppy_connector(*this, FLOPPY_CONN_TAG),
+ 		m_p_ram(*this, "p_ram"),
+@@ -178,15 +182,24 @@
  
  	void sun3_80(machine_config &config);
  	void sun3_460(machine_config &config);
-+	// RD68031 (M14): the Sun-3/80 with MAME's m68030 and no FPU, the
-+	// reference, and with the RD68031 core in its place.
++	// RD68031 (M14): the Sun-3/80 with MAME's m68030 (and its FPU), the
++	// reference, and with the RD68031 core and RD68884 in its place.
 +	void sun3_80ref(machine_config &config);
 +	void sun3_80rd(machine_config &config);
  
  private:
  	required_device<cpu_device> m_maincpu;
-@@ -186,7 +191,10 @@
+ 	required_device<z80scc_device> m_scc1;
+ 	required_device<z80scc_device> m_scc2;
  	optional_device<ncr53c90_device> m_esp;
++	optional_device<am79c90_device> m_lance;
++	optional_device<timekeeper_device> m_timekpr;
  	optional_device<n82077aa_device> m_fdc;
  	optional_device<floppy_connector> m_floppy_connector;
 +	virtual void machine_start() override ATTR_COLD;
@@ -41,7 +55,85 @@
  
  	required_shared_ptr<uint32_t> m_p_ram;
  	optional_shared_ptr<uint32_t> m_bw2_vram;
-@@ -354,13 +362,25 @@
+@@ -225,13 +238,57 @@
+ 	uint32_t m_enable = 0, m_buserr = 0, m_diag = 0, m_printer = 0, m_irqctrl = 0, m_memreg = 0, m_memerraddr = 0;
+ 	uint32_t m_iommu[0x800]{};
+ 	bool m_bInBusErr = false;
++
++	// RD68031 (M14 phase B): what an OS needs of the 3/80 beyond the PROM.
++	// Interrupts (levels as SunOS 4.1.1 has them): 1-3 the soft bits of the
++	// interrupt register, 2 also the ESP's DMA gate array, 3 also the LANCE,
++	// 5 the 100 Hz clock, 6 both SCCs. Every device level is gated by the
++	// register's master enable. Level 7 is left as phase A had it.
++	void update_irqs();
++	TIMER_DEVICE_CALLBACK_MEMBER(sun380_clk5);
++	template <int N> void scc_int(int state) { m_scc_irq[N] = state; update_irqs(); }
++	void lance_int(int state) { m_lance_irq = !state; update_irqs(); }  // INTR is active low
++	bool m_scc_irq[2]{};
++	bool m_lance_irq = false;
++	bool m_clk5_pend = false;
++
++	// DVMA: a 24-bit address through the I/O Mapper (2048 entries of 8 KB at
++	// 0x60000000) to a physical one.
++	bool dvma_xlate(uint32_t dvma, uint32_t &pa);
++	uint32_t dvma_r32(uint32_t dvma);
++	void dvma_w32(uint32_t dvma, uint32_t data, uint32_t mem_mask);
++
++	// The ESP's DMA gate array at 0x66001000: the sun4c "DMA" programming
++	// model, device ID 0 in bits 31..28 -- NetBSD: "the Sun3/80 used only
++	// the old rev zero chip" (it panics on anything but 0 or 1).
++	uint32_t dma_csr_r();
++	void dma_csr_w(offs_t offset, uint32_t data, uint32_t mem_mask = ~0);
++	uint32_t dma_addr_r() { return m_dma_addr; }
++	void dma_addr_w(offs_t offset, uint32_t data, uint32_t mem_mask = ~0) { COMBINE_DATA(&m_dma_addr); }
++	uint32_t dma_count_r() { return m_dma_count; }
++	void dma_count_w(offs_t offset, uint32_t data, uint32_t mem_mask = ~0) { COMBINE_DATA(&m_dma_count); }
++	void dma_check_interrupts();
++	void dma_transfer();
++	void scsi_irq(int state);
++	void scsi_drq(int state);
++	uint32_t m_dma_csr = 0, m_dma_addr = 0, m_dma_count = 0, m_dma_pack = 0;
++	bool m_dma_irq = false, m_dma_tc_read = false, m_scsi_irq = false;
++
++	// A cycle no device answers: the timeout bus error (bus error register
++	// bit 5, TIMEOUT).
++	uint32_t timeout_r(offs_t offset);
++	void timeout_w(offs_t offset, uint32_t data, uint32_t mem_mask = ~0);
+ };
+ 
+ void sun3x_state::sun3_80_mem(address_map &map)
+ {
++	// RD68031: everything no device answers times out, first so that every
++	// entry below takes precedence over it.
++	map(0x04000000, 0xffffffff).rw(FUNC(sun3x_state::timeout_r), FUNC(sun3x_state::timeout_w));
+ 	map(0x00000000, 0x03ffffff).ram().share("p_ram").w(FUNC(sun3x_state::ramwrite_w));
+ 	map(0x40000000, 0x40000003).rw(FUNC(sun3x_state::cause_buserr_r), FUNC(sun3x_state::cause_buserr_w));
+ 	map(0x50300000, 0x50300003).r(FUNC(sun3x_state::p4id_r));
++	map(0x50300000, 0x50300003).nopw(); // RD68031: the P4 type code is read-only
+ 	map(0x50400000, 0x504fffff).ram().share(m_bw2_vram);
+ 	map(0x60000000, 0x60001fff).rw(FUNC(sun3x_state::iommu_r), FUNC(sun3x_state::iommu_w));
+ 	map(0x61000000, 0x61000003).rw(FUNC(sun3x_state::enable_r), FUNC(sun3x_state::enable_w));
+@@ -244,9 +301,19 @@
+ 	map(0x62002000, 0x6200200f).rw(m_scc2, FUNC(z80scc_device::ab_dc_r), FUNC(z80scc_device::ab_dc_w)).umask32(0xff00ff00);
+ 	map(0x63000000, 0x6301ffff).rom().region("user1", 0);
+ 	map(0x64000000, 0x640007ff).rw(TIMEKEEPER_TAG, FUNC(timekeeper_device::read), FUNC(timekeeper_device::write));
++	map(0x65002000, 0x65002003).rw(m_lance, FUNC(am79c90_device::regs_r), FUNC(am79c90_device::regs_w));
++	map(0x66000000, 0x6600003f).noprw(); // RD68031: the ESP's unreadable registers still answer
+ 	map(0x66000000, 0x6600003f).m(m_esp, FUNC(ncr53c90_device::map)).umask32(0xff000000);
++	map(0x66001000, 0x66001003).rw(FUNC(sun3x_state::dma_csr_r), FUNC(sun3x_state::dma_csr_w));
++	map(0x66001004, 0x66001007).rw(FUNC(sun3x_state::dma_addr_r), FUNC(sun3x_state::dma_addr_w));
++	map(0x66001008, 0x6600100b).rw(FUNC(sun3x_state::dma_count_r), FUNC(sun3x_state::dma_count_w));
+ 	map(0x6e000000, 0x6e000007).m(m_fdc, FUNC(n82077aa_device::map));
+ 	map(0x6e000400, 0x6e000403).rw(FUNC(sun3x_state::fdc_control_r), FUNC(sun3x_state::fdc_control_w));
++	// RD68031: the floppy's interrupt vector register (written, not used:
++	// every level is autovectored here)
++	map(0x6e000800, 0x6e000803).ram();
++	// RD68031: the parallel port's other registers (+0x30, +0x3e) answer
++	map(0x6f000000, 0x6f00003b).noprw();
+ 	map(0x6f00003c, 0x6f00003f).rw(FUNC(sun3x_state::printer_r), FUNC(sun3x_state::printer_w));
+ 	map(0xfefe0000, 0xfefeffff).rom().region("user1", 0);
+ }
+@@ -354,13 +421,25 @@
  		}
  
  		m_bInBusErr = true; // prevent recursion
@@ -69,7 +161,243 @@
  uint32_t sun3x_state::enable_r()
  {
  	return m_enable;
-@@ -494,24 +514,21 @@
+@@ -417,35 +496,216 @@
+ //  printf("sun3x: %08x to interrupt control (mask %08x)\n", data, mem_mask);
+ 	COMBINE_DATA(&m_irqctrl);
+ 
+-	if (data & 0x01000000)
++	// RD68031: a tick is acknowledged by clearing its enable bit (and set
++	// again to have the next one). The soft levels follow their bits.
++	if (!(m_irqctrl & 0x20000000))
++		m_clk5_pend = false;
++	if (!(m_irqctrl & 0x01000000) || !(m_irqctrl & 0x80000000))
++		m_maincpu->set_input_line(M68K_IRQ_7, CLEAR_LINE);
++	update_irqs();
++}
++
++void sun3x_state::update_irqs()
++{
++	const bool en = m_irqctrl & 0x01000000;
++	m_maincpu->set_input_line(M68K_IRQ_1, (en && (m_irqctrl & 0x02000000)) ? ASSERT_LINE : CLEAR_LINE);
++	m_maincpu->set_input_line(M68K_IRQ_2, (en && ((m_irqctrl & 0x04000000) || m_dma_irq)) ? ASSERT_LINE : CLEAR_LINE);
++	m_maincpu->set_input_line(M68K_IRQ_3, (en && ((m_irqctrl & 0x08000000) || m_lance_irq)) ? ASSERT_LINE : CLEAR_LINE);
++	m_maincpu->set_input_line(M68K_IRQ_4, CLEAR_LINE);
++	m_maincpu->set_input_line(M68K_IRQ_5, (en && m_clk5_pend) ? ASSERT_LINE : CLEAR_LINE);
++	m_maincpu->set_input_line(M68K_IRQ_6, (en && (m_scc_irq[0] || m_scc_irq[1])) ? ASSERT_LINE : CLEAR_LINE);
++}
++
++TIMER_DEVICE_CALLBACK_MEMBER(sun3x_state::sun380_clk5)
++{
++	if ((m_irqctrl & 0x21000000) == 0x21000000 && !m_clk5_pend)
+ 	{
+-		if (data & 0x02000000)
+-		{
+-			m_maincpu->set_input_line(M68K_IRQ_1, ASSERT_LINE);
+-		}
+-		if (data & 0x04000000)
++		m_clk5_pend = true;
++		update_irqs();
++	}
++}
++
++// ---------------------------------------------------------------------------
++// RD68031: DVMA through the I/O Mapper.
++
++bool sun3x_state::dvma_xlate(uint32_t dvma, uint32_t &pa)
++{
++	const uint32_t pte = m_iommu[(dvma >> 13) & 0x7ff];
++	if ((pte & 3) != 1)
++	{
++		logerror("DVMA %06x: invalid I/O Mapper entry %08x\n", dvma & 0xffffff, pte);
++		return false;
++	}
++	pa = (pte & 0x03ffe000) | (dvma & 0x1fff);
++	return true;
++}
++
++uint32_t sun3x_state::dvma_r32(uint32_t dvma)
++{
++	uint32_t pa;
++	if (!dvma_xlate(dvma, pa))
++		return 0xffffffff;
++	return m_maincpu->space(AS_PROGRAM).read_dword(pa & ~3);
++}
++
++void sun3x_state::dvma_w32(uint32_t dvma, uint32_t data, uint32_t mem_mask)
++{
++	uint32_t pa;
++	if (!dvma_xlate(dvma, pa))
++		return;
++	m_maincpu->space(AS_PROGRAM).write_dword(pa & ~3, data, mem_mask);
++}
++
++// ---------------------------------------------------------------------------
++// RD68031: the ESP's DMA gate array, after MAME's sun4c DMA (sun4.cpp).
++
++namespace {
++constexpr uint32_t DMA_DEV_ID    = 0x00000000; // rev 0
++constexpr uint32_t DMA_TC        = 0x00004000;
++constexpr uint32_t DMA_EN_CNT    = 0x00002000;
++constexpr uint32_t DMA_REQ_PEND  = 0x00000400;
++constexpr uint32_t DMA_EN_DMA    = 0x00000200;
++constexpr uint32_t DMA_WRITE     = 0x00000100;
++constexpr uint32_t DMA_RESET     = 0x00000080;
++constexpr uint32_t DMA_DRAIN     = 0x00000040;
++constexpr uint32_t DMA_FLUSH     = 0x00000020;
++constexpr uint32_t DMA_INT_EN    = 0x00000010;
++constexpr uint32_t DMA_PACK_CNT  = 0x0000000c;
++constexpr uint32_t DMA_ERR_PEND  = 0x00000002;
++constexpr uint32_t DMA_INT_PEND  = 0x00000001;
++constexpr uint32_t DMA_RW_BITS   = DMA_EN_CNT | DMA_EN_DMA | DMA_WRITE | DMA_RESET | DMA_DRAIN | DMA_INT_EN;
++}
++
++void sun3x_state::dma_check_interrupts()
++{
++	const bool tc = (m_dma_csr & DMA_TC) && !m_dma_tc_read;
++	m_dma_csr &= ~DMA_INT_PEND;
++	if (tc || m_scsi_irq)
++		m_dma_csr |= DMA_INT_PEND;
++	const bool irq = (m_dma_csr & (DMA_INT_PEND | DMA_ERR_PEND)) && (m_dma_csr & DMA_INT_EN);
++	if (irq != m_dma_irq)
++	{
++		m_dma_irq = irq;
++		update_irqs();
++	}
++}
++
++void sun3x_state::dma_transfer()
++{
++	if (m_dma_csr & DMA_WRITE)
++	{
++		// device to memory, each byte into its own lane: a buffer need not
++		// start on a long word (the chip's pack register only batches
++		// these writes, which nothing here can tell)
++		while (m_dma_csr & DMA_REQ_PEND)
+ 		{
+-			m_maincpu->set_input_line(M68K_IRQ_2, ASSERT_LINE);
++			const uint8_t v = m_esp->dma_r();
++			const int shift = (3 - (m_dma_addr & 3)) * 8;
++			dvma_w32(m_dma_addr, uint32_t(v) << shift, 0xffu << shift);
++			m_dma_addr = (m_dma_addr & 0xff000000) | ((m_dma_addr + 1) & 0x00ffffff);
++			if (m_dma_csr & DMA_EN_CNT)
++				m_dma_count--;
+ 		}
+-		if (data & 0x08000000)
++		m_dma_csr &= ~DMA_PACK_CNT;
++	}
++	else
++	{
++		// memory to device, a byte at a time
++		while (m_dma_csr & DMA_REQ_PEND)
+ 		{
+-			m_maincpu->set_input_line(M68K_IRQ_3, ASSERT_LINE);
++			const uint32_t w = dvma_r32(m_dma_addr);
++			m_esp->dma_w(uint8_t(w >> ((3 - (m_dma_addr & 3)) * 8)));
++			m_dma_addr = (m_dma_addr & 0xff000000) | ((m_dma_addr + 1) & 0x00ffffff);
++			if (m_dma_csr & DMA_EN_CNT)
++				m_dma_count--;
+ 		}
+-		if (!(data & 0x80000000))
++	}
++	if (m_dma_count == 0 && (m_dma_csr & DMA_EN_CNT))
++	{
++		m_dma_csr |= DMA_TC;
++		m_dma_tc_read = false;
++		dma_check_interrupts();
++	}
++}
++
++uint32_t sun3x_state::dma_csr_r()
++{
++	if (m_dma_csr & DMA_TC)
++	{
++		m_dma_tc_read = true;
++		dma_check_interrupts();
++	}
++	return (m_dma_csr & ~(DMA_FLUSH | 0x1800)) | DMA_DEV_ID;
++}
++
++void sun3x_state::dma_csr_w(offs_t offset, uint32_t data, uint32_t mem_mask)
++{
++	mem_mask &= DMA_RW_BITS;
++	COMBINE_DATA(&m_dma_csr);
++	if (data & DMA_RESET)
++		m_dma_csr &= ~(DMA_ERR_PEND | DMA_PACK_CNT | DMA_INT_EN | DMA_DRAIN | DMA_WRITE | DMA_EN_DMA | DMA_REQ_PEND | DMA_EN_CNT | DMA_TC);
++	else if (data & DMA_FLUSH)
++	{
++		m_dma_csr &= ~(DMA_PACK_CNT | DMA_ERR_PEND | DMA_TC);
++		m_dma_pack = 0;
++	}
++	else if (data & DMA_DRAIN)
++	{
++		static constexpr uint32_t lane[4] = { 0xff000000, 0x00ff0000, 0x0000ff00, 0x000000ff };
++		m_dma_csr &= ~DMA_DRAIN;
++		const uint32_t pack_cnt = (m_dma_csr & DMA_PACK_CNT) >> 2;
++		for (uint32_t i = 0; i < pack_cnt; i++)
+ 		{
+-			m_maincpu->set_input_line(M68K_IRQ_7, CLEAR_LINE);
++			dvma_w32(m_dma_addr, m_dma_pack, lane[i]);
++			m_dma_addr = (m_dma_addr & 0xff000000) | ((m_dma_addr + 1) & 0x00ffffff);
+ 		}
++		m_dma_pack = 0;
++		m_dma_csr &= ~DMA_PACK_CNT;
+ 	}
+-	else    // master enable clear, clear all interrupts
++	dma_check_interrupts();
++	if ((m_dma_csr & DMA_EN_DMA) && (m_dma_csr & DMA_REQ_PEND))
++		dma_transfer();
++}
++
++void sun3x_state::scsi_irq(int state)
++{
++	if (bool(state) != m_scsi_irq)
+ 	{
+-		m_maincpu->set_input_line(M68K_IRQ_1, CLEAR_LINE);
+-		m_maincpu->set_input_line(M68K_IRQ_2, CLEAR_LINE);
+-		m_maincpu->set_input_line(M68K_IRQ_3, CLEAR_LINE);
+-		m_maincpu->set_input_line(M68K_IRQ_4, CLEAR_LINE);
+-		m_maincpu->set_input_line(M68K_IRQ_5, CLEAR_LINE);
+-		m_maincpu->set_input_line(M68K_IRQ_6, CLEAR_LINE);
+-		m_maincpu->set_input_line(M68K_IRQ_7, CLEAR_LINE);
++		m_scsi_irq = state;
++		dma_check_interrupts();
++	}
++}
++
++void sun3x_state::scsi_drq(int state)
++{
++	m_dma_csr &= ~DMA_REQ_PEND;
++	if (state)
++	{
++		m_dma_csr |= DMA_REQ_PEND;
++		if (m_dma_csr & DMA_EN_DMA)
++			dma_transfer();
++	}
++}
++
++// ---------------------------------------------------------------------------
++// RD68031: the bus timeout.
++
++uint32_t sun3x_state::timeout_r(offs_t offset)
++{
++	if (!machine().side_effects_disabled())
++	{
++		logerror("bus timeout: read %08x (PC %08x)\n", 0x04000000 + offset * 4, m_maincpu->pc());
++		m_buserr |= 0x20000000;
++		bus_error();
+ 	}
++	return 0xffffffff;
++}
++
++void sun3x_state::timeout_w(offs_t offset, uint32_t data, uint32_t mem_mask)
++{
++	logerror("bus timeout: write %08x (PC %08x)\n", 0x04000000 + offset * 4, m_maincpu->pc());
++	m_buserr |= 0x20000000;
++	bus_error();
+ }
+ 
+ uint32_t sun3x_state::memreg_r()
+@@ -494,24 +754,21 @@
  uint32_t sun3x_state::fpa_r()
  {
  	m_buserr |= 0x04000000;
@@ -97,7 +425,7 @@
  }
  
  TIMER_DEVICE_CALLBACK_MEMBER(sun3x_state::sun380_timer)
-@@ -554,6 +571,11 @@
+@@ -554,6 +811,11 @@
  INPUT_PORTS_END
  
  
@@ -109,16 +437,91 @@
  void sun3x_state::machine_reset()
  {
  	uint8_t* user1 = memregion("user1")->base();
-@@ -644,6 +666,27 @@
+@@ -570,6 +832,18 @@
+ 	m_memreg = 0;
+ 	m_memerraddr = 0;
+ 	m_bInBusErr = false;
++
++	// RD68031
++	m_clk5_pend = false;
++	m_dma_csr = m_dma_addr = m_dma_count = m_dma_pack = 0;
++	m_dma_irq = m_dma_tc_read = false;
++	update_irqs();
++	// A fixed time of day, so that two runs see the same clock: Friday 1
++	// January 1993, 00:00:00. It then counts in emulated time. The Sun
++	// kernels (NetBSD's and SunOS's) count the chip's two-digit year from
++	// 1968, so 1993 is written as 25.
++	if (m_timekpr)
++		m_timekpr->set_time(true, 2025, 1, 1, 6, 0, 0, 0);  // the register keeps 25
+ }
+ 
+ static void sun_floppies(device_slot_interface &device)
+@@ -601,6 +875,7 @@
+ 	SCC8530(config, m_scc1, 4.9152_MHz_XTAL);
+ 	m_scc1->out_txda_callback().set(KEYBOARD_TAG, FUNC(sun_keyboard_port_device::write_txd));
+ 	m_scc1->out_txdb_callback().set(MOUSE_TAG, FUNC(sun_mouse_port_device::write_txd));
++	m_scc1->out_int_callback().set(FUNC(sun3x_state::scc_int<0>));
+ 
+ 	SUNKBD_PORT(config, KEYBOARD_TAG, default_sun_keyboard_devices, "type3hle").rxd_handler().set(m_scc1, FUNC(z80scc_device::rxa_w));
+ 	SUNMOUSE_PORT(config, MOUSE_TAG, default_sun_mouse_devices, "hle1200").rxd_handler().set(m_scc1, FUNC(z80scc_device::rxb_w));
+@@ -608,6 +883,7 @@
+ 	SCC8530(config, m_scc2, 4.9152_MHz_XTAL);
+ 	m_scc2->out_txda_callback().set(RS232A_TAG, FUNC(rs232_port_device::write_txd));
+ 	m_scc2->out_txdb_callback().set(RS232B_TAG, FUNC(rs232_port_device::write_txd));
++	m_scc2->out_int_callback().set(FUNC(sun3x_state::scc_int<1>));
+ 
+ 	rs232_port_device &rs232a(RS232_PORT(config, RS232A_TAG, default_rs232_devices, nullptr));
+ 	rs232a.rxd_handler().set(m_scc2, FUNC(z80scc_device::rxa_w));
+@@ -619,6 +895,22 @@
+ 	rs232b.dcd_handler().set(m_scc2, FUNC(z80scc_device::dcdb_w));
+ 	rs232b.cts_handler().set(m_scc2, FUNC(z80scc_device::ctsb_w));
+ 
++	// RD68031: the LANCE, its DMA through the I/O Mapper, level 3.
++	AM79C90(config, m_lance, 10'000'000);
++	m_lance->intr_out().set(FUNC(sun3x_state::lance_int));
++	m_lance->dma_in().set([this](offs_t offset)
++	{
++		const uint32_t d = dvma_r32(offset);
++		return (offset & 2) ? u16(d) : u16(d >> 16);
++	});
++	m_lance->dma_out().set([this](offs_t offset, u16 data, u16 mem_mask)
++	{
++		if (offset & 2)
++			dvma_w32(offset, data, mem_mask);
++		else
++			dvma_w32(offset, uint32_t(data) << 16, uint32_t(mem_mask) << 16);
++	});
++
+ 	auto &scsi(NSCSI_BUS(config, "scsibus"));
+ 	NSCSI_CONNECTOR(config, "scsibus:0", scsi_devices, nullptr);
+ 	NSCSI_CONNECTOR(config, "scsibus:1", scsi_devices, "harddisk");
+@@ -630,12 +922,16 @@
+ 
+ 	NCR53C90(config, m_esp, 20000000/2);
+ 	scsi.set_external_device(7, m_esp);
++	m_esp->irq_handler_cb().set(FUNC(sun3x_state::scsi_irq));
++	m_esp->drq_handler_cb().set(FUNC(sun3x_state::scsi_drq));
+ 
+ 	N82077AA(config, m_fdc, 24000000, n82077aa_device::mode_t::PS2);
+ 	FLOPPY_CONNECTOR(config, "fdc:0", sun_floppies, "35hd", floppy_image_device::default_pc_floppy_formats);
+ 
+ 	// the timekeeper has no interrupt output, so 3/80 includes a dedicated timer circuit
+ 	TIMER(config, "timer").configure_periodic(FUNC(sun3x_state::sun380_timer), attotime::from_hz(100));
++	// RD68031: the same 100 Hz tick, gated to level 5.
++	TIMER(config, "timer5").configure_periodic(FUNC(sun3x_state::sun380_clk5), attotime::from_hz(100));
+ 
+ 	screen_device &bwtwo(SCREEN(config, "bwtwo"));
+ 	bwtwo.set_screen_update(FUNC(sun3x_state::bw2_update));
+@@ -644,6 +940,27 @@
  	bwtwo.set_refresh_hz(72);
  }
  
 +void sun3x_state::sun3_80ref(machine_config &config)
 +{
++	// Since M14 phase B the core has an MC68881 beside it (RD68884), so the
++	// reference keeps MAME's m68030 with its FPU, which presents a 68881: the
++	// machine is sun3_80 as MAME has it.
 +	sun3_80(config);
-+	// The core has no FPU: a coprocessor instruction takes the F-line
-+	// exception on both.
-+	downcast<m68030_device &>(*m_maincpu.lookup()).set_fpu_enable(false);
 +}
 +
 +void sun3x_state::sun3_80rd(machine_config &config)
@@ -137,7 +540,7 @@
  void sun3x_state::sun3_460(machine_config &config)
  {
  	/* basic machine hardware */
-@@ -695,6 +738,9 @@
+@@ -695,6 +1012,9 @@
  	ROM_LOAD( "timekpr_380.bin", 0x000000, 0x000800, CRC(e76f1aae) SHA1(8e7c36e3928887a94a8133e8416ee4126c31edd7) )
  ROM_END
  
@@ -147,10 +550,30 @@
  ROM_START( sun3_460 )
  	ROM_REGION32_BE( 0x20000, "user1", ROMREGION_ERASEFF )
  /*
-@@ -719,4 +765,6 @@
+@@ -719,4 +1039,6 @@
  
  //    YEAR  NAME      PARENT  COMPAT  MACHINE   INPUT  CLASS        INIT        COMPANY             FULLNAME             FLAGS
  COMP( 1989, sun3_80,  0,      0,      sun3_80,  sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/80",          MACHINE_NOT_WORKING | MACHINE_NO_SOUND ) // Hydra
-+COMP( 1989, sun3_80ref, sun3_80, 0,    sun3_80ref, sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/80 (m68030, no FPU; RD68031 reference)", MACHINE_NOT_WORKING | MACHINE_NO_SOUND )
-+COMP( 1989, sun3_80rd, sun3_80,  0,      sun3_80rd, sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/80 (RD68031 core)", MACHINE_NOT_WORKING | MACHINE_NO_SOUND )
++COMP( 1989, sun3_80ref, sun3_80, 0,    sun3_80ref, sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/80 (m68030; RD68031 reference)", MACHINE_NOT_WORKING | MACHINE_NO_SOUND )
++COMP( 1989, sun3_80rd, sun3_80,  0,      sun3_80rd, sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/80 (RD68031 core, RD68884 FPU)", MACHINE_NOT_WORKING | MACHINE_NO_SOUND )
  COMP( 1989, sun3_460, 0,      0,      sun3_460, sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/460/470/480", MACHINE_NOT_WORKING | MACHINE_NO_SOUND ) // Pegasus
+--- a/src/devices/cpu/m68000/m68kmmu.h
++++ b/src/devices/cpu/m68000/m68kmmu.h
+@@ -565,9 +565,15 @@
+ 
+ 	m_mmu_last_logical_addr = addr_in;
+ 
+-	if (pmmu_match_tt(addr_in, fc, m_mmu_tt0, rw) ||
++	// RD68031 (M14 phase B): PTEST with a level of 1 to 7 searches the
++	// tables whatever TTx and the function code say, and gives An the last
++	// descriptor's address (MC68030 UM 9.8); only an access, PLOAD and PTEST
++	// of the ATC (level 0) are transparent here. The Sun-3/80 PROM's PTEST #7
++	// relies on it.
++	if (!(ptest && limit > 0) &&
++		(pmmu_match_tt(addr_in, fc, m_mmu_tt0, rw) ||
+ 		pmmu_match_tt(addr_in, fc, m_mmu_tt1, rw) ||
+-		fc == 7)
++		fc == 7))
+ 	{
+ 		return addr_in;
+ 	}

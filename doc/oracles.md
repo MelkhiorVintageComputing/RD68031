@@ -444,9 +444,13 @@ its CRC and SHA1:
 - 2.9.2.
 
 **NVRAM.** MAME's NVRAM default (`timekpr_380.bin`) is not available. It is not needed:
-`sim/mame/mk_timekpr.py` makes one from a Sun EEPROM image built with RD68021's
-`tme-sun-eeprom`, from `sim/mame/eeprom.txt`. That image puts the console on ttya, which
-is what a comparison wants, and adds an IDPROM.
+`sim/mame/mk_nvram.py` makes one from `sim/mame/eeprom.txt`, in the Sun-3 monitor's
+EEPROM layout (until M14 phase B RD68021's TME `tme-sun-eeprom` made the EEPROM part;
+the two give the same bytes for that file), with an IDPROM: machine type $42, the 3/80
+(architecture $40, Sun-3x). The console is on ttya, which is what a comparison wants, and
+the boot device is SCSI target 5, where nothing is, so that the PROM stops at its prompt
+and each run types the boot command it wants. Until phase B the IDPROM said $47, which
+the PROM does not check and the kernels do ("unknown sun3x model").
 
 **M0 spike:**
 - **Build.** It builds and runs here, with SDL2 and GL development headers unpacked from
@@ -470,16 +474,9 @@ sd: Device not found.
 
 The monitor takes typed commands, such as `b ?`.
 
-**What M14 can and cannot compare.** The PROM, from self-test to monitor and the monitor
-commands, can be compared now. **No OS boots on this driver**, because it lacks:
-- the LANCE Ethernet;
-- the SCSI DMA engine and the SCSI and SCC interrupts;
-- the level-5 clock;
-- bus errors on unmapped addresses.
-
-Booting NetBSD/sun3x or SunOS 4.1.1 means adding those to our copy of the driver, in
-`sim/mame/`. MAME has an am79c90 to start the LANCE from. It is several days of work, and
-`doc/plan.md` M14 is sized accordingly.
+**What M14 can and cannot compare.** At M0 no OS booted on this driver: it lacked the
+LANCE, the SCSI DMA engine, the device interrupts, the level-5 clock and bus errors on
+unmapped addresses. M14 phase B added them to our copy (below, "The driver for an OS").
 
 **How the core plugs in (M14 phase A, built).**
 - `sim/mame/rd68031.{h,cpp}`: `rd68031_device`, a `cpu_device` copied by
@@ -506,8 +503,17 @@ Booting NetBSD/sun3x or SunOS 4.1.1 means adding those to our copy of the driver
 - **CPU space.** The interrupt acknowledge reads the vector from `AS_CPU_SPACE` (4) at
   $FFFFFFF1 | level << 1, as MAME's 68000 family does, after `standard_irq_callback`;
   an autovector there becomes AVEC on the pins, another value is put on the bus with
-  DSACK. The sun3x driver gives no CPU-space map, so every level is autovectored. Every
-  other CPU-space cycle (breakpoint, coprocessor) ends with BERR.
+  DSACK. The sun3x driver gives no CPU-space map, so every level is autovectored. A
+  coprocessor cycle for CpID 1 is the FPU's (below); every other CPU-space cycle
+  (breakpoint, another coprocessor) ends with BERR.
+- **The FPU** (M14 phase B). The core is built with its coprocessor interface
+  (`COPROCESSOR=1`) and **RD68884** (`Inputs/ip/RD68884`, the user's MC68881, a pinned
+  submodule) beside it, in one Verilator model, `sim/mame/rd68031_fpu.sv`, adapted from
+  RD68884's own RD68021 system: a 32-bit port, a chip select for CpID 1 from FC = 7,
+  A19-A16 = 2, A15-A13 = 1, DSACK wired with the board's, the FPU on the core's clock
+  (its same-clock BIU). It is the 68881 build because MAME's m68030 presents a 68881
+  (an FSAVE idle frame of $1F18), and the reference, `sun3_80ref`, keeps that FPU.
+  NetBSD's userland needs an FPU: its kernels have no FPU emulation.
 - **Interrupts.** Input lines 1-7 are the levels, the highest asserted on IPL2-0. The
   driver's 100 Hz NMI clears and reasserts level 7 at the same instant; the device holds
   the lower level on the pins for four clocks, so the core sees the new edge (UM 8.1.9).
@@ -518,7 +524,7 @@ Booting NetBSD/sun3x or SunOS 4.1.1 means adding those to our copy of the driver
 
 **Running it.** `make sun3x` (doc/m14-mismatches.md): the PROMs are copied from
 `Inputs/ref/PROMs/` into `build/mame/roms/` after a sha256 check, the NVRAM is made from
-`eeprom.txt` with RD68021's `tme-sun-eeprom` (`TME_EEPROM=`), and `sim/mame/run.sh`
+`eeprom.txt` by `sim/mame/mk_nvram.py`, and `sim/mame/run.sh`
 starts MAME with `-nothrottle -video none`, ttya on a `null_modem` socket, a fresh
 directory (so no NVRAM survives a run) and `sim/mame/control.lua`, which leaves MAME
 cleanly when the driver asks. `sim/mame/drive.py` (which replaces M0's `serlisten.py`)
@@ -536,17 +542,70 @@ address register with the translated address, not the last descriptor's**, and t
 relies on the latter, both in the monitor's `p` command and in mapping the Ethernet
 controller during its self-test (doc/m14-mismatches.md b1, b2).
 
+**PTEST, fixed in our copy (M14 phase B).** MAME's m68030 returned before searching the
+tables for a PTEST whose function code is 7 or that a TTx register matches, leaving An
+the logical address; at levels 1 to 7 PTEST searches the tables whatever TTx and FC say
+and gives An the last descriptor's address (UM 9.8), as the core does. `sun3x.patch`
+changes that one test in `m68kmmu.h` (`sim/mame/patched.lst` lists the files the patch
+touches). With it the monitor's `p` gives the core's answers on the m68030 too, and the
+PROM maps the LANCE's page on both.
+
 **Not authoritative for:**
-- PTEST with an address register (above). Anything the PROM does through it -- the
-  driver's comment's "bad '030 MMU mapping: L fef82000 -> P 00000000", and `b le()`'s bus
-  error with a physical address of 0, both noted at M0 -- comes from that, not from the
-  PROM's tables.
 - Bus errors: MAME's 68000 family takes the driver's bus-error pulse after the
   instruction in progress rather than on the cycle.
 - Clock counts.
 
-**The driver work for an OS boot, now estimated.** What the driver lacks, seen from the
-PROM run:
+**The driver for an OS (M14 phase B, built).** Our copy of `sun3x.cpp` (in
+`sun3x.patch`; the hardware from the user's Sun-3x reconstruction,
+`~/Sun3_vs_Sun3x/sun3x-architecture.md`, and the kernels' drivers) now has:
+- **the interrupt register** at $61001400 as Sun-3's: the master enable gating every
+  level, the soft levels 1-3 following their bits, a **level-5 clock** from the 100 Hz
+  tick, latched until its enable bit is cleared (how both kernels acknowledge it); level
+  7 as phase A had it;
+- **device interrupts** at SunOS's levels: ESP (through its DMA gate array) 2, LANCE 3,
+  both SCCs 6, all autovectored;
+- **the I/O Mapper**: a 24-bit DVMA address through the 2048 entries at $60000000 to a
+  physical one, for the LANCE's and the ESP's DMA;
+- **the ESP's DMA gate array** at $66001000, MAME's sun4c "DMA" programming model with
+  device ID 0 ("the Sun3/80 used only the old rev zero chip", NetBSD; it panics on other
+  IDs), each byte to its own lane (a buffer need not start on a long word);
+- **the LANCE** (MAME's am79c90) at $65002000, its rings and buffers through the I/O
+  Mapper; nothing on the network, so it reports no carrier;
+- **bus timeouts**: a cycle nothing answers (above main memory) ends with a bus error and
+  TIMEOUT in the bus error register; the registers that answer without a function in
+  MAME (the parallel port's, the ESP's unreadable ones, the floppy's vector register, a
+  write to the P4 register) are mapped so;
+- **a fixed time of day**, 1 January 1993, counted in emulated time (the Sun kernels
+  count the chip's year from 1968).
+
+**NetBSD/sun3x 10.2** (`Inputs/sw/MANIFEST-netbsd`; `make netbsd-disk`,
+`netbsd-sun3x-m68030`, `netbsd-sun3x`; `sim/mame/netbsd.sh`): a disk is made with a Sun
+label and NetBSD's miniroot in its swap partition (`sim/mame/mkdisk.py`), the miniroot
+booted on the m68030 and the system installed by hand from its shell
+(`sim/mame/netbsd-install.cmds`: newfs, the sets from a second disk, MAKEDEV,
+installboot); then the disk boots to multi-user, root logs in, and the commands of
+`sim/mame/netbsd-boot.cmds` are typed. The core is compared on the commands' answers
+(`sim/mame/answers.py`), not on the whole console, which shows timing.
+
+**Result (M14 phase B).** The install takes 6 minutes of wall time on the m68030, and
+the multi-user boot with the command set about 95 s. On the core, with RD68884, the
+same disk boots to multi-user, root logs in after about 9 minutes of emulated time
+(6.7 hours of wall time; 7 on the m68030, whose clock counts differ), and all
+eight commands -- the integer, `awk`/`bc` floating-point (RD68884), `md5` and `cksum`
+answers -- are the m68030's: 609 emulated s in 7.5 hours of wall time (0.0226 emulated s
+per wall s). Getting there found one core defect: RTE resuming an interrupt entry that a
+posted write's fault had interrupted acknowledged the level the pins then showed, not the
+recognised one -- level 0 once the device had dropped its request, and NetBSD took vector
+0 (`doc/bugs-found.md`; `core_irqrte_tb` holds it). A run differs from the last wherever
+typed input lands at another emulated time, so such a race may show in one run only.
+
+**Tracing the core in MAME.** `RD68031_TRACE=<hex PC>` keeps a ring of the core's last
+8192 instruction boundaries, bus cycles and interrupt-level changes, and prints it to
+MAME's output (`console.out.mame`) when the core's PC first reaches that address, or at
+any interrupt acknowledge for level 0 or one answered with a vector. It costs nothing
+when unset.
+
+What phase A estimated it would take, kept for the record:
 - the LANCE: MAME has an `am79c90`, to be mapped at $65002000 with its DMA through the
   IOMMU at $60000000, which the driver only stores today (no DVMA translation);
 - the ESP's DMA engine at $66001000 (the NCR53C90 is there, its DRQ and IRQ unwired);

@@ -59,7 +59,7 @@ VLT  := rtl/rd68031.vlt
 IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$(ICACHE_ENTRIES) \
            -DTB_DCACHE_ENTRIES=$(DCACHE_ENTRIES)
 
-.PHONY: sim-progs
+.PHONY: netbsd-disk netbsd-sun3x netbsd-sun3x-m68030 sim-progs
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl paths audit ucode ucode-check sim sim-bus \
         timing timing-verbose timing-build ea cache cycles cpif check clean \
@@ -107,6 +107,9 @@ help:
 	@echo "  make sun3x          the boot PROM to the monitor and a command set, on the core,"
 	@echo "                      console byte for byte against MAME's m68030 (SUN3X_BIOS=...)"
 	@echo "  make sun3x-m68030   ... MAME's m68030 alone"
+	@echo "  make netbsd-disk    NetBSD/sun3x 10.2 installed on a disk image, on MAME's m68030"
+	@echo "  make netbsd-sun3x-m68030  ... booted to multi-user there, commands typed"
+	@echo "  make netbsd-sun3x   ... and on the core with RD68884, answers compared (hours)"
 	@echo
 	@echo "Vendor tools, tens of minutes each:"
 	@echo "  make impl         Vivado place and route ($(XPART)), out of context"
@@ -856,8 +859,8 @@ virt-linux: $(VIRTBIN) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
 #
 # The PROMs are Sun firmware, supplied by the user and never committed:
 # Inputs/ref/PROMs/, checked against Inputs/sw/PROMS.sha256. The NVRAM image
-# (console on ttya) is made from sim/mame/eeprom.txt with RD68021's TME
-# tme-sun-eeprom (TME_EEPROM). Building MAME (-j2) and the core's shared
+# (console on ttya) is made from sim/mame/eeprom.txt by sim/mame/mk_nvram.py.
+# Building MAME (-j2) and the core's shared
 # object (Verilator, -j4) are heavy jobs: each runs alone (CLAUDE.md).
 # Neither target is in `make check`.
 # ---------------------------------------------------------------------------
@@ -865,19 +868,19 @@ MAMEB       := $(BUILD)/mame
 MAMEBIN     := $(MAMEB)/src/sun3x
 MAMEVLT     := $(MAMEB)/vlt/rd68031_vlt.so
 MAMEROMS    := $(MAMEB)/roms/sun3_80
-TME_EEPROM  ?= ../RD68021/build/tme/inst/bin/tme-sun-eeprom
 SUN3X_BIOS  ?= rev303
 SUN3X_TIMEOUT ?= 2400
 SUN3XROMS   := $(MAMEROMS)/sun3_80_v3.0.3 $(MAMEROMS)/sun3_80_v3.0.2 \
                $(MAMEROMS)/sun3_80_v3.0 $(MAMEROMS)/sun3_80_v2.9.2 $(MAMEROMS)/timekpr_380.bin
 
-$(MAMEBIN): sim/mame/build.sh sim/mame/sun3x.patch sim/mame/rd68031.h sim/mame/rd68031.cpp \
-            sim/mame/rd68031_vlt.h
+$(MAMEBIN): sim/mame/build.sh sim/mame/sun3x.patch sim/mame/patched.lst sim/mame/rd68031.h \
+            sim/mame/rd68031.cpp sim/mame/rd68031_vlt.h
 	@echo "  sun3x: building MAME's sun3x driver into $(MAMEB)/src (-j2, alone; 30 min from clean)"
 	@bash sim/mame/build.sh mame $(MAMEB) | sed 's/^/  /'
 
 $(MAMEVLT): sim/mame/build.sh sim/mame/rd68031_vlt.h sim/mame/rd68031_vlt.cpp \
-            sim/virt/public.vlt $(RTL)
+            sim/mame/rd68031_fpu.sv sim/virt/public.vlt $(RTL) \
+            $(wildcard Inputs/ip/RD68884/rtl/*.sv Inputs/ip/RD68884/rtl/gen/*.sv)
 	@echo "  sun3x: building the core into $(MAMEB)/vlt (Verilator, alone)"
 	@bash sim/mame/build.sh vlt $(MAMEB) | sed 's/^/  /'
 
@@ -887,11 +890,9 @@ $(MAMEROMS)/sun3_80_%: Inputs/ref/PROMs/sun3_80_%.bin
 	  || { echo "$<: not the PROM Inputs/sw/PROMS.sha256 names"; exit 1; }
 	@cp $< $@
 
-$(MAMEROMS)/timekpr_380.bin: sim/mame/eeprom.txt sim/mame/mk_timekpr.py
+$(MAMEROMS)/timekpr_380.bin: sim/mame/eeprom.txt sim/mame/mk_nvram.py
 	@mkdir -p $(MAMEROMS)
-	@test -x $(TME_EEPROM) || { echo "TME_EEPROM=$(TME_EEPROM): RD68021's tme-sun-eeprom is needed"; exit 1; }
-	@$(TME_EEPROM) < sim/mame/eeprom.txt > $(MAMEB)/eeprom.bin 2> /dev/null
-	@python3 sim/mame/mk_timekpr.py $(MAMEB)/eeprom.bin $@
+	@python3 sim/mame/mk_nvram.py sim/mame/eeprom.txt $@
 
 sun3x-m68030: $(MAMEBIN) $(SUN3XROMS)
 	@MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/run.sh sun3_80ref $(CURDIR)/$(MAMEB)/m68030 4431 300 $(SUN3X_BIOS) \
@@ -913,6 +914,51 @@ sun3x: $(MAMEBIN) $(MAMEVLT) $(SUN3XROMS) sun3x-m68030
 	  diff <(tr -d '\r\000' < $(MAMEB)/m68030/console.out) \
 	       <(tr -d '\r\000' < $(MAMEB)/rd68031/console.out) | head -30; exit 1; \
 	fi
+
+# ---------------------------------------------------------------------------
+# NetBSD/sun3x 10.2 on MAME's Sun-3/80 (M14 phase B; doc/oracles.md, "MAME")
+#
+#   netbsd-disk           the media of Inputs/sw/MANIFEST-netbsd fetched and
+#                         checked, a disk made, and NetBSD installed on it from
+#                         its miniroot on MAME's m68030 (sim/mame/netbsd.sh):
+#                         build/netbsd/netbsd.hd (a few minutes)
+#   netbsd-sun3x-m68030   that disk booted to multi-user on MAME's m68030, root
+#                         logged in, sim/mame/netbsd-boot.cmds typed, halted
+#   netbsd-sun3x          ... on the core, with RD68884 as its FPU, and each
+#                         command's answer compared with the m68030's
+#                         (sim/mame/answers.py). Hours: NETBSD_TIMEOUT
+#
+# Not in `make check`. MAME's runs are light; its and the core's builds are
+# the heavy jobs above.
+# ---------------------------------------------------------------------------
+NETBSDB        := $(BUILD)/netbsd
+NETBSD_TIMEOUT ?= 21600
+
+$(NETBSDB)/netbsd.hd: Inputs/sw/MANIFEST-netbsd sim/mame/netbsd.sh sim/mame/mkdisk.py \
+                      sim/mame/netbsd-install.cmds $(MAMEBIN) $(SUN3XROMS)
+	@echo "  netbsd: fetching, making the disk, installing on MAME's m68030"
+	@bash sim/mame/netbsd.sh fetch $(CURDIR)/$(NETBSDB)
+	@bash sim/mame/netbsd.sh disk $(CURDIR)/$(NETBSDB)
+	@MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/netbsd.sh install $(CURDIR)/$(NETBSDB) | sed 's/^/  netbsd: /'
+
+netbsd-disk: $(NETBSDB)/netbsd.hd
+
+netbsd-sun3x-m68030: $(NETBSDB)/netbsd.hd sim/mame/netbsd-boot.cmds
+	@MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/netbsd.sh boot sun3_80ref $(CURDIR)/$(NETBSDB) \
+	    $(CURDIR)/$(NETBSDB)/m68030 4461 1800 | sed 's/^/  m68030: /'
+	@python3 -I sim/mame/answers.py 'rd68031# ' $(NETBSDB)/m68030/console.out $(NETBSDB)/m68030/console.out \
+	    > /dev/null || { echo "FAIL: netbsd-sun3x-m68030 (no shell answers; $(NETBSDB)/m68030/console.out)"; exit 1; }
+	@echo "PASS: netbsd-sun3x-m68030 (console in $(NETBSDB)/m68030/console.out)"
+
+netbsd-sun3x: netbsd-sun3x-m68030 $(MAMEVLT)
+	@echo "  rd68031: NetBSD on the core (hours)"
+	@MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/netbsd.sh boot sun3_80rd $(CURDIR)/$(NETBSDB) \
+	    $(CURDIR)/$(NETBSDB)/rd68031 4462 $(NETBSD_TIMEOUT) | sed 's/^/  rd68031: /'
+	@grep -h '^rd68031:\|double bus' $(NETBSDB)/rd68031/console.out.mame | sed 's/^/  /'
+	@set -o pipefail; if python3 -I sim/mame/answers.py 'rd68031# ' $(NETBSDB)/m68030/console.out \
+	      $(NETBSDB)/rd68031/console.out | sed 's/^/  /'; then \
+	  echo "PASS: netbsd-sun3x (every command answered as on the m68030: $(NETBSDB)/rd68031/console.out)"; \
+	else echo "FAIL: netbsd-sun3x ($(NETBSDB)/rd68031/console.out)"; exit 1; fi
 
 # ---------------------------------------------------------------------------
 # AC timing, against the MC68030EC data sheet

@@ -25,10 +25,13 @@ console-device ttya
 #
 watchdog-reboot? false
 
-# any boot device:
+# any boot device: SCSI target 5 (unit 40 here, in decimal; sd(0,28,0) to the
+# PROM, which writes it in hex), where no run puts anything -- the PROM
+# then stops at its prompt and a run types the boot command it wants
+# (M14 phase B; sd(0,0,0) until then).
 #
 boot-device? true
-boot-device sd(0,0,0)
+boot-device sd(0,40,0)
 
 # any OEM banner and/or logo bitmap.
 #

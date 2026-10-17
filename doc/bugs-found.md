@@ -1049,3 +1049,45 @@ cycle asks for a burst -- hold either way and are unchanged.
 
 **Stops it coming back:** `make cache` passes again; the check still fails with
 the data cache built in if the data cache stops asking for bursts.
+
+---
+
+## M14 phase B · RTE resumed an interrupt entry with the level the pins then said
+
+**What:** UM 8.1.9: the processor acknowledges the interrupt it *recognised*, and
+the acknowledge carries that level on A3-A1 (UM 7.4.1, figure 7-42); level 0 is no
+request at all and is never acknowledged. A posted write's bus error can land
+between an interrupt's dispatch and its acknowledge (`doc/checkpoint.md` rule 9),
+and the long frame carries the level being taken for that case (+$08 bits 12:10,
+`irqlvl`), which RTE puts back in `irq_taking_q`. But when the fault landed on the
+entry's *first* microword (`exc_irq`, before the mask is raised), that microword
+is the frame's resume point, and RTE's RESUME steps from outside the entry into
+it -- which is exactly what `irq_enter` was decoding as "the sequencer dispatches
+to an interrupt". So `irq_taking_q` was latched again, from the live pins, over
+the level just restored, and `irq_prev_q` with it. A device that had dropped its
+request meanwhile -- its handler or the kernel had cleared it -- got an
+acknowledge for level 0 (`$FFFFFFF1`); a board that answered it with DSACK and
+$00 sent the core through vector 0, VBR+0, with a format-$0 frame. A request
+changed to another level got that level's acknowledge instead of the recognised
+one.
+
+**Found by:** NetBSD/sun3x on the core, under MAME, twice: an RTE of a format-$B
+frame (SSW $0111, DF on a user byte write) reran the write and then acknowledged
+level 0, some 27,600 clocks after an ordinary level-5 acknowledge. The frame's
++$08 was $9531 -- level 5.
+
+**Fixed by:** `irq_recognise` in `rd68031_seq`: the step into `ENTRY_IRQ` or
+`ENTRY_CP_IRQ` latches `irq_taking_q` and `irq_prev_q` only when it is not RTE's
+RESUME. IPEND's hold (`iack_due_q`) is still re-armed by the resume, which the
+fault had cleared: the acknowledge is upcoming again.
+
+**Stops it coming back:** `core_irqrte_tb`. With the instruction cache on, the
+faulting write's ADDQs run while it is on the bus, so the interrupt is dispatched
+at any of their boundaries; the request is raised at every clock of a window
+around the write and the bus error given at every clock of another, and the
+testbench fails unless some of them land the fault on the entry's first
+microword. There, the pins are dropped to 0, or changed to 3, at every third
+clock from the bus error to past RTE's resume, and no acknowledge may ask for
+level 0 and the first one after the resume must ask for the level the frame
+carries -- 5, wherever the pins moved after the recognition. Before the fix it
+failed on every one of those runs in which the pins had moved before the resume.

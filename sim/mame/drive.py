@@ -10,7 +10,10 @@
 Listens on 127.0.0.1:PORT, starts MAME (whose ttya must be a null_modem with
 `-bitb socket.127.0.0.1:PORT`), and logs every byte the machine sends to FILE.
 Each time the console output ends in a prompt, the next --cmd is typed, with a
-carriage return. A prompt counts only once a line has ended since the last
+carriage return. A command written `REGEX@@TEXT` waits for its own prompt,
+REGEX, instead of --prompt (an OS's shell after the PROM's monitor, a
+question an installer asks); `REGEX@@` waits for it and types nothing more
+than a carriage return. A prompt counts only once a line has ended since the last
 command was typed, and only in what follows that line (the command's echo), so
 that neither the prompt a command was typed at nor the command itself is taken
 for its answer -- the rule of RD68021's sim/tme/drive.sh, made stricter. After the last command's
@@ -42,6 +45,14 @@ if a.cmds:
             a.cmd.append(line)
 prompt = re.compile((r'(%s)$' % a.prompt).encode())
 
+
+def split_cmd(c):
+    # `REGEX@@TEXT`: TEXT waits for REGEX at the end of the output.
+    if '@@' in c:
+        r, t = c.split('@@', 1)
+        return re.compile((r'(%s)$' % r).encode()), t
+    return prompt, c
+
 srv = socket.socket()
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(('127.0.0.1', a.port))
@@ -58,14 +69,15 @@ done = False
 
 
 def prompted():
+    want = split_cmd(todo[0])[0] if todo else prompt
     new = bytes(out[sent_at:]).replace(b'\0', b'').replace(b'\r', b'')
     if sent_at > 0:
         # The answer starts after the command's echo, which ends the line.
         if b'\n' not in new:
             return False
         new = new[new.index(b'\n') + 1:]
-    tail = new[-40:].replace(b'\n', b' ')
-    return bool(prompt.search(tail))
+    tail = new[-80:].replace(b'\n', b' ')
+    return bool(want.search(tail))
 
 
 def stop():
@@ -117,7 +129,7 @@ with open(a.log, 'wb') as f, open(a.log + '.times', 'w') as tf:
             # the command arrives.
             time.sleep(0.2)
             sent_at = len(out)
-            c = todo.pop(0)
+            c = split_cmd(todo.pop(0))[1]
             conn.sendall(c.encode() + b'\r')
             tf.write('%9.2f sent %r\n' % (time.time() - t0, c))
 stop()

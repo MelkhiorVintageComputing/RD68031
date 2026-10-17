@@ -1,0 +1,15 @@
+# NetBSD/sun3x 10.2 booted from its disk to multi-user (M14 phase B;
+# sim/mame/netbsd.sh boot): logged in as root, a few commands whose answers do
+# not depend on timing, then halted back to the PROM. `make netbsd-sun3x`
+# compares these answers between the core and MAME's m68030.
+b sd(0,0,0)
+login: @@root
+[#] @@uname -srm
+[#] @@sysctl -n hw.model machdep.cpu_model 2>/dev/null; dmesg | grep -E '^\[ *[0-9.]*\] (fpu|Model):' | sed 's/^\[[^]]*\] //'
+[#] @@echo $((6 * 7)) $((0x7fffffff + 1)) $((-17 / 5)) $((-17 % 5))
+[#] @@awk 'BEGIN { printf "%.10f %.10f %.6e\n", atan2(1, 1) * 4, exp(1), sqrt(2) / 3e10 }'
+[#] @@echo 'scale=20; 4*a(1)' | bc -l
+[#] @@printf '%s\n' rd68031 m68030 netbsd sun3x | sort | tr 'a-z' 'A-Z' | md5
+[#] @@cksum /netbsd /bin/sh
+[#] @@ls /etc | wc -l
+[#] @@halt

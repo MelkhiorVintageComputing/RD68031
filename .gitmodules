@@ -16,3 +16,6 @@
 	path = Inputs/ref/mame
 	url = https://github.com/mamedev/mame
 	shallow = true
+[submodule "Inputs/ip/RD68884"]
+	path = Inputs/ip/RD68884
+	url = https://github.com/MelkhiorVintageComputing/RD68884

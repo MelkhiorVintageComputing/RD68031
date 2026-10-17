@@ -102,6 +102,7 @@ the oracle runs) may run up to **4 at a time** in parallel, using at most 4 core
 | `doc/` | pinout, coding standard, oracles, checkpoint, coprocessor, compliance, divergence and implementation reports |
 | `Inputs/doc/` | Motorola manuals, split by section, with machine-readable AC specs |
 | `Inputs/ref/` | reference implementations used as oracles (not as RTL sources) |
+| `Inputs/ip/` | RD68884, the MC68881 the MAME harness puts beside the core (M14) |
 
 ## Documentation map
 
@@ -178,6 +179,10 @@ make sun3x            # MAME's Sun-3/80: the boot PROM to the monitor and a comm
                       # the core, console byte for byte against MAME's m68030 (SUN3X_BIOS=;
                       # MAME's build -j2 and the core's Verilator build are heavy: alone)
 make sun3x-m68030     # ... MAME's m68030 alone
+make netbsd-disk      # NetBSD/sun3x 10.2 installed on a disk image, on MAME's m68030
+make netbsd-sun3x-m68030  # ... booted to multi-user there, root logged in, commands typed
+make netbsd-sun3x     # ... and on the core with RD68884 as its FPU, each command's
+                      # answer compared with the m68030's (hours: NETBSD_TIMEOUT)
 make timing-verbose   # the AC solver, with the binding constraint named
 make cycles           # instruction clock counts, each a regression check
 ```
