@@ -12,7 +12,7 @@ encodings ("MC68030 only").
 | | |
 |---|---|
 | RTL | `rtl/rd68031_mmu.sv` (registers, ATC, walker), `rtl/rd68031_mmu_xl.sv` (one lookup); translation of every cycle, and the operand set aside for its second page's search, in `rtl/rd68031_biu.sv`; the instructions in `tools/ucode/program.py` (`mmu_op`) and `rtl/rd68031_seq.sv` |
-| Tests | `core_mmu_tb` with `sim/programs/mmu_regs.S`, `mmu_walk.S`, `mmu_fault.S`; `core_m030_tb` for the decode |
+| Tests | `core_mmu_tb` with `sim/programs/mmu_regs.S`, `mmu_walk.S`, `mmu_fault.S`, `mmu_rerun.S`; `core_m030_tb` for the decode |
 | Not here | the oracle comparison (`make cosim-mmu`, the PMMU vector groups, AP68030) -- M11 part 2 |
 
 ---
@@ -399,6 +399,7 @@ two watched pages. It drives MMUDIS for `mmu_regs` and pulls RESET at its end.
 | `mmu_regs.S` | every register through PMOVE and what it keeps; the configuration exception for TC (sum, PS, the first-zero rule) and both root pointers, with its frame; PMOVEFD; PLOADR and PLOADW with their history writes counted; PTEST level 0 with each bit; PFLUSHA, PFLUSH by mask and with an address; FC from an immediate, Dn, SFC and DFC; TT1 with CI, R/W, RWM, FC mask, TAS, both registers matching; the instruction and data caches inhibited; MMUDIS; RESET |
 | `mmu_walk.S` | every page size, 256 bytes to 32K; two, three, four and five levels; short and long descriptors; FCL; IS with its ATC consequence; SRE; early termination short, long with a limit, and at the root with and without a limit; indirect descriptors short, long and to a table, left unwritten; root and long-descriptor limits upper and lower; S and WP with PTEST's S and W and the history rule around a supervisor violation; tables on 16-bit, 8-bit and synchronous ports; PTEST at every level with An; 23 pages through the ATC, replacement counted; a CI page; reads and writes across a cachable page and a CI page, both ways, CIOUT checked on every cycle and the data cache's contents after each |
 | `mmu_fault.S` | invalid, write-protected, supervisor-only, limit and bus-error faults, each handled with PTEST, repaired and rerun by RTE; CAS on a write-protected page faulting on its read; a long word read and one written across into a refused page, the residual in the frame; a prefetch into an invalid page never used; an instruction in an invalid page; a refused write with the data cache on; a user-mode program fetched, run and given its stack through the tables |
+| `mmu_rerun.S` | RTE's rerun of a faulted access faulting again, which UM 8.2.3 makes an ordinary bus error with a new frame where the old one was: data writes and reads on invalid pages and refused by BERR, an instruction fetch, and SunOS's user-stack growth (`LINK`, `MOVEM.L` into the page below); each handler lets the first fault return with DF set, and repairs on the second (since M14 phase B, `doc/bugs-found.md`) |
 
 The three programs make 72, 80 and 57 checks of themselves, and the testbench
 556 in all, the per-phase bus counts and the RESET pin's effect among them --

@@ -1,0 +1,18 @@
+# SunOS 4.1.1 for the Sun-3/80 (sun3x), for MAME's Sun-3/80 (M14 phase B): the
+# first ten files of tape 1 as sun3arc's maketape1 writes it -- the tape boot,
+# the table of contents, MUNIX and its root, the miniroot, and the root, usr,
+# kvm, install and networking sets (compressed tar files, as sun3arc keeps
+# them). sim/mame/sunos.sh fetches them into build/sunos/dl/, checks each
+# against the hash here, and writes them in this order to a tape image.
+# SunOS is Sun's; the archive's README states its terms. One line each:
+#   <sha256>  <file name>  <URL>
+54b4ceba0c81258de87fda13baa21c5ab8d0d81ac7400ec0df8d90cbad459681  tpboot.sun3x  https://www.sun3arc.org/BootTapes/Sun3x/tpboot.sun3x
+14ee55071d852cb6d3d1b39384d7c6a411b542fcc3f1400a59c241d5eb72fe63  SunOS411.sun3x.QIC-24a.xdrtoc  https://www.sun3arc.org/BootTapes/Sun3x/SunOS411.sun3x.QIC-24a.xdrtoc
+7910ce66bce045f3374522faea0a4dae2726cf1fb05e035625ea8a8d69952907  munix_sun3x  https://www.sun3arc.org/BootTapes/Sun3x/munix_sun3x
+4243b9cda14df192896e5d93b0ec542becaf552e1488604c1f8102bd7c398ea2  munixfs_sun3x  https://www.sun3arc.org/BootTapes/Sun3x/munixfs_sun3x
+ca5bd0b0ead89fb150f7aea2557ab2cb11d3a14746c9476da32bcff80cca31da  miniroot_sun3x  https://www.sun3arc.org/BootTapes/Sun3x/miniroot_sun3x
+f0edd91ea3b2ad1d416d330da68bcfd0ab9d4ade40729ba51f5a3d7d62d81414  sun3_proto_root.sunos_4_1_1.tar.Z  https://www.sun3arc.org/BootTapes/Sun3x/sun3_proto_root.sunos_4_1_1.tar.Z
+dacf50cb0e99199078a9308a5235470b4b25f5de2770225034fa32d534afca60  sun3_usr.tar.Z  https://www.sun3arc.org/BootTapes/Sun3x/sun3_usr.tar.Z
+f646b5f658e64a02070bda963d1cd7efc6c2b769d2d01d8003382d0a9a02b4be  sun3x_kvm.tar.Z  https://www.sun3arc.org/BootTapes/Sun3x/sun3x_kvm.tar.Z
+b0db5cd58fb8f0b0c7c992f4cec58dc592db20df442c56963931b6c18150878f  sun3_install.tar.Z  https://www.sun3arc.org/BootTapes/Sun3x/sun3_install.tar.Z
+1c4b81ba3fbc30028ba503aa7eecf17f48ead9ab7edcfec874fae80d384a038e  sun3_networking.tar.Z  https://www.sun3arc.org/BootTapes/Sun3x/sun3_networking.tar.Z

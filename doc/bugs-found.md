@@ -1091,3 +1091,49 @@ clock from the bus error to past RTE's resume, and no acknowledge may ask for
 level 0 and the first one after the resume must ask for the level the frame
 carries -- 5, wherever the pins moved after the recognition. Before the fix it
 failed on every one of those runs in which the pins had moved before the resume.
+
+---
+
+## M14 phase B · A rerun the MMU refused again was taken twice: a double bus fault
+
+**What:** UM 8.2.3: when RTE reruns a faulted access and it faults again, "the
+processor creates a new stack frame on the supervisor stack after deallocating the
+previous frame, and address error or bus error exception processing starts in the
+normal manner". RTE hands the faulted operand back to the bus unit (`rst_pend_q`
+in `rd68031_biu`), which ran it and cleared the hand-back when its cycle started --
+`take_rst` with the state going to S0. But a cycle the MMU refuses (an ATC entry
+with B, after a search that met an invalid descriptor) never goes to S0: it starts
+as `ST_ABT` and ends at once in a bus error. The rerun faulted correctly, and the
+exception was taken, but the hand-back stayed pending, and the next taker had it
+again: a posted write's rerun was run again at once, for nobody, and any other
+was given to the next bus request presented, which is the fault entry's own first
+frame write. Either way the operand faulted a
+second time inside the bus error's own exception processing -- a double bus fault,
+and the processor halted with STATUS asserted. A rerun that an external BERR
+refused was not affected: its cycle did start.
+
+**Found by:** SunOS 4.1.1 on the core in MAME's Sun-3/80, at boot, during `fsck`:
+the first growth of a user stack. A user `LINK A6,#-$524` and
+`MOVEM.L D4-D7/A3-A5,(A7)` with A7 in a page whose descriptor was invalid
+(TC $80D07660) took a correct format-$B bus error (SSW $0101); the kernel's
+grow-the-stack path only extended its bookkeeping and returned with DF still set,
+expecting the rerun to fault again -- the second fault is where it allocates the
+page. The core read the whole frame, searched the tables for the rerun, met the
+invalid descriptor and halted.
+
+**Fixed by:** `rd68031_biu`: the hand-back is cleared when it is taken, whether its
+cycle starts (S0) or is refused (`ST_ABT`).
+
+**Stops it coming back:** `sim/programs/mmu_rerun.S`, the fourth program of
+`core_mmu_tb` (so in `make sim` and `make check`). Every test lets the first bus
+error return with DF and the rerun bits untouched, takes the second, checks that it
+is an ordinary vector-2 long frame with the same SSW, fault address and PC as the
+first, at the same stack address (the first frame deallocated), then repairs the
+tables, flushes the ATC and returns: a supervisor write and read on an invalid page,
+an instruction fetch from one, SunOS's own user `LINK`/`MOVEM.L` and a user read,
+and a write and a read that BERR refuses; the testbench insists there was no double
+bus fault. Before the fix the program halted on a double bus fault at its first
+test. A bus error while RTE loads the frame stays a double bus fault:
+`core_fault_tb`, "RTE load". UAE030 agrees on the five invalid-descriptor tests
+(two vector-2 entries, at the same stack address); it cannot run the BERR ones
+(`doc/m11-mismatches.md`, b18).

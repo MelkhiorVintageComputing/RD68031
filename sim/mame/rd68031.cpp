@@ -18,6 +18,7 @@ rd68031_device::rd68031_device(const machine_config &mconfig, const char *tag, d
 	: cpu_device(mconfig, RD68031, tag, owner, clock)
 	, m_program_config("program", ENDIANNESS_BIG, 32, 32)
 	, m_cpu_space_config("cpu_space", ENDIANNESS_BIG, 32, 32, 0, address_map_constructor(FUNC(rd68031_device::cpu_space_map), this))
+	, m_reset_cb(*this)
 {
 }
 
@@ -179,6 +180,9 @@ void rd68031_device::execute_run()
 				m_halt_reported = true;
 				logerror("double bus fault: halted at PC %08x\n", m_vlt->pc());
 				osd_printf_warning("rd68031: double bus fault, halted (PC %08x)\n", m_vlt->pc());
+				// Only RESET from outside could restart it, and nothing on
+				// this machine drives that: end the run.
+				machine().schedule_exit();
 			}
 			m_icount = 0;
 			break;

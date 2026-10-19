@@ -12,7 +12,7 @@
 
 #include <cstdint>
 
-#define RD68031_VLT_ABI 1
+#define RD68031_VLT_ABI 2
 
 // What the bus agent asks of the machine. Addresses are physical, as on the
 // pins; a read or write is of the bytes `mask` selects in the aligned long word
@@ -28,6 +28,9 @@ struct rd68031_vlt_bus {
   virtual int iack(int level) = 0;
   // False: the agent asserts CIIN on reads there (UM 5.7.1).
   virtual bool cacheable(uint32_t addr) = 0;
+  // The RESET pin, driven by the RESET instruction (UM 7.8): true as the
+  // core starts to assert it, false as it lets go.
+  virtual void reset_out(bool asserted) = 0;
 };
 
 // The programmer's model at the last boundary.

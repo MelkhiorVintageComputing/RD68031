@@ -16,7 +16,11 @@ question an installer asks); `REGEX@@` waits for it and types nothing more
 than a carriage return. A prompt counts only once a line has ended since the last
 command was typed, and only in what follows that line (the command's echo), so
 that neither the prompt a command was typed at nor the command itself is taken
-for its answer -- the rule of RD68021's sim/tme/drive.sh, made stricter. After the last command's
+for its answer -- the rule of RD68021's sim/tme/drive.sh, made stricter. Prompts are
+matched on 7-bit text, whatever parity bit the machine sends.
+A command written `?REGEX@@TEXT` is repeated: TEXT is typed each time REGEX
+ends the output, until the next command's prompt comes (a machine that may
+reboot any number of times before it reaches a login prompt). After the last command's
 prompt has come back, or after TIMEOUT wall seconds, or when MAME stops by
 itself, MAME is stopped. MAME's own output goes to FILE.mame.
 
@@ -68,15 +72,20 @@ first_prompt = None
 done = False
 
 
-def prompted():
-    want = split_cmd(todo[0])[0] if todo else prompt
-    new = bytes(out[sent_at:]).replace(b'\0', b'').replace(b'\r', b'')
+def prompted(want):
+    # Bit 7 is dropped: SunOS 4.1.1's miniroot sets the console to 7 bits,
+    # even parity, and the parity bit would hide every prompt.
+    new = bytes(c & 0x7f for c in out[sent_at:]).replace(b'\0', b'').replace(b'\r', b'')
     if sent_at > 0:
         # The answer starts after the command's echo, which ends the line.
         if b'\n' not in new:
             return False
         new = new[new.index(b'\n') + 1:]
-    tail = new[-80:].replace(b'\n', b' ')
+    # What is left starts a line: a prompt asked for at a line's start
+    # (`\n# *`) matches there too.
+    new = b'\n' + new
+    # Newlines stay, so that a prompt can be asked for at a line's start.
+    tail = new[-80:]
     return bool(want.search(tail))
 
 
@@ -119,7 +128,18 @@ with open(a.log, 'wb') as f, open(a.log + '.times', 'w') as tf:
             tf.flush()
         elif mame.poll() is not None:
             break
-        if prompted():
+        # A repeated command (`?REGEX@@TEXT`) gives way to the next command
+        # once that one's prompt has come, and is typed again each time its
+        # own does in the meantime.
+        again = None
+        if todo and todo[0].startswith('?'):
+            if prompted(split_cmd(todo[1])[0] if len(todo) > 1 else prompt):
+                todo.pop(0)
+            elif prompted(split_cmd(todo[0][1:])[0]):
+                again = split_cmd(todo[0][1:])[1]
+            else:
+                continue
+        if again is not None or prompted(split_cmd(todo[0])[0] if todo else prompt):
             if first_prompt is None:
                 first_prompt = time.time() - t0
             if not todo:
@@ -129,7 +149,7 @@ with open(a.log, 'wb') as f, open(a.log + '.times', 'w') as tf:
             # the command arrives.
             time.sleep(0.2)
             sent_at = len(out)
-            c = split_cmd(todo.pop(0))[1]
+            c = again if again is not None else split_cmd(todo.pop(0))[1]
             conn.sendall(c.encode() + b'\r')
             tf.write('%9.2f sent %r\n' % (time.time() - t0, c))
 stop()

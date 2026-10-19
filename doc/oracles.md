@@ -147,13 +147,14 @@ fetches, stack and vectors, and a two-level tree (`tools/vectors/gen.c`, `g_pmmu
 
 ### `make cosim-mmu` (M11)
 
-Five bare-metal programs with real MC68030 translation tables, each run on UAE030 and on
+Six bare-metal programs with real MC68030 translation tables, each run on UAE030 and on
 the core and compared at every instruction boundary on every register and on the ordered
 physical data-access stream:
 
 | Program | What |
 |---|---|
 | `mmu_regs`, `mmu_walk`, `mmu_fault` | part 1's self-checking programs (`doc/mmu.md`), unchanged |
+| `mmu_rerun` | `core_mmu_tb`'s fourth self-checking program: RTE's rerun of a faulted access faulting again, an ordinary bus error (UM 8.2.3); cut at 950 instructions, before the BERR tests the oracle cannot run (b18) |
 | `cow_mmu` | `sim/programs/cow.S` built `-DCOW_MMU`: the copy-on-write kernel on the MMU |
 | `mmu_cosim` | written for the comparison (`sim/programs/mmu_cosim.S`): operands across page boundaries with neither page in the ATC; TAS, CAS, CAS2 on pages missing from the ATC or with M clear, and a CAS.W across two pages; a user access through a long descriptor with S set; PTEST across a bus error during the search; PLOAD under TT1; every PFLUSH form and PMOVE with and without FD, each followed by accesses whose searches show what was flushed; 30 pages through the ATC; a user program with translated code, data and stack and a misaligned write into an invalid page; a write-protect fault repaired by its handler; TT1 with CI and the caches on |
 
@@ -181,7 +182,7 @@ boundary appears twice) or the core reaches the boundary after a posted write th
 faults, the extra boundary is skipped and noted. Each program's results are in
 `build/cosim-mmu/<program>.log` and `.diff`.
 
-**UAE030's MMU quirks** (`doc/m11-mismatches.md` b1-b14): the registers keep every bit;
+**UAE030's MMU quirks** (`doc/m11-mismatches.md` b1-b14, b18): the registers keep every bit;
 the configuration exception's frame is format $0, and a refused TC keeps E; PLOAD and PTEST
 with TC.E clear use a stale layout; a read-modify-write cycle is searched as a read, then
 again for M; a bus fault is recovered by restarting the instruction, so an access
@@ -599,11 +600,69 @@ recognised one -- level 0 once the device had dropped its request, and NetBSD to
 0 (`doc/bugs-found.md`; `core_irqrte_tb` holds it). A run differs from the last wherever
 typed input lands at another emulated time, so such a race may show in one run only.
 
+**SunOS 4.1.1** (`Inputs/sw/MANIFEST-sunos`; `make sunos-disk`, `sunos-sun3x-m68030`,
+`sunos-sun3x`; `sim/mame/sunos.sh`). The media are the first ten files of sun3arc's
+sun3x tape 1 (its sets compressed, as sun3arc keeps them), written by
+`sim/mame/mktape.py` to a SIMH tape image in 512-byte records, as a QIC-24 cartridge
+reads; MAME's SCSI tape is at target 4, presenting itself as an Archive Viper 150 (MAME's
+NEWS variant), a drive SunOS's `st` knows. The PROM boots MUNIX from it (`b st()`),
+MUNIX copies the miniroot into sd0b (`sim/mame/sunos-miniroot.cmds`), and the system is
+installed by hand from the miniroot's shell (`sim/mame/sunos-install.cmds`: newfs, the
+root, usr, kvm, install and networking sets from the tape, MAKEDEV, /sbin as suninstall
+fills it, fstab, the GENERIC kernel, installboot), suninstall being a full-screen program.
+The disk then boots to multi-user, root logs in, and `sim/mame/sunos-boot.cmds` is typed,
+compared as NetBSD's is. Each boot after a halt, SunOS's fsck salvages the summaries of /
+or /usr and reboots -- on the core as on the m68030, and on a disk NetBSD's `fsck_ffs`
+finds clean -- so the boot command is typed again at the monitor's prompt until the login
+prompt comes (`drive.py`'s repeated commands, `?REGEX@@TEXT`).
+
+Getting there took four fixes to our copy of MAME, none of them in the core:
+- **PTEST at a level limit** (`m68kmmu.h`): a search that stopped at PTEST's level left
+  the last descriptor it had fetched unexamined, so `PTEST #3` of a page whose level-3
+  descriptor is invalid answered without I. SunOS tells a page fault from a bus error by
+  that PTEST, and treated every page-in through segmap as a bus error: exec of /sbin/init
+  failed with EFAULT. The core, which follows UM 9 here, reached MUNIX's menu on the same
+  tape first (`doc/m14-mismatches.md` b3).
+- **The floppy controller** (`sun3x.cpp`): the 3/80 decodes two of the 82077's registers,
+  as an 82072 would, the main status / data rate select register at +0 and the FIFO at +1;
+  MAME mapped the whole chip, so SunOS's `fd` read SRA for the status, never saw RQM, and
+  reset the controller recursively until the kernel stack ran into its red zone -- a
+  double bus fault on the core, a vector of $FFFFFFFF on the m68030. Nothing else could
+  take the chip out of the reset its own reset leaves it in (DOR = 0), so the machine
+  reset does.
+- **The 3/470's clock page** (`sun3x.cpp`): SunOS masks the clock interrupt through the
+  Intersil 7170 at $64002000 while `zs` probes, before it has learnt the clock is the
+  MK48T02; a bus timeout there was a kernel-mode bus error and a panic. The page now
+  reads zero and ignores writes (what the 3/80 decodes there is not known).
+- **The RESET line** (`sun3x.cpp`, and the core's device: `reset_cb()`, the bus agent's
+  `reset_out`, ABI 2): the RESET instruction reset nothing on the board, so after a
+  reboot the LANCE the last kernel had started was still running, and the next kernel
+  looped on "iobus level 3 interrupt not serviced". RESET now resets the LANCE, the ESP
+  and the floppy controller -- not the SCCs, which the PROM is printing on as it resets,
+  where what a reset cut off would depend on the processor's timing.
+
+**Result (M14 phase B).** The install takes about 4 minutes of wall time on the m68030,
+and the boot with the command set under a minute. On the core, with RD68884, the same
+disk boots to multi-user, root logs in after 2.6 hours of wall time, and all seven
+commands -- the integer, `nawk`/`bc` floating-point (RD68884), `sort`/`tr`/`sum` and
+`sum` of `/vmunix` -- answer as on the m68030: 264 emulated s in 2.7 hours (0.0237
+emulated s per wall s). Getting there found one core defect: a data access RTE re-ran
+that the MMU refused again stayed pending after its bus error was taken, was taken again
+by the bus error's own frame write, and halted the core on a double bus fault -- at
+SunOS's first user-stack growth, in fsck at boot (`doc/bugs-found.md`;
+`sim/programs/mmu_rerun.S`, in `core_mmu_tb`).
+
+MAME's m68030 also stacks a fault address of 0 in a bus fault frame for a bus error the
+driver signals (a timeout), where the processor stacks the address of the access; SunOS
+meets those only in probes, which do not look at it.
+
 **Tracing the core in MAME.** `RD68031_TRACE=<hex PC>` keeps a ring of the core's last
 8192 instruction boundaries, bus cycles and interrupt-level changes, and prints it to
 MAME's output (`console.out.mame`) when the core's PC first reaches that address, or at
-any interrupt acknowledge for level 0 or one answered with a vector. It costs nothing
-when unset.
+any interrupt acknowledge for level 0 or one answered with a vector.
+`RD68031_TRACE=halt` prints it, and the registers, when a double bus fault halts the
+core instead. It costs nothing when unset. A halted core ends the MAME run: only an
+external RESET could restart it, and nothing on the 3/80 drives one.
 
 What phase A estimated it would take, kept for the record:
 - the LANCE: MAME has an `am79c90`, to be mapped at $65002000 with its DMA through the

@@ -2042,7 +2042,16 @@ module rd68031_biu #(
       if (rst_op_valid) begin
         rst_pend_q <= 1'b1;
         rst_post_q <= rst_post;
-      end else if (take_rst && (st_p_nxt == rd68031_pkg::ST_S0))
+      // Taken, it is the operand engine's -- and it is taken as much when the
+      // MMU refuses its page (ST_ABT) as when its cycle starts. UM 8.2.3: a
+      // rerun that faults again is an ordinary bus error, with a new frame.
+      // Left pending, the refused rerun was taken a second time by whatever
+      // came next -- a posted one at once, any other by the next request
+      // presented, the fault entry's own first frame write -- faulted again
+      // inside the exception processing, and halted the processor on a double
+      // bus fault. SunOS's first user-stack growth found it (doc/bugs-found.md).
+      end else if (take_rst && ((st_p_nxt == rd68031_pkg::ST_S0)
+                                || (st_p_nxt == rd68031_pkg::ST_ABT)))
         rst_pend_q <= 1'b0;
       else if (rst_done) begin
         rst_pend_q <= 1'b0;

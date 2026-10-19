@@ -20,7 +20,9 @@ SYSLOG = re.compile(r'^[A-Z][a-z]{2} [ 0-9]\d \d\d:\d\d:\d\d \S+ ')
 
 
 def answers(path, prompt):
-    text = open(path, 'rb').read().replace(b'\0', b'').replace(b'\r', b'').decode('latin-1')
+    # Bit 7 is dropped: SunOS's console can carry a parity bit (stty evenp).
+    raw = bytes(c & 0x7f for c in open(path, 'rb').read())
+    text = raw.replace(b'\0', b'').replace(b'\r', b'').decode('latin-1')
     out, cmd = [], None
     for line in text.split('\n'):
         if line.startswith(prompt):

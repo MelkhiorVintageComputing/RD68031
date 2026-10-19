@@ -183,6 +183,9 @@ make netbsd-disk      # NetBSD/sun3x 10.2 installed on a disk image, on MAME's m
 make netbsd-sun3x-m68030  # ... booted to multi-user there, root logged in, commands typed
 make netbsd-sun3x     # ... and on the core with RD68884 as its FPU, each command's
                       # answer compared with the m68030's (hours: NETBSD_TIMEOUT)
+make sunos-disk       # SunOS 4.1.1 installed from sun3arc's tape 1, on MAME's m68030
+make sunos-sun3x-m68030   # ... booted to multi-user there, root logged in, commands typed
+make sunos-sun3x      # ... and on the core, answers compared (hours: SUNOS_TIMEOUT)
 make timing-verbose   # the AC solver, with the binding constraint named
 make cycles           # instruction clock counts, each a regression check
 ```

@@ -44,6 +44,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 typedef Vrd68031_fpu Vtop;
 #define SEQ(x) top->rootp->rd68031_fpu__DOT__u_cpu__DOT__u_seq__DOT__##x
@@ -76,8 +77,12 @@ class Agent : public rd68031_vlt {
     // RD68031_TRACE=<hex logical PC>: keep the last RING boundaries and bus
     // cycles, and print them to stderr, with TAIL more, once the core's PC
     // first reaches that address (a debugging aid; costs nothing otherwise).
-    if (const char *t = getenv("RD68031_TRACE"))
-      trig = strtoul(t, nullptr, 16), tracing = true;
+    // RD68031_TRACE=halt: print them when a double bus fault halts the core.
+    if (const char *t = getenv("RD68031_TRACE")) {
+      tracing = true;
+      if (std::string(t) == "halt") on_pc = false;
+      else trig = strtoul(t, nullptr, 16);
+    }
   }
   ~Agent() override {
     top->final();
@@ -105,9 +110,25 @@ class Agent : public rd68031_vlt {
     half(false);
     bool b = SEQ(retire) && SEQ(at_decode) && !SEQ(fault_now);
     half(true);
+    if (bool(top->reset_n_oe) != reset_out) {
+      reset_out = top->reset_n_oe;
+      bus->reset_out(reset_out);
+    }
     if (tracing) {
       if (b) note('B', IFU(pc_d), SEQ(sr_q), (SEQ(sr_q) & 0x2000) ? SEQ(isp_q) : SEQ(usp_q));
-      if (!fired && IFU(pc_d) == trig) {
+      if (!fired && !on_pc && SEQ(dbf_q)) {
+        fired = true;
+        fprintf(stderr, "rd68031: trace: double bus fault at clock %llu, PC %08x\n",
+                (unsigned long long)nclk, unsigned(IFU(pc_d)));
+        dump();
+        rd68031_vlt_regs r;
+        regs(r);
+        fprintf(stderr, "rd68031: halt: sr=%04x usp=%08x isp=%08x msp=%08x vbr=%08x tc=%08x crp=%016llx "
+                "srp=%016llx tt0=%08x tt1=%08x mmusr=%04x cacr=%08x\n", r.sr, r.usp, r.isp, r.msp, r.vbr,
+                r.tc, (unsigned long long)r.crp, (unsigned long long)r.srp, r.tt0, r.tt1, r.mmusr, r.cacr);
+        for (int i = 0; i < 8; i++)
+          fprintf(stderr, "rd68031: halt: d%d=%08x a%d=%08x\n", i, r.d[i], i, r.a[i]);
+      } else if (!fired && on_pc && IFU(pc_d) == trig) {
         fired = true;
         tail = 400;
         fprintf(stderr, "rd68031: trace: PC %08x reached at clock %llu\n", trig,
@@ -151,32 +172,34 @@ class Agent : public rd68031_vlt {
   rd68031_vlt_bus *bus;
   uint64_t nclk = 0;
   unsigned waits = 0;
+  bool reset_out = false;  // the RESET pin as last reported
 
   // The trace ring (RD68031_TRACE).
   struct Ev { uint64_t clk; char k; uint32_t a, b, c; };
   static const unsigned RING = 8192;
   Ev ring[RING];
   unsigned rpos = 0, rcount = 0, tail = 0;
-  bool tracing = false, fired = false;
+  bool tracing = false, fired = false, on_pc = true;
   uint32_t trig = 0;
   void note(char k, uint32_t a, uint32_t b, uint32_t c) {
     ring[rpos] = Ev{nclk, k, a, b, c};
     rpos = (rpos + 1) % RING;
     if (rcount < RING) rcount++;
-    if (fired && --tail == 0) {
-      for (unsigned i = 0; i < rcount; i++) {
-        const Ev &e = ring[(rpos + RING - rcount + i) % RING];
-        if (e.k == 'I')
-          fprintf(stderr, "T %llu I level=%u\n", (unsigned long long)e.clk, e.a);
-        else if (e.k == 'B')
-          fprintf(stderr, "T %llu B pc=%08x sr=%04x sp=%08x\n", (unsigned long long)e.clk, e.a, e.b, e.c);
-        else
-          fprintf(stderr, "T %llu %c a=%08x fc=%u siz=%u d=%08x\n", (unsigned long long)e.clk, e.k,
-                  e.a, e.b >> 4, e.b & 15, e.c);
-      }
-      fflush(stderr);
-      tracing = false;
+    if (fired && --tail == 0) dump();
+  }
+  void dump() {
+    for (unsigned i = 0; i < rcount; i++) {
+      const Ev &e = ring[(rpos + RING - rcount + i) % RING];
+      if (e.k == 'I')
+        fprintf(stderr, "T %llu I level=%u\n", (unsigned long long)e.clk, e.a);
+      else if (e.k == 'B')
+        fprintf(stderr, "T %llu B pc=%08x sr=%04x sp=%08x\n", (unsigned long long)e.clk, e.a, e.b, e.c);
+      else
+        fprintf(stderr, "T %llu %c a=%08x fc=%u siz=%u d=%08x\n", (unsigned long long)e.clk, e.k,
+                e.a, e.b >> 4, e.b & 15, e.c);
     }
+    fflush(stderr);
+    tracing = false;
   }
   bool ipl_chg = false;
 

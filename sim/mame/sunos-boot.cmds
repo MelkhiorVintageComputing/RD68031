@@ -1,0 +1,19 @@
+# SunOS 4.1.1 booted from its disk to multi-user (M14 phase B;
+# sim/mame/sunos.sh boot): logged in as root, a few commands whose answers do
+# not depend on timing, then halted back to the PROM. `make sunos-sun3x`
+# compares these answers between the core and MAME's m68030.
+b sd(0,0,0)
+# Each boot after a halt, SunOS 4.1.1's fsck salvages the summaries of / or
+# /usr and reboots (on the core as on MAME's m68030), and the PROM, finding
+# nothing at its EEPROM's boot device, comes back to its prompt: boot again,
+# as many times as it takes to reach the login prompt.
+?\n> *@@b sd(0,0,0)
+login: *@@root
+\nrd68031# *@@uname -a
+\nrd68031# *@@expr 6 \* 7; expr 2147483647 + 1; expr -17 / 5; expr -17 % 5
+\nrd68031# *@@nawk 'BEGIN { printf "%.10f %.10f %.6e\n", atan2(1, 1) * 4, exp(1), sqrt(2) / 3e10 }'
+\nrd68031# *@@echo 'scale=20; 4*a(1)' | bc -l
+\nrd68031# *@@echo rd68031 m68030 sunos sun3x | tr ' ' '\012' | sort | tr 'a-z' 'A-Z' | sum
+\nrd68031# *@@sum /vmunix /bin/sh
+\nrd68031# *@@ls /etc | wc -l
+\nrd68031# *@@halt

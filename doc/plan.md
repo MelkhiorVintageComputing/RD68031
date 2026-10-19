@@ -308,9 +308,11 @@ needs an FPU, so by the user's decision the core has **RD68884** beside it as it
 boots to multi-user on MAME's m68030 (`make netbsd-disk`, `netbsd-sun3x-m68030`), and
 on the core (`make netbsd-sun3x`), where every command's answer matches the m68030's
 after one core defect was fixed (an interrupt acknowledge for level 0 after RTE,
-`doc/bugs-found.md`). SunOS 4.1.1 on the 3/80 needs an install tape
-put together from sun3x pieces (the user's `~/Sun3_vs_Sun3x/sources/sunos/dl/sun3x`)
-and the sun3 sets: not done.
+`doc/bugs-found.md`). SunOS 4.1.1, installed from sun3arc's sun3x tape 1 (`make
+sunos-disk`), boots to multi-user on the m68030 (`make sunos-sun3x-m68030`) and on the
+core (`make sunos-sun3x`), every command's answer the m68030's, after four fixes to the
+machine model and MAME's PTEST, and one core defect (an RTE rerun the MMU refused again,
+`doc/bugs-found.md`).
 
 **Status (M15, phase A):** measured, nothing optimised. All six front-ends accept the
 design; the M10 caches and M11 MMU met a vendor tool for the first time and Quartus

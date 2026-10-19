@@ -59,7 +59,7 @@ VLT  := rtl/rd68031.vlt
 IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$(ICACHE_ENTRIES) \
            -DTB_DCACHE_ENTRIES=$(DCACHE_ENTRIES)
 
-.PHONY: netbsd-disk netbsd-sun3x netbsd-sun3x-m68030 sim-progs
+.PHONY: netbsd-disk netbsd-sun3x netbsd-sun3x-m68030 sunos-disk sunos-sun3x sunos-sun3x-m68030 sim-progs
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl paths audit ucode ucode-check sim sim-bus \
         timing timing-verbose timing-build ea cache cycles cpif check clean \
@@ -110,6 +110,9 @@ help:
 	@echo "  make netbsd-disk    NetBSD/sun3x 10.2 installed on a disk image, on MAME's m68030"
 	@echo "  make netbsd-sun3x-m68030  ... booted to multi-user there, commands typed"
 	@echo "  make netbsd-sun3x   ... and on the core with RD68884, answers compared (hours)"
+	@echo "  make sunos-disk     SunOS 4.1.1 installed on a disk image from its tape, on MAME's m68030"
+	@echo "  make sunos-sun3x-m68030  ... booted to multi-user there, commands typed"
+	@echo "  make sunos-sun3x    ... and on the core with RD68884, answers compared (hours)"
 	@echo
 	@echo "Vendor tools, tens of minutes each:"
 	@echo "  make impl         Vivado place and route ($(XPART)), out of context"
@@ -281,7 +284,7 @@ $(CACHEP).hex: sim/programs/cache.S sim/programs/flat.ld
 # translation tables and check themselves, linked with sim/programs/mmu.ld so
 # that their tables and the pages they map are at fixed physical addresses.
 # -mcpu=68030 for the MMU instructions. Fixed paths, as for COW.
-MMUPROGS := mmu_regs mmu_walk mmu_fault
+MMUPROGS := mmu_regs mmu_walk mmu_fault mmu_rerun
 MMUHEX   := $(patsubst %,build/programs/%.hex,$(MMUPROGS))
 build/programs/mmu_%.hex: sim/programs/mmu_%.S sim/programs/mmu_common.inc sim/programs/mmu.ld
 	@mkdir -p build/programs
@@ -615,14 +618,16 @@ cosim-long: dirs
 #
 # mmu_fault's trace is cut at 3,000 instructions: the oracle restarts a faulted
 # instruction where the part continues it, and an access its handler abandons
-# (DF cleared) is retried forever there (doc/m11-mismatches.md, b8).
+# (DF cleared) is retried forever there (doc/m11-mismatches.md, b8). mmu_rerun's
+# is cut at 950, before its phase 11: the oracle stacks the physical address of
+# a translated access BERR ended, and reruns it there for ever (b18).
 #
 #   COSIMMMU=<programs>   which (default all); MMU_MAXFAIL=N register
 #                         disagreements to report before a run stops
 #                         (each one is followed by a deposit of the
 #                         oracle's registers, while the PCs agree)
 # ---------------------------------------------------------------------------
-COSIMMMU    ?= mmu_regs mmu_walk mmu_fault mmu_cosim cow_mmu
+COSIMMMU    ?= mmu_regs mmu_walk mmu_fault mmu_rerun mmu_cosim cow_mmu
 MMU_MAXFAIL ?= 5000
 MMUCMP      := $(BUILD)/cosim-mmu
 MMUMAP      := -r 10000000:F0000000:10000 -r 20000000:F0000000:10000 \
@@ -635,7 +640,7 @@ cosim-mmu: dirs $(MMUHEX) build/programs/mmu_cosim.hex $(COWMMU).hex $(OBUILD)/u
 	    > $(BUILD)/core_cosim_tb.build.log 2>&1 \
 	  || { grep -v $(NOTES) $(BUILD)/core_cosim_tb.build.log; exit 1; }
 	@ok=1; for p in $(COSIMMMU); do \
-	  n=200000; [ $$p = mmu_fault ] && n=3000; \
+	  n=200000; [ $$p = mmu_fault ] && n=3000; [ $$p = mmu_rerun ] && n=950; \
 	  $(CROSS)objcopy -O binary build/programs/$$p.elf $(MMUCMP)/$$p.bin; \
 	  $(OBUILD)/uae030_trace $(MMUMAP) -B $(MMUCMP)/$$p.ubus $(MMUCMP)/$$p.bin $$n \
 	      > $(MMUCMP)/$$p.trc 2> $(MMUCMP)/$$p.trace.log \
@@ -959,6 +964,55 @@ netbsd-sun3x: netbsd-sun3x-m68030 $(MAMEVLT)
 	      $(NETBSDB)/rd68031/console.out | sed 's/^/  /'; then \
 	  echo "PASS: netbsd-sun3x (every command answered as on the m68030: $(NETBSDB)/rd68031/console.out)"; \
 	else echo "FAIL: netbsd-sun3x ($(NETBSDB)/rd68031/console.out)"; exit 1; fi
+
+# ---------------------------------------------------------------------------
+# SunOS 4.1.1 on MAME's Sun-3/80 (M14 phase B; doc/oracles.md, "MAME")
+#
+#   sunos-disk            the first ten files of sun3arc's tape 1
+#                         (Inputs/sw/MANIFEST-sunos) fetched and checked, a
+#                         tape image and a labelled disk made, the miniroot
+#                         copied into sd0b by MUNIX booted from the tape, and
+#                         SunOS installed by hand from the miniroot's shell,
+#                         all on MAME's m68030 (sim/mame/sunos.sh):
+#                         build/sunos/sunos.hd (a quarter of an hour)
+#   sunos-sun3x-m68030    that disk booted to multi-user on MAME's m68030, root
+#                         logged in, sim/mame/sunos-boot.cmds typed, halted
+#   sunos-sun3x           ... on the core, with RD68884 as its FPU, and each
+#                         command's answer compared with the m68030's
+#                         (sim/mame/answers.py). Hours: SUNOS_TIMEOUT
+#
+# Not in `make check`. MAME's runs are light; its and the core's builds are
+# the heavy jobs above.
+# ---------------------------------------------------------------------------
+SUNOSB        := $(BUILD)/sunos
+SUNOS_TIMEOUT ?= 43200
+
+$(SUNOSB)/sunos.hd: Inputs/sw/MANIFEST-sunos sim/mame/sunos.sh sim/mame/mktape.py sim/mame/mkdisk.py \
+                    sim/mame/sunos-miniroot.cmds sim/mame/sunos-install.cmds $(MAMEBIN) $(SUN3XROMS)
+	@echo "  sunos: fetching, making the tape and the disk, installing on MAME's m68030"
+	@bash sim/mame/sunos.sh fetch $(CURDIR)/$(SUNOSB)
+	@bash sim/mame/sunos.sh media $(CURDIR)/$(SUNOSB)
+	@set -o pipefail; MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/sunos.sh miniroot $(CURDIR)/$(SUNOSB) | sed 's/^/  sunos: /'
+	@set -o pipefail; MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/sunos.sh install $(CURDIR)/$(SUNOSB) | sed 's/^/  sunos: /'
+
+sunos-disk: $(SUNOSB)/sunos.hd
+
+sunos-sun3x-m68030: $(SUNOSB)/sunos.hd sim/mame/sunos-boot.cmds
+	@MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/sunos.sh boot sun3_80ref $(CURDIR)/$(SUNOSB) \
+	    $(CURDIR)/$(SUNOSB)/m68030 4471 1800 | sed 's/^/  m68030: /'
+	@python3 -I sim/mame/answers.py 'rd68031# ' $(SUNOSB)/m68030/console.out $(SUNOSB)/m68030/console.out \
+	    > /dev/null || { echo "FAIL: sunos-sun3x-m68030 (no shell answers; $(SUNOSB)/m68030/console.out)"; exit 1; }
+	@echo "PASS: sunos-sun3x-m68030 (console in $(SUNOSB)/m68030/console.out)"
+
+sunos-sun3x: sunos-sun3x-m68030 $(MAMEVLT)
+	@echo "  rd68031: SunOS on the core (hours)"
+	@MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/sunos.sh boot sun3_80rd $(CURDIR)/$(SUNOSB) \
+	    $(CURDIR)/$(SUNOSB)/rd68031 4472 $(SUNOS_TIMEOUT) | sed 's/^/  rd68031: /'
+	@grep -h '^rd68031:\|double bus' $(SUNOSB)/rd68031/console.out.mame | sed 's/^/  /'
+	@set -o pipefail; if python3 -I sim/mame/answers.py 'rd68031# ' $(SUNOSB)/m68030/console.out \
+	      $(SUNOSB)/rd68031/console.out | sed 's/^/  /'; then \
+	  echo "PASS: sunos-sun3x (every command answered as on the m68030: $(SUNOSB)/rd68031/console.out)"; \
+	else echo "FAIL: sunos-sun3x ($(SUNOSB)/rd68031/console.out)"; exit 1; fi
 
 # ---------------------------------------------------------------------------
 # AC timing, against the MC68030EC data sheet

@@ -4,7 +4,7 @@
 
 // RD68031 -- the MMU, UM section 9, from programs that use it.
 //
-// Three programs, each built from sim/programs/ with the cross-assembler for
+// Four programs, each built from sim/programs/ with the cross-assembler for
 // -mcpu=68030 and each checking itself -- sim/programs/mmu_common.inc:
 //
 //   mmu_regs    the registers, PMOVE in every form, the configuration
@@ -20,6 +20,10 @@
 //               pages, a bus error during a search, read-modify-writes,
 //               operands across a page boundary, instruction fetch faults
 //               and a prefetch into an unmapped page that must not fault
+//   mmu_rerun   RTE's rerun of a faulted access faulting again: an ordinary
+//               bus error, not a double bus fault (UM 8.2.3) -- data reads
+//               and writes on invalid pages and on BERR, a prefetch, and
+//               SunOS's user-stack growth (LINK, MOVEM)
 //
 // A program logs every check that fails, and this prints the log and insists
 // on it being empty and complete. What the program cannot see, this counts, a
@@ -267,7 +271,13 @@ module core_mmu_tb;
       if (ph == 99) reached = 1'b1;
       n = n + 1;
     end
-    while (dut.u_biu.post_busy) @(negedge clk);
+    // A posted write still outstanding is waited for -- but not forever: a
+    // core halted by a double bus fault never finishes one.
+    i = 0;
+    while (dut.u_biu.post_busy && i < 10000) begin
+      @(negedge clk);
+      i = i + 1;
+    end
     repeat (4) @(negedge clk);
     check(reached, $sformatf("%s: reached its end (phase %0d after %0d clocks)", pn, ph, n));
     check(peek_l(A_DONE) == 32'h600D_D00E, $sformatf("%s: finished cleanly", pn));
@@ -306,12 +316,13 @@ module core_mmu_tb;
                  c_frc[i], c_frd[i]);
   endtask
 
-  string img_regs, img_walk, img_fault;
+  string img_regs, img_walk, img_fault, img_rerun;
   initial begin
-    $display("core_mmu_tb: the MC68030's MMU, from three programs");
+    $display("core_mmu_tb: the MC68030's MMU, from four programs");
     if (!$value$plusargs("regs=%s", img_regs))   img_regs  = "build/programs/mmu_regs.hex";
     if (!$value$plusargs("walk=%s", img_walk))   img_walk  = "build/programs/mmu_walk.hex";
     if (!$value$plusargs("fault=%s", img_fault)) img_fault = "build/programs/mmu_fault.hex";
+    if (!$value$plusargs("rerun=%s", img_rerun)) img_rerun = "build/programs/mmu_rerun.hex";
     berr_en   = 1'b1;
     berr_base = 32'h4000_0000;
     berr_mask = 32'hF000_0000;
@@ -396,6 +407,10 @@ module core_mmu_tb;
       run_prog("mmu_fault", img_fault, 1_500_000);
       if ($test$plusargs("counts")) dump_counts("mmu_fault");
       `include "core_mmu_fault_exp.svh"
+
+      run_prog("mmu_rerun", img_rerun, 300_000);
+      if ($test$plusargs("counts")) dump_counts("mmu_rerun");
+      check(!dut.u_seq.dbf_q, "mmu_rerun: no double bus fault -- UM 8.2.3, a rerun's fault is an ordinary one");
     end
 
     if (fails == 0) $display("PASS: core_mmu_tb, %0d checks", checks);

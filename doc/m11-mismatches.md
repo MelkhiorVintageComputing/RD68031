@@ -130,6 +130,7 @@ None needs an RTL change. Where the harness corrects for one, the place is named
 | b13 | A table search that ends in a bus error left every later access labelled a table search (harness) | -- | fixed in `uae030_glue.c` |
 | b14 | Installing zeroed MMU registers before a test made the oracle halt in 40 MOVEM and MOVEC vectors (harness) | -- | `gen.c` installs them only around `pmmu` tests |
 | b15h | For a posted write that faults, the core's trace has a boundary at the next instruction before the exception, which the oracle's has not; the registers are the same and both stack that next instruction's address (harness) | doc/checkpoint.md rule 9 | `core_cosim_tb` steps the core past it ("a posted-write boundary") |
+| b18 | A translated access that an external BERR ends is stacked with its PHYSICAL address as the fault address (+$10): `$40000520` for logical `$01000520` mapped onto the bus-error region. RTE reruns it from there, untranslated or translated as a new logical address, so a handler that remaps the page never sees the rerun succeed, and the program loops -- `mmu_rerun` phases 11-14 | UM 8.2, table 8-7: +$10 is the data cycle fault address, the logical one the instruction used; an MMU fault stacks it (UAE030 does too) | `mmu_rerun` puts those tests last and `make cosim-mmu` cuts its trace at 950 instructions, before them |
 
 ### AP68030
 
@@ -250,6 +251,7 @@ speak to it. AP68030 never asserts STATUS for three clocks and never starts a cy
 | `mmu_regs` | 1,787 | 59 | 44 | b1, b2, b4 and their consequences |
 | `mmu_cosim` | 482 | 26 (3 oracle restarts, 2 posted-write boundaries) | 46 (11 moved); 56 (21 moved) before phase B | b7, b8, b9, b10, c4-c6. Q-A and Q-B gone: the reads across pages and the CAS.W, and CAS2 at instruction 60 (`W $D500` then `W $D400` on both) |
 | `mmu_fault` | 3,000 (cut: b8, c8) | 88 | 84 (6 moved); 87 (9 moved) before phase B | b8, c4-c8; the three that went were the operands across pages (Q-A) |
+| `mmu_rerun` | 950 (cut before phase 11: b18) | 19 outside the ISP, before the comparison derails at instruction 380 | 52 | c4-c6 (the first test's posted write: a format $A frame on the oracle, and the handler's copies of frame words), then c8 at phase 5's prefetch (the oracle faults before the core runs the page's last MOVEQ). On the point of the program both agree: every rerun that faults again is an ordinary bus error, two vector-2 entries per test with the frame at the same stack address |
 | `cow_mmu` | 11,369 of 14,704 | 2,108 -- 2,091 of them the ISP inside the handler, 60 bytes apart (c4), and the flags of the kernel's tests of the frame | 137 (frame writes and the handler's copies of frame words); 140 before phase B | identical through the first ten copy-on-write faults (the same faults, at the same instructions, with the same search traffic); at the eleventh the instruction at which a write's fault is taken differs by one (c5), and the comparison stops there |
 
 ### `make ap030` (AP68030), per program

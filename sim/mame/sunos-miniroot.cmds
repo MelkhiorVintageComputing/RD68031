@@ -1,0 +1,8 @@
+# SunOS 4.1.1's miniroot copied from tape 1 into sd0b (M14 phase B;
+# sim/mame/sunos.sh miniroot): the PROM boots MUNIX from the tape, MUNIX
+# loads its own root into a RAM disk and asks what to do; the disk's label
+# (sim/mame/mkdisk.py) is kept, and the miniroot goes to its b partition.
+# sunos.sh runs this with PROMPT set to MUNIX's last question, which ends it.
+\n> *@@b st()
+Enter a 1 or 2: *@@1
+Enter a 1, 2, or 3: *@@2

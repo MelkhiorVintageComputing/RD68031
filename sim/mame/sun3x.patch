@@ -55,7 +55,7 @@
  
  	required_shared_ptr<uint32_t> m_p_ram;
  	optional_shared_ptr<uint32_t> m_bw2_vram;
-@@ -225,13 +238,57 @@
+@@ -225,13 +238,58 @@
  	uint32_t m_enable = 0, m_buserr = 0, m_diag = 0, m_printer = 0, m_irqctrl = 0, m_memreg = 0, m_memerraddr = 0;
  	uint32_t m_iommu[0x800]{};
  	bool m_bInBusErr = false;
@@ -69,6 +69,7 @@
 +	TIMER_DEVICE_CALLBACK_MEMBER(sun380_clk5);
 +	template <int N> void scc_int(int state) { m_scc_irq[N] = state; update_irqs(); }
 +	void lance_int(int state) { m_lance_irq = !state; update_irqs(); }  // INTR is active low
++	void io_reset(int state);
 +	bool m_scc_irq[2]{};
 +	bool m_lance_irq = false;
 +	bool m_clk5_pend = false;
@@ -113,17 +114,30 @@
  	map(0x50400000, 0x504fffff).ram().share(m_bw2_vram);
  	map(0x60000000, 0x60001fff).rw(FUNC(sun3x_state::iommu_r), FUNC(sun3x_state::iommu_w));
  	map(0x61000000, 0x61000003).rw(FUNC(sun3x_state::enable_r), FUNC(sun3x_state::enable_w));
-@@ -244,9 +301,19 @@
+@@ -244,9 +302,31 @@
  	map(0x62002000, 0x6200200f).rw(m_scc2, FUNC(z80scc_device::ab_dc_r), FUNC(z80scc_device::ab_dc_w)).umask32(0xff00ff00);
  	map(0x63000000, 0x6301ffff).rom().region("user1", 0);
  	map(0x64000000, 0x640007ff).rw(TIMEKEEPER_TAG, FUNC(timekeeper_device::read), FUNC(timekeeper_device::write));
++	// RD68031: the 3/470's Intersil 7170 clock (0x64002000) answers on a 3/80:
++	// SunOS 4.1.1 masks the clock's interrupt through it while the zs driver
++	// probes, before it has learnt that the clock is the MK48T02, and panics
++	// on a bus error there. What the 3/80 decodes there is unknown, so this
++	// reads zero and ignores writes rather than mirror the NVRAM.
++	map(0x64002000, 0x64003fff).noprw();
 +	map(0x65002000, 0x65002003).rw(m_lance, FUNC(am79c90_device::regs_r), FUNC(am79c90_device::regs_w));
 +	map(0x66000000, 0x6600003f).noprw(); // RD68031: the ESP's unreadable registers still answer
  	map(0x66000000, 0x6600003f).m(m_esp, FUNC(ncr53c90_device::map)).umask32(0xff000000);
+-	map(0x6e000000, 0x6e000007).m(m_fdc, FUNC(n82077aa_device::map));
 +	map(0x66001000, 0x66001003).rw(FUNC(sun3x_state::dma_csr_r), FUNC(sun3x_state::dma_csr_w));
 +	map(0x66001004, 0x66001007).rw(FUNC(sun3x_state::dma_addr_r), FUNC(sun3x_state::dma_addr_w));
 +	map(0x66001008, 0x6600100b).rw(FUNC(sun3x_state::dma_count_r), FUNC(sun3x_state::dma_count_w));
- 	map(0x6e000000, 0x6e000007).m(m_fdc, FUNC(n82077aa_device::map));
++	// RD68031: the 3/80 decodes only two of the 82077's registers, as an
++	// 82072 would: +0 the main status (read) and data rate select (write)
++	// registers, +1 the FIFO. SunOS 4.1.1's fd driver uses no others; with
++	// the chip's whole map here instead, it reads SRA for the status, never
++	// sees RQM, and resets the controller recursively until the stack overflows.
++	map(0x6e000000, 0x6e000003).rw(m_fdc, FUNC(n82077aa_device::msr_r), FUNC(n82077aa_device::dsr_w)).umask32(0xff000000);
++	map(0x6e000000, 0x6e000003).rw(m_fdc, FUNC(n82077aa_device::fifo_r), FUNC(n82077aa_device::fifo_w)).umask32(0x00ff0000);
  	map(0x6e000400, 0x6e000403).rw(FUNC(sun3x_state::fdc_control_r), FUNC(sun3x_state::fdc_control_w));
 +	// RD68031: the floppy's interrupt vector register (written, not used:
 +	// every level is autovectored here)
@@ -133,7 +147,7 @@
  	map(0x6f00003c, 0x6f00003f).rw(FUNC(sun3x_state::printer_r), FUNC(sun3x_state::printer_w));
  	map(0xfefe0000, 0xfefeffff).rom().region("user1", 0);
  }
-@@ -354,13 +421,25 @@
+@@ -354,13 +434,25 @@
  		}
  
  		m_bInBusErr = true; // prevent recursion
@@ -161,7 +175,7 @@
  uint32_t sun3x_state::enable_r()
  {
  	return m_enable;
-@@ -417,35 +496,216 @@
+@@ -417,37 +509,218 @@
  //  printf("sun3x: %08x to interrupt control (mask %08x)\n", data, mem_mask);
  	COMBINE_DATA(&m_irqctrl);
  
@@ -372,9 +386,9 @@
 +		m_dma_csr |= DMA_REQ_PEND;
 +		if (m_dma_csr & DMA_EN_DMA)
 +			dma_transfer();
-+	}
-+}
-+
+ 	}
+ }
+ 
 +// ---------------------------------------------------------------------------
 +// RD68031: the bus timeout.
 +
@@ -385,7 +399,7 @@
 +		logerror("bus timeout: read %08x (PC %08x)\n", 0x04000000 + offset * 4, m_maincpu->pc());
 +		m_buserr |= 0x20000000;
 +		bus_error();
- 	}
++	}
 +	return 0xffffffff;
 +}
 +
@@ -394,10 +408,12 @@
 +	logerror("bus timeout: write %08x (PC %08x)\n", 0x04000000 + offset * 4, m_maincpu->pc());
 +	m_buserr |= 0x20000000;
 +	bus_error();
- }
- 
++}
++
  uint32_t sun3x_state::memreg_r()
-@@ -494,24 +754,21 @@
+ {
+ 	return m_memreg;
+@@ -494,24 +767,21 @@
  uint32_t sun3x_state::fpa_r()
  {
  	m_buserr |= 0x04000000;
@@ -425,7 +441,7 @@
  }
  
  TIMER_DEVICE_CALLBACK_MEMBER(sun3x_state::sun380_timer)
-@@ -554,6 +811,11 @@
+@@ -554,6 +824,34 @@
  INPUT_PORTS_END
  
  
@@ -434,13 +450,41 @@
 +	m_rdcpu = dynamic_cast<rd68031_device *>(m_maincpu.target());
 +}
 +
++// RD68031: the processor's RESET line resets the board's I/O devices, as the
++// RESET instruction means it to. The PROM executes one before it boots, and
++// without it the LANCE an earlier kernel started is still running when the
++// next kernel boots; its level 3 interrupts go unserviced until le0 attaches,
++// and the kernel loops reporting them. The serial controllers are left alone:
++// the PROM is printing on ttya as it resets, and what a reset would cut off
++// of that would depend on the processor's timing.
++void sun3x_state::io_reset(int state)
++{
++	if (!state)
++		return;
++	logerror("RESET instruction (PC %08x): I/O devices reset\n", m_maincpu->pc());
++	if (m_lance)
++		m_lance->reset();
++	if (m_esp)
++		m_esp->reset();
++	if (m_fdc)
++	{
++		m_fdc->reset();
++		m_fdc->dor_w(0x0c);
++	}
++}
++
  void sun3x_state::machine_reset()
  {
  	uint8_t* user1 = memregion("user1")->base();
-@@ -570,6 +832,18 @@
+@@ -570,6 +868,23 @@
  	m_memreg = 0;
  	m_memerraddr = 0;
  	m_bInBusErr = false;
++
++	// RD68031: with no digital output register decoded, nothing could take the
++	// 82077 out of the reset its own reset leaves it in (DOR = 0): run it.
++	if (m_fdc)
++		m_fdc->dor_w(0x0c);
 +
 +	// RD68031
 +	m_clk5_pend = false;
@@ -456,7 +500,27 @@
  }
  
  static void sun_floppies(device_slot_interface &device)
-@@ -601,6 +875,7 @@
+@@ -586,14 +901,17 @@
+ {
+ 	device.option_add("cdrom", NSCSI_CDROM);
+ 	device.option_add("harddisk", NSCSI_HARDDISK);
+-	device.option_add("tape", NSCSI_TAPE);
++	// RD68031: the tape answers INQUIRY as an Archive Viper 150 (MAME's
++	// NEWS variant), a QIC drive SunOS 4.1.1's st driver knows; it calls
++	// MAME's own identity an unknown drive and panics probing it.
++	device.option_add("tape", NSCSI_TAPE_NEWS);
+ 	device.set_option_machine_config("cdrom", sun_cdrom);
+ }
+ 
+ void sun3x_state::sun3_80(machine_config &config)
+ {
+ 	/* basic machine hardware */
+-	M68030(config, m_maincpu, 20000000);
++	M68030(config, m_maincpu, 20000000).reset_cb().set(FUNC(sun3x_state::io_reset));
+ 	m_maincpu->set_addrmap(AS_PROGRAM, &sun3x_state::sun3_80_mem);
+ 
+ 	M48T02(config, TIMEKEEPER_TAG);
+@@ -601,6 +919,7 @@
  	SCC8530(config, m_scc1, 4.9152_MHz_XTAL);
  	m_scc1->out_txda_callback().set(KEYBOARD_TAG, FUNC(sun_keyboard_port_device::write_txd));
  	m_scc1->out_txdb_callback().set(MOUSE_TAG, FUNC(sun_mouse_port_device::write_txd));
@@ -464,7 +528,7 @@
  
  	SUNKBD_PORT(config, KEYBOARD_TAG, default_sun_keyboard_devices, "type3hle").rxd_handler().set(m_scc1, FUNC(z80scc_device::rxa_w));
  	SUNMOUSE_PORT(config, MOUSE_TAG, default_sun_mouse_devices, "hle1200").rxd_handler().set(m_scc1, FUNC(z80scc_device::rxb_w));
-@@ -608,6 +883,7 @@
+@@ -608,6 +927,7 @@
  	SCC8530(config, m_scc2, 4.9152_MHz_XTAL);
  	m_scc2->out_txda_callback().set(RS232A_TAG, FUNC(rs232_port_device::write_txd));
  	m_scc2->out_txdb_callback().set(RS232B_TAG, FUNC(rs232_port_device::write_txd));
@@ -472,7 +536,7 @@
  
  	rs232_port_device &rs232a(RS232_PORT(config, RS232A_TAG, default_rs232_devices, nullptr));
  	rs232a.rxd_handler().set(m_scc2, FUNC(z80scc_device::rxa_w));
-@@ -619,6 +895,22 @@
+@@ -619,6 +939,22 @@
  	rs232b.dcd_handler().set(m_scc2, FUNC(z80scc_device::dcdb_w));
  	rs232b.cts_handler().set(m_scc2, FUNC(z80scc_device::ctsb_w));
  
@@ -495,7 +559,7 @@
  	auto &scsi(NSCSI_BUS(config, "scsibus"));
  	NSCSI_CONNECTOR(config, "scsibus:0", scsi_devices, nullptr);
  	NSCSI_CONNECTOR(config, "scsibus:1", scsi_devices, "harddisk");
-@@ -630,12 +922,16 @@
+@@ -630,12 +966,16 @@
  
  	NCR53C90(config, m_esp, 20000000/2);
  	scsi.set_external_device(7, m_esp);
@@ -512,7 +576,7 @@
  
  	screen_device &bwtwo(SCREEN(config, "bwtwo"));
  	bwtwo.set_screen_update(FUNC(sun3x_state::bw2_update));
-@@ -644,6 +940,27 @@
+@@ -644,6 +984,28 @@
  	bwtwo.set_refresh_hz(72);
  }
  
@@ -535,12 +599,13 @@
 +	rd.add_cacheable(0x00000000, 0x03ffffff);
 +	rd.add_cacheable(0x63000000, 0x6301ffff);
 +	rd.add_cacheable(0xfefe0000, 0xfefeffff);
++	rd.reset_cb().set(FUNC(sun3x_state::io_reset));
 +}
 +
  void sun3x_state::sun3_460(machine_config &config)
  {
  	/* basic machine hardware */
-@@ -695,6 +1012,9 @@
+@@ -695,6 +1057,9 @@
  	ROM_LOAD( "timekpr_380.bin", 0x000000, 0x000800, CRC(e76f1aae) SHA1(8e7c36e3928887a94a8133e8416ee4126c31edd7) )
  ROM_END
  
@@ -550,7 +615,7 @@
  ROM_START( sun3_460 )
  	ROM_REGION32_BE( 0x20000, "user1", ROMREGION_ERASEFF )
  /*
-@@ -719,4 +1039,6 @@
+@@ -719,4 +1084,6 @@
  
  //    YEAR  NAME      PARENT  COMPAT  MACHINE   INPUT  CLASS        INIT        COMPANY             FULLNAME             FLAGS
  COMP( 1989, sun3_80,  0,      0,      sun3_80,  sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/80",          MACHINE_NOT_WORKING | MACHINE_NO_SOUND ) // Hydra
@@ -559,7 +624,24 @@
  COMP( 1989, sun3_460, 0,      0,      sun3_460, sun3x, sun3x_state, empty_init, "Sun Microsystems", "Sun 3/460/470/480", MACHINE_NOT_WORKING | MACHINE_NO_SOUND ) // Pegasus
 --- a/src/devices/cpu/m68000/m68kmmu.h
 +++ b/src/devices/cpu/m68000/m68kmmu.h
-@@ -565,9 +565,15 @@
+@@ -537,6 +537,16 @@
+ 		pageshift += indexbits;
+ 	} while(level < limit && !resolved);
+ 
++	// RD68031 (M14 phase B): a search that stops at PTEST's level limit has
++	// still fetched a descriptor at that level, and the MMUSR's I bit reports
++	// it invalid (MC68030 UM §9). SunOS 4.1.1 tells a page fault from a bus
++	// error by PTEST #3, so without this, faulting a page in fails, EFAULT.
++	if (!resolved && type == M68K_MMU_DF_DT_INVALID)
++	{
++		m_mmu_tmp_sr |= M68K_MMU_SR_INVALID;
++		resolved = 1;
++	}
++
+ 	if (!resolved && !ptest)
+ 	{
+ 		// stopping at the level limit is a valid completion for PTEST, but a
+@@ -565,9 +575,15 @@
  
  	m_mmu_last_logical_addr = addr_in;
  

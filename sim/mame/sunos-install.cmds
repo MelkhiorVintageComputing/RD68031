@@ -1,0 +1,42 @@
+# SunOS 4.1.1 installed by hand from its miniroot (M14 phase B), the way
+# sim/mame/netbsd-install.cmds installs NetBSD: suninstall is a full-screen
+# program, so its steps are typed at the miniroot's shell instead. The
+# miniroot is already in sd0b (MUNIX's "install SunOS mini-root"); the tape
+# is sun3arc's tape 1 (sim/mame/mktape.py), whose sets are compressed tar
+# files: 5 root, 6 usr, 7 kvm, 8 install, 9 networking. Root goes to sd0a,
+# /usr to sd0g; sd0b is swap afterwards. The machine is standalone, with no
+# NIS, as suninstall would leave it.
+b sd(0,0,1)
+# The shell discards what is typed before its first prompt.
+\n# *@@
+\n# *@@newfs /dev/rsd0a > /dev/null && echo NEWFS-A-DONE
+\n# *@@newfs /dev/rsd0g > /dev/null && echo NEWFS-G-DONE
+# Single-user, the miniroot's root is read-only: mount and umount do their
+# work but fail to update /etc/mtab, and say so in their exit status.
+\n# *@@mount /dev/sd0a /a; mkdir /a/usr && mount /dev/sd0g /a/usr; mkdir /a/usr/MOUNT-CHECK && echo MOUNT-DONE
+\n# *@@mt -f /dev/nrst0 rew && mt -f /dev/nrst0 fsf 5 && cd /a && dd if=/dev/nrst0 bs=32k | zcat | tar xpf - && echo ROOT-DONE
+\n# *@@mt -f /dev/nrst0 rew && mt -f /dev/nrst0 fsf 6 && cd /a/usr && test -d MOUNT-CHECK && rm -r MOUNT-CHECK && dd if=/dev/nrst0 bs=32k | zcat | tar xpf - && echo USR-DONE
+\n# *@@mt -f /dev/nrst0 rew && mt -f /dev/nrst0 fsf 7 && mkdir -p /a/usr/kvm && cd /a/usr/kvm && dd if=/dev/nrst0 bs=32k | zcat | tar xpf - && echo KVM-DONE
+\n# *@@mt -f /dev/nrst0 rew && mt -f /dev/nrst0 fsf 8 && cd /a/usr && dd if=/dev/nrst0 bs=32k | zcat | tar xpf - && echo INSTALL-DONE
+\n# *@@mt -f /dev/nrst0 rew && mt -f /dev/nrst0 fsf 9 && cd /a/usr && dd if=/dev/nrst0 bs=32k | zcat | tar xpf - && echo NETWORKING-DONE
+\n# *@@mt -f /dev/nrst0 rew; cd /a/dev && ./MAKEDEV std pty0 sd0 st0 > /dev/null && echo MAKEDEV-DONE
+\n# *@@echo '/dev/sd0a / 4.2 rw 1 1' > /a/etc/fstab && echo '/dev/sd0g /usr 4.2 rw 1 2' >> /a/etc/fstab && echo FSTAB-DONE
+\n# *@@echo rd68031 > /a/etc/hostname.le0 && echo '192.168.68.31 rd68031 loghost' >> /a/etc/hosts && rm -rf /a/var/yp && echo HOST-DONE
+# The root set's /sbin is empty: suninstall fills it with what the kernel
+# and rc.boot run before /usr is mounted.
+\n# *@@cp /a/usr/kvm/boot/init /a/usr/kvm/boot/mount /a/usr/kvm/boot/intr /a/usr/kvm/boot/ifconfig /a/usr/kvm/stand/sh /a/usr/bin/hostname /a/sbin && echo SBIN-DONE
+\n# *@@cp /a/usr/kvm/stand/vmunix /a/vmunix && cp /a/usr/kvm/stand/boot.sun3x /a/boot && /usr/mdec/installboot -v /a/boot /usr/mdec/bootsd /dev/rsd0a && echo BOOT-DONE
+\n# *@@cd / && sync; umount /a/usr; umount /a; fsck -p /dev/rsd0a /dev/rsd0g && echo ALL-DONE
+# The miniroot has no halt; reboot syncs, and the PROM, finding nothing at
+# its EEPROM's boot device, comes back to its prompt.
+\n# *@@/etc/reboot
+# umount found nothing in the read-only /etc/mtab, so both file systems were
+# still mounted when the miniroot rebooted. The first single-user boots of the
+# installed system salvage their summaries, rebooting when fsck had to repair
+# / (to the monitor, the EEPROM's boot device being nowhere): boot again until
+# the shell comes.
+b sd(0,0,0) -s
+?\n> *@@b sd(0,0,0) -s
+\n# *@@
+\n# *@@uname -a
+\n# *@@/etc/halt

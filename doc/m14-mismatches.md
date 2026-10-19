@@ -101,3 +101,39 @@ fault frame whose write was re-run, the core acknowledged level 0 and took vecto
 (`doc/bugs-found.md`, "RTE resumed an interrupt entry with the level the pins then
 said"). Single-user boots before the fix happened to miss the race.
 
+
+## SunOS 4.1.1 (phase B)
+
+`make sunos-sun3x`: the disk `make sunos-disk` installs from sun3arc's tape 1 on the
+m68030, booted to multi-user, root logged in, `sim/mame/sunos-boot.cmds` typed; each
+command's answer compared.
+
+| Run | Login | Total | Answers |
+|---|---|---|---|
+| m68030 | 47 s wall | 281 emulated s, 52 s wall | (reference) |
+| core + RD68884, before the fix below | -- | double bus fault at 108 emulated s, in fsck at boot | none reached |
+| core + RD68884 | 9,239 s wall | 264 emulated s, 9,674 s wall | **7 of 7 identical** |
+
+The double bus fault was a core defect: RTE re-ran a user stack write whose page was
+still invalid (SunOS's `grow` only extends the segment; the second fault maps the page),
+the MMU refused the rerun again and the bus error was taken, but the rerun stayed pending
+and was taken a second time by the bus error's own frame write, which faulted inside the
+exception processing. UM 8.2.3 makes it an ordinary bus error (`doc/bugs-found.md`;
+`sim/programs/mmu_rerun.S` holds it). Both runs boot past two salvaging fscks (below) first,
+so the totals count three boots each.
+
+| | Observed | Manual | Handling |
+|---|---|---|---|
+| m14-b3 | **PTEST at a level limit.** MUNIX, then the miniroot, failed to start /sbin/init with EFAULT ("Can't invoke /sbin/init, error 14", `panic: icode`) on the m68030; on the core, the same tape reached MUNIX's menu. The kernel's segmap page-in faulted on $FF90A000 (a long read in `bcopy`); its bus error handler ran `PTESTR #5,(A0),#3` on the fault address and found MMUSR without I, B, L, S or W, so took the fault for a hardware bus error and failed the copy. MAME's own debugger translated $FF90A000 to nothing: the level-3 descriptor was invalid. MAME's table search counted the level-3 fetch and stopped at PTEST's limit before looking at what it had fetched. | UM 9 (MMUSR): I is set "if the DT field of a table or a page descriptor encountered during the search is set to invalid". | An oracle defect: the core is right. **Fixed in the reference** (`sim/mame/sun3x.patch`, `m68kmmu.h`: a search stopping at the limit on an invalid descriptor sets I). |
+| m14-b4 | **The fault address of a bus error the driver signals.** In every bus fault frame the kernel's probes (`peek`) take on the m68030, the data fault address is 0. | UM 8.2, 8.4: the data cycle fault address is that of the access that faulted. | An oracle quirk. SunOS's probes do not look at the address; not fixed. |
+
+The machine model's gaps SunOS found -- the floppy controller's two registers, the 3/470
+clock page, the RESET line -- are the driver's, not either processor's: both met each of
+them the same way (`doc/oracles.md`, "SunOS 4.1.1").
+
+**fsck after a halt.** Each boot after a halt, SunOS's fsck reports `SUMMARY INFORMATION
+BAD (SALVAGED)` for / or /usr and reboots, on the core as on the m68030: the same halted
+disk booted single-user on each gives the same report, where NetBSD's `fsck_ffs` finds both
+file systems clean and the cylinder groups' counts, bitmaps, fragment summaries and
+rotational tables agree with each other. It is the software on this machine model, not a
+processor; the boot command set boots again until the login prompt comes.

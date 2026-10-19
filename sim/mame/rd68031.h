@@ -13,6 +13,8 @@
 //   of level 7 is held on the pins for a few clocks so that the core sees the
 //   new edge (UM 8.1.9). bus_error() ends the bus cycle in flight with BERR:
 //   a driver calls it from a read or write handler.
+// - reset_cb() follows the RESET pin, which the RESET instruction asserts
+//   for 512 clocks (UM 7.8), as MAME's 68000 family's reset_cb() does.
 // - Time: one MAME cycle is one clock of the core.
 //
 // Copied into MAME's tree by sim/mame/build.sh, beside the sun3x driver.
@@ -41,6 +43,8 @@ public:
 	void add_cacheable(offs_t start, offs_t end) { m_cacheable.emplace_back(start, end); }
 	// Wait states on every bus cycle.
 	void set_waits(int w) { m_waits = w; }
+	// The RESET pin as the RESET instruction drives it: 1 while asserted.
+	auto reset_cb() { return m_reset_cb.bind(); }
 
 protected:
 	virtual void device_start() override ATTR_COLD;
@@ -65,6 +69,7 @@ private:
 	virtual void write(uint32_t addr, int fc, uint32_t data, uint32_t mask, bool *berr) override;
 	virtual int iack(int level) override;
 	virtual bool cacheable(uint32_t addr) override;
+	virtual void reset_out(bool asserted) override { m_reset_cb(asserted ? 1 : 0); }
 
 	void cpu_space_map(address_map &map) ATTR_COLD;
 	void present_ipl();
@@ -80,6 +85,7 @@ private:
 
 	std::vector<std::pair<offs_t, offs_t>> m_cacheable;
 	int m_waits = 0;
+	devcb_write_line m_reset_cb;
 	bool m_berr = false;
 	u8 m_lines = 0;          // input lines 1-7 asserted, bit n for line n
 	int m_ipl7_low = 0;      // clocks left that level 7 is held off the pins
