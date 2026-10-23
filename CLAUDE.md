@@ -149,6 +149,8 @@ make audit    # prove no register initialises outside reset
 make ucode    # regenerate the microcode ROMs from tools/ucode/
 make sim      # directed testbenches (iverilog)
 make cpif     # the coprocessor interface against a scripted coprocessor (part of sim)
+make fpu-mmu  # the core with RD68884: FPU memory operands faulting in the MMU, and two
+              # tasks sharing the FPU under a scheduler (not in check)
 make sim COPROCESSOR=1   # every core testbench with the coprocessor interface built
 make check    # the gate: ucode-check, lint, audit, sim, AC timing
 ```

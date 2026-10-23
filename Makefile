@@ -60,6 +60,7 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_ICACHE_ENTRIES=$(ICACHE_ENTRIES) \
            -DTB_DCACHE_ENTRIES=$(DCACHE_ENTRIES)
 
 .PHONY: netbsd-disk netbsd-sun3x netbsd-sun3x-m68030 sunos-disk sunos-sun3x sunos-sun3x-m68030 sim-progs
+.PHONY: fpu-mmu
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl paths audit ucode ucode-check sim sim-bus \
         timing timing-verbose timing-build ea cache cycles cpif check clean \
@@ -81,6 +82,8 @@ help:
 	@echo "  make sim-bus     ... just the bus-level ones"
 	@echo "  make paging      ... just the bus-fault and demand-paging ones"
 	@echo "  make cpif        ... just the coprocessor interface, against a scripted coprocessor"
+	@echo "  make fpu-mmu     the core with RD68884: FPU memory operands faulting in the MMU, and"
+	@echo "                   two tasks sharing the FPU under a scheduler (not in check)"
 	@echo "  make timing      AC-specification feasibility, all five MC68030EC grades"
 	@echo
 	@echo "The oracles, minutes each:"
@@ -335,6 +338,43 @@ sim: dirs $(COW).hex $(COWMMU).hex $(M030).hex $(CACHEP).hex $(MMUHEX) sim-progs
 # sim/models/rd68031_cpmodel.sv -- doc/coprocessor.md. Part of `sim` as well.
 cpif: dirs
 	@$(MAKE) --no-print-directory sim TBS=core_cpif_tb
+
+# The core with RD68884 as its MC68881 (sim/mame/rd68031_fpu.sv, as MAME's
+# Sun-3/80 has them), coprocessor memory operands faulting in the MMU:
+# sim/programs/fpu_mmu.S, a fault on each long word of FETOX/FLOGN/FMOD.D reads
+# and FMOVE.D stores, the FPU's context switched in the handler; and
+# fpu_sched.S, two user tasks calling libm-style exp/log/fmod under a timer-
+# driven scheduler whose ticks write-protect or invalidate their stacks.
+# Each checks every result against the unfaulted one. Four light simulations,
+# in parallel; not in `check`: it needs Inputs/ip/RD68884.
+FPUDIR := Inputs/ip/RD68884/rtl
+FPURTL  = $(FPUDIR)/rd68884_pkg.sv $(wildcard $(FPUDIR)/gen/*_pkg.sv) \
+          $(filter-out %_pkg.sv,$(wildcard $(FPUDIR)/gen/*.sv)) \
+          $(addprefix $(FPUDIR)/rd68884_,$(addsuffix .sv,sync cu_decode biu regfile seq top))
+build/programs/fpu_%.hex: sim/programs/fpu_%.S sim/programs/mmu_common.inc sim/programs/mmu.ld
+	@mkdir -p build/programs
+	@$(CROSS)gcc -mcpu=68030 -m68881 -Isim/programs -c -o build/programs/fpu_$*.o $<
+	@$(CROSS)gcc -nostdlib -nostartfiles -T sim/programs/mmu.ld \
+	    -o build/programs/fpu_$*.elf build/programs/fpu_$*.o \
+	    2> build/programs/fpu_$*.link.log || { cat build/programs/fpu_$*.link.log; exit 1; }
+	@$(CROSS)objcopy -O verilog --verilog-data-width=1 build/programs/fpu_$*.elf $@
+
+fpu-mmu: dirs build/programs/fpu_mmu.hex build/programs/fpu_sched.hex
+	@test -f $(FPUDIR)/rd68884_top.sv || { echo "FAIL: Inputs/ip/RD68884 is missing"; exit 1; }
+	@iverilog $(IVFLAGS) -o $(BUILD)/core_fpu_mmu_tb.vvp -s core_fpu_mmu_tb \
+	    $(RTL) $(FPURTL) sim/mame/rd68031_fpu.sv sim/models/rd68031_slave.sv \
+	    sim/tb/core_fpu_mmu_tb.sv > $(BUILD)/core_fpu_mmu_tb.build.log 2>&1 \
+	    || { grep -v $(NOTES) $(BUILD)/core_fpu_mmu_tb.build.log; exit 1; }
+	@T=$(BUILD)/core_fpu_mmu_tb; S="+image=build/programs/fpu_sched.hex +timer +limit=12000000"; \
+	vvp $$T.vvp > $$T-mmu.log 2>&1 & \
+	vvp $$T.vvp +cacr=3111 +waits=2 > $$T-mmu-c.log 2>&1 & \
+	vvp $$T.vvp $$S +tbase=800 +tmask=FFF +waits=1 > $$T-sched.log 2>&1 & \
+	vvp $$T.vvp $$S +tbase=400 +tmask=1FFF +seed=5A5A +cacr=3111 > $$T-sched-c.log 2>&1 & \
+	wait; ok=1; for r in mmu mmu-c sched sched-c; do \
+	  if grep -q '^PASS' $$T-$$r.log; then echo "  $$r: $$(grep -h '^PASS' $$T-$$r.log)"; \
+	  else echo "FAIL: fpu-mmu $$r ($$T-$$r.log)"; grep -E '^  FAIL' $$T-$$r.log | head; ok=0; fi; \
+	  grep -h 'interrupts\|frames' $$T-$$r.log | sed 's/^core_fpu_mmu_tb:/    /'; \
+	done; test $$ok -eq 1 && echo "PASS: fpu-mmu"
 
 sim-bus: dirs
 	@$(MAKE) --no-print-directory sim TBS="$(filter bus_%,$(TBS))"
