@@ -343,9 +343,10 @@ cpif: dirs
 # Sun-3/80 has them), coprocessor memory operands faulting in the MMU:
 # sim/programs/fpu_mmu.S, a fault on each long word of FETOX/FLOGN/FMOD.D reads
 # and FMOVE.D stores, the FPU's context switched in the handler; and
-# fpu_sched.S, two user tasks calling libm-style exp/log/fmod under a timer-
-# driven scheduler whose ticks write-protect or invalidate their stacks.
-# Each checks every result against the unfaulted one. Four light simulations,
+# fpu_sched.S, two user tasks calling libm-style exp/log/fmod, each with an
+# FBcc range check, under a timer-driven scheduler whose ticks write-protect or
+# invalidate their stacks. Each checks every result against the unfaulted one,
+# and every branch (RD68884 7ec30da: an FSAVE dropped an FBcc's answer). Four light simulations,
 # in parallel; not in `check`: it needs Inputs/ip/RD68884.
 FPUDIR := Inputs/ip/RD68884/rtl
 FPURTL  = $(FPUDIR)/rd68884_pkg.sv $(wildcard $(FPUDIR)/gen/*_pkg.sv) \

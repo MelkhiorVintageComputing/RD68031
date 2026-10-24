@@ -51,7 +51,7 @@
         .equ    UDATA,  0x01000200      | +0 x for exp, +8 x for log, +16 y and
         .equ    PDATA,  0xC200          | +24 x for fmod; +32, +40, +48 the results
         .equ    UCNT,   0x01000300      | task t at +$40*t: iterations, errors,
-        .equ    PCNT,   0xC300          | the first wrong result (2 longs)
+        .equ    PCNT,   0xC300          | the first wrong result (2 longs), FBccs wrong
         .equ    DESC4,  tfb + 4*4       | the stacks' descriptors, B[4]-B[7]
 
         .text
@@ -231,6 +231,8 @@ report:
         CHECK   0x44(%a0), 0            | task 1's
         CHECK   0x48(%a0), 0
         CHECK   0x4C(%a0), 0
+        CHECK   0x10(%a0), 0            | task 0's FBccs answered wrongly
+        CHECK   0x50(%a0), 0            | task 1's
         tst.l   (%a0)
         sne     %d3
         CHECK   %d3, 0xFF               | task 0 went round
@@ -296,20 +298,30 @@ bad:    addq.l  #1, 4(%a5)
         move.l  %d1, 12(%a5)
 1:      rts
 
-| libm's, as NetBSD/m68k builds them: the result in D0/D1 through the stack.
+| libm's, as NetBSD/m68k builds them: the result in D0/D1 through the stack,
+| and an FBcc on it, as libm's range checks have: issued while the FPU still
+| computes, its answer must survive an FSAVE/FRESTORE taken in the meantime
+| (RD68884 7ec30da: an FSAVE dropped it, and NetBSD's libm branched the wrong
+| way). A branch not taken is counted at +16 of the task's counters.
 uexp:   fetox.d 4(%sp), %fp0
-        fmove.d %fp0, -(%sp)
+        fbogt   1f                      | libm's range check: exp > 0, taken
+        addq.l  #1, 16(%a5)
+1:      fmove.d %fp0, -(%sp)
         move.l  (%sp)+, %d0
         move.l  (%sp)+, %d1
         rts
 ulog:   flogn.d 4(%sp), %fp0
-        fmove.d %fp0, -(%sp)
+        fbogt   1f                      | log(3.33) > 0, taken
+        addq.l  #1, 16(%a5)
+1:      fmove.d %fp0, -(%sp)
         move.l  (%sp)+, %d0
         move.l  (%sp)+, %d1
         rts
 umod:   fmove.d 4(%sp), %fp0
         fmod.d  12(%sp), %fp0
-        fmove.d %fp0, -(%sp)
+        fbogt   1f                      | the remainder > 0, taken
+        addq.l  #1, 16(%a5)
+1:      fmove.d %fp0, -(%sp)
         move.l  (%sp)+, %d0
         move.l  (%sp)+, %d1
         rts
